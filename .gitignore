@@ -1,0 +1,36 @@
+# Environment variables (NEVER commit these!)
+.env
+*.env
+.env.*
+
+# Node modules
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Database files
+*.db
+*.sqlite
+trades.json
+data/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dist/
+build/
