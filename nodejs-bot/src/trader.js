@@ -1,10 +1,11 @@
 /**
  * Trader Engine
  * =============
- * Orchestrates trading operations
+ * Orchestrates trading operations with Advanced Analysis
  */
 
 const chalk = require('chalk');
+const AdvancedAnalysis = require('./advancedAnalysis');
 
 class Trader {
     constructor(exchange, strategy, riskManager, db, config) {
@@ -17,6 +18,16 @@ class Trader {
         this.openPositions = [];
         this.symbolInfo = {};
         this.existingHoldings = []; // Track holdings we found on Binance
+        
+        // Advanced Analysis Module (Order Book, Multi-TF, Support/Resistance)
+        this.advancedAnalysis = new AdvancedAnalysis(exchange);
+        this.useAdvancedAnalysis = config.useAdvancedAnalysis !== false; // ON by default
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // PORTFOLIO FLOOR PROTECTION - Never go below this value!
+        // ═══════════════════════════════════════════════════════════════════
+        this.portfolioFloor = config.portfolioFloor || 327; // ~$50 NZD below start
+        this.floorProtectionActive = false;
         
         // ════════════════════════════════════════════════════════════════════
         // SMARTER THRESHOLDS - Be selective on entries, patient on exits!
@@ -36,6 +47,9 @@ class Trader {
         this.trailingStopEnabled = config.trailingStopEnabled !== false;
         this.trailingStopActivation = config.trailingStopActivation || 1.5; // Activate after 1.5% gain
         this.trailingStopCallback = config.trailingStopCallback || 0.8;   // 0.8% trailing distance
+        
+        // Market sentiment tracking for smart profit-taking
+        this.marketSentiment = 'neutral'; // bullish, neutral, bearish
     }
     
     /**
@@ -130,6 +144,34 @@ class Trader {
     }
     
     /**
+     * Check portfolio floor protection
+     */
+    async checkFloorProtection() {
+        try {
+            const portfolio = await this.exchange.getTotalBalanceUSDT();
+            const totalValue = portfolio.totalUSDT;
+            
+            if (totalValue < this.portfolioFloor) {
+                if (!this.floorProtectionActive) {
+                    console.log(chalk.red.bold(`\n   🛑 FLOOR PROTECTION ACTIVATED!`));
+                    console.log(chalk.red(`   Portfolio: $${totalValue.toFixed(2)} < Floor: $${this.portfolioFloor}`));
+                    console.log(chalk.red(`   All new BUY orders BLOCKED until portfolio recovers\n`));
+                    this.floorProtectionActive = true;
+                }
+                return true; // Floor breached
+            } else {
+                if (this.floorProtectionActive) {
+                    console.log(chalk.green(`\n   ✅ Floor protection deactivated - Portfolio recovered to $${totalValue.toFixed(2)}\n`));
+                }
+                this.floorProtectionActive = false;
+                return false; // OK
+            }
+        } catch (error) {
+            return false; // On error, allow trading
+        }
+    }
+    
+    /**
      * Execute a full trading cycle
      */
     async executeTradingCycle() {
@@ -138,6 +180,9 @@ class Trader {
             trades: [],
             errors: []
         };
+        
+        // CHECK FLOOR PROTECTION FIRST
+        await this.checkFloorProtection();
         
         // Load symbol info if not loaded
         if (Object.keys(this.symbolInfo).length === 0) {
@@ -202,7 +247,19 @@ class Trader {
                     const hasHeldLongEnough = holdTime >= this.minHoldTime;
                     const isVeryStrongSignal = signal.strength >= 0.85; // Emergency exit signal
                     
-                    if (isInProfit) {
+                    // Check Support/Resistance for sell decision
+                    let nearResistance = false;
+                    if (this.useAdvancedAnalysis && isInProfit) {
+                        try {
+                            const sr = await this.advancedAnalysis.detectSupportResistance(symbol);
+                            nearResistance = sr.nearResistance;
+                            if (nearResistance && pnlPercent > 0.5) {
+                                console.log(chalk.yellow(`   📊 Near resistance level - good time to take profit!`));
+                            }
+                        } catch (e) {}
+                    }
+                    
+                    if (isInProfit || (isInProfit && nearResistance)) {
                         // Take profit on bearish signal
                         console.log(chalk.green(`\n   💰 SIGNAL SELL (IN PROFIT) ${symbol}: +${pnlPercent.toFixed(2)}% after ${holdMinutes}min`));
                         const trade = await this.executeSell(existingPosition, 'SIGNAL_PROFIT');
@@ -221,12 +278,67 @@ class Trader {
                     }
                 }
                 
-                // Execute BUY if signal is strong enough and we don't hold it
+                // ════════════════════════════════════════════════════════════════════
+                // ADVANCED BUY LOGIC with Order Book, Multi-TF, Support/Resistance
+                // ════════════════════════════════════════════════════════════════════
                 if (signal.action === 'BUY' && signal.strength >= this.buySignalThreshold && !existingPosition) {
-                    console.log(chalk.cyan(`\n   📈 BUY signal for ${symbol} (strength: ${signal.strength.toFixed(2)} >= ${this.buySignalThreshold})`));
-                    const trade = await this.executeBuy(symbol, signal);
-                    if (trade) {
-                        results.trades.push(trade);
+                    
+                    // BLOCK BUYS if floor protection is active
+                    if (this.floorProtectionActive) {
+                        console.log(chalk.red(`   🛑 BUY BLOCKED [${symbol}] - Floor protection active`));
+                        continue;
+                    }
+                    
+                    // Use Advanced Analysis if enabled
+                    let buyConfirmed = true;
+                    let advancedReasons = [];
+                    
+                    if (this.useAdvancedAnalysis) {
+                        try {
+                            const advanced = await this.advancedAnalysis.getAdvancedSignal(symbol, this.strategy);
+                            
+                            // Check for blockers
+                            if (advanced.analysis.orderBook.hasWall) {
+                                buyConfirmed = false;
+                                advancedReasons.push('❌ Sell wall detected - blocked');
+                            }
+                            
+                            // Check multi-timeframe alignment
+                            if (advanced.analysis.multiTimeframe.signal === 'bearish') {
+                                buyConfirmed = false;
+                                advancedReasons.push('❌ Higher timeframes bearish');
+                            }
+                            
+                            // Boost if near support
+                            if (advanced.analysis.supportResistance.nearSupport) {
+                                advancedReasons.push('✅ Near support - good entry');
+                            }
+                            
+                            // Boost if all timeframes aligned bullish
+                            if (advanced.analysis.multiTimeframe.aligned && advanced.analysis.multiTimeframe.signal === 'bullish') {
+                                advancedReasons.push('✅ All timeframes bullish');
+                            }
+                            
+                            // Log advanced analysis
+                            if (advancedReasons.length > 0) {
+                                console.log(chalk.blue(`   🔬 Advanced Analysis for ${symbol}:`));
+                                advancedReasons.forEach(r => console.log(chalk.blue(`      ${r}`)));
+                            }
+                            
+                        } catch (error) {
+                            // On error, proceed with basic signal
+                            console.log(chalk.gray(`   ⚠️ Advanced analysis unavailable, using basic signal`));
+                        }
+                    }
+                    
+                    if (buyConfirmed) {
+                        console.log(chalk.cyan(`\n   📈 BUY signal for ${symbol} (strength: ${signal.strength.toFixed(2)} >= ${this.buySignalThreshold})`));
+                        const trade = await this.executeBuy(symbol, signal);
+                        if (trade) {
+                            results.trades.push(trade);
+                        }
+                    } else {
+                        console.log(chalk.yellow(`   ⚠️ BUY signal for ${symbol} REJECTED by advanced analysis`));
                     }
                 }
                 
@@ -320,8 +432,14 @@ class Trader {
             const pnl = (order.price - position.entryPrice) * position.amount;
             const pnlPercent = ((order.price - position.entryPrice) / position.entryPrice) * 100;
             
-            // Record with risk manager
+            // Calculate price move for market sentiment
+            const priceMove = ((order.price - position.entryPrice) / position.entryPrice) * 100;
+            
+            // Record with risk manager and update market sentiment
             this.riskManager.recordTrade(pnl);
+            if (this.riskManager.updateMarketSentiment) {
+                this.riskManager.updateMarketSentiment(pnl, priceMove);
+            }
             
             // Remove from open positions
             const idx = this.openPositions.findIndex(p => 
@@ -345,11 +463,16 @@ class Trader {
                 closeReason: reason
             });
             
+            // Show market sentiment
+            const bullish = this.riskManager.isMarketBullish ? this.riskManager.isMarketBullish() : false;
+            const marketIndicator = bullish ? chalk.green('📈 BULLISH') : chalk.yellow('📉 NEUTRAL/BEARISH');
+            
             const pnlColor = pnl >= 0 ? chalk.green : chalk.red;
             console.log(pnlColor(
                 `\n   📤 SELL ${order.amount.toFixed(6)} ${position.symbol} @ $${order.price.toFixed(2)} ` +
                 `(${reason}) | P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)`
             ));
+            console.log(chalk.gray(`      Market: ${marketIndicator}`));
             
             return { ...order, pnl, pnlPercent, reason };
             
@@ -380,16 +503,28 @@ class Trader {
                 const positionAge = Date.now() - position.timestamp;
                 
                 // ════════════════════════════════════════════════════════════════
-                // QUICK PROFIT TAKING - Small gains add up!
+                // 🧠 SMART PROFIT TAKING - Small gains add up!
                 // ════════════════════════════════════════════════════════════════
-                if (this.riskManager.shouldTakeQuickProfit(position.pnlPercent, positionAge)) {
-                    const profitUSD = position.pnl;
+                const smartCheck = this.checkSmartProfitTaking(position);
+                
+                if (smartCheck.shouldSell) {
                     console.log(chalk.green(
-                        `\n   💰 QUICK PROFIT for ${position.symbol} ` +
-                        `(+$${profitUSD.toFixed(2)} USD after ${Math.round(positionAge / 60000)}min)`
+                        `\n   ${smartCheck.reason} for ${position.symbol} ` +
+                        `(held ${Math.round(positionAge / 60000)}min)`
                     ));
-                    await this.executeSell(position, 'QUICK_PROFIT');
+                    await this.executeSell(position, smartCheck.reason);
                     continue;
+                }
+                
+                // Set tight trailing stop if suggested by smart check
+                if (smartCheck.setTrailingStop && !position.trailingStopActive) {
+                    position.trailingStopActive = true;
+                    position.highestPrice = currentPrice;
+                    position.trailingStopPrice = currentPrice * (1 - (smartCheck.trailPercent || 0.4) / 100);
+                    console.log(chalk.cyan(
+                        `   🔒 SMART TRAILING STOP for ${position.symbol} ` +
+                        `(bullish market, +${position.pnlPercent.toFixed(2)}%)`
+                    ));
                 }
                 
                 // ════════════════════════════════════════════════════════════════
@@ -489,6 +624,76 @@ class Trader {
             } catch (error) {
                 console.error(chalk.red(`   Error checking position ${position.symbol}: ${error.message}`));
             }
+        }
+    }
+    
+    /**
+     * 🧠 SMART PROFIT-TAKING LOGIC 🧠
+     * Based on profit level, time held, and market conditions
+     * STRICT RULE: NEVER SELL AT A LOSS (except emergency stop-loss at -8%)
+     */
+    checkSmartProfitTaking(position) {
+        const profitUSD = position.pnl;
+        const profitPercent = position.pnlPercent;
+        const minutesHeld = (Date.now() - position.timestamp) / 60000;
+        const isBullish = this.marketSentiment === 'bullish';
+        
+        // ═══════════════════════════════════════════════════════════════
+        // CRITICAL: Never sell if not in profit (except emergency)
+        // ═══════════════════════════════════════════════════════════════
+        if (profitUSD <= 0) {
+            // Only emergency stop-loss at -8%
+            if (profitPercent <= -8) {
+                return { shouldSell: true, reason: `EMERGENCY_STOP (-${Math.abs(profitPercent).toFixed(1)}%)` };
+            }
+            return { shouldSell: false, reason: 'Waiting for profit' };
+        }
+        
+        // ═══════════════════════════════════════════════════════════════
+        // PROFIT-TAKING RULES (only when profitUSD > 0)
+        // ═══════════════════════════════════════════════════════════════
+        
+        // $1.00+ profit - take it immediately!
+        if (profitUSD >= 1.00) {
+            return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} (>$1 rule)` };
+        }
+        
+        // $0.50+ profit after 3 minutes
+        if (profitUSD >= 0.50 && minutesHeld >= 3) {
+            return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(0)}min` };
+        }
+        
+        // $0.10+ profit after 2 minutes (unless bullish - then trail)
+        if (profitUSD >= 0.10 && minutesHeld >= 2 && !isBullish) {
+            return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} (not bullish)` };
+        }
+        
+        // Any profit > $0.02 after 15 minutes
+        if (profitUSD > 0.02 && minutesHeld >= 15) {
+            return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(0)}min hold` };
+        }
+        
+        // In bullish market with decent profit - trail tightly instead of selling
+        if (isBullish && profitPercent >= 0.8) {
+            return { shouldSell: false, setTrailingStop: true, trailPercent: 0.4 };
+        }
+        
+        return { shouldSell: false, reason: 'Holding for more profit' };
+    }
+    
+    /**
+     * Update market sentiment based on recent price action
+     */
+    updateMarketSentiment(priceChanges) {
+        const bullishCount = priceChanges.filter(p => p > 0.2).length;
+        const bearishCount = priceChanges.filter(p => p < -0.2).length;
+        
+        if (bullishCount >= priceChanges.length * 0.6) {
+            this.marketSentiment = 'bullish';
+        } else if (bearishCount >= priceChanges.length * 0.6) {
+            this.marketSentiment = 'bearish';
+        } else {
+            this.marketSentiment = 'neutral';
         }
     }
     

@@ -510,23 +510,94 @@ class RiskManager {
     }
     
     /**
-     * Check if we should take a quick profit on current position
-     * Returns true if we should take profit even at smaller gain
+     * Track market sentiment (bullish/bearish) based on recent trades
      */
-    shouldTakeQuickProfit(currentProfitPercent, positionAge) {
-        // If we have a small profit and position is getting old (>30 mins)
-        if (currentProfitPercent > 0.5 && positionAge > 30 * 60 * 1000) {
+    updateMarketSentiment(pnl, priceMove) {
+        if (!this.recentTrades) this.recentTrades = [];
+        this.recentTrades.push({ pnl, priceMove, timestamp: Date.now() });
+        
+        // Keep last 10 trades / 30 min of data
+        const cutoff = Date.now() - 30 * 60 * 1000;
+        this.recentTrades = this.recentTrades.filter(t => t.timestamp > cutoff).slice(-10);
+    }
+    
+    /**
+     * Check if market appears bullish (prices generally going up)
+     */
+    isMarketBullish() {
+        if (!this.recentTrades || this.recentTrades.length < 3) return false;
+        
+        // Count winning trades
+        const wins = this.recentTrades.filter(t => t.pnl > 0).length;
+        const winRate = wins / this.recentTrades.length;
+        
+        // Bullish if >60% wins recently
+        return winRate > 0.6;
+    }
+    
+    /**
+     * Check if we should take a quick profit on current position
+     * SMART: Takes small profits quickly OR trails in bullish markets
+     */
+    shouldTakeQuickProfit(currentProfitPercent, positionAge, currentPrice = null, highestPrice = null) {
+        const ageMinutes = positionAge / 60000;
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // TIER 1: Very small profits held long enough
+        // ═══════════════════════════════════════════════════════════════════
+        
+        // If profit > $0.10 (0.03%) and held > 2 minutes, consider taking it
+        if (currentProfitPercent >= 0.03 && ageMinutes >= 2) {
+            // Check if we're in a bullish market - if so, let it ride with trailing
+            if (this.isMarketBullish() && currentProfitPercent < 1.5) {
+                // Don't quick-exit in bullish markets unless trailing stop would lock in profit
+                return false;
+            }
+            
+            // Take the small profit
+            if (currentProfitPercent >= 0.15) {
+                return true; // ~$0.20+ profit
+            }
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // TIER 2: Decent profits at any age
+        // ═══════════════════════════════════════════════════════════════════
+        
+        // Take 0.4%+ profit after 3+ minutes
+        if (currentProfitPercent >= 0.4 && ageMinutes >= 3) {
+            return true; // ~$0.50+ profit
+        }
+        
+        // Take 0.8%+ profit immediately (good trade!)
+        if (currentProfitPercent >= 0.8) {
+            return true; // ~$1+ profit
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // TIER 3: Old positions with any profit
+        // ═══════════════════════════════════════════════════════════════════
+        
+        // Position older than 15 min with ANY profit > 0.1%
+        if (ageMinutes > 15 && currentProfitPercent > 0.1) {
             return true;
         }
         
-        // If in conservative mode, take profit at 0.5% or more
-        if (this.conservativeMode && currentProfitPercent >= 0.5) {
+        // Position older than 30 min - take whatever profit we have
+        if (ageMinutes > 30 && currentProfitPercent > 0) {
             return true;
         }
         
-        // If we hit max goal, take any profit
-        if (this.dailyPnL >= this.dailyProfitGoalMaxUSD && currentProfitPercent > 0) {
-            return true;
+        // ═══════════════════════════════════════════════════════════════════
+        // TIER 4: Conservative mode adjustments
+        // ═══════════════════════════════════════════════════════════════════
+        
+        if (this.conservativeMode && currentProfitPercent >= 0.3) {
+            return true; // Lower threshold when we've already hit daily goal
+        }
+        
+        if (this.dailyPnL >= this.dailyProfitGoalMaxUSD && currentProfitPercent > 0.05) {
+            return true; // Hit max goal, take any profit
         }
         
         return false;

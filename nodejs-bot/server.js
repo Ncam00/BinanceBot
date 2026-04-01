@@ -28,6 +28,16 @@ const CONFIG = {
     tradingPairs: (process.env.TRADING_PAIRS || 'BTCUSDT,ETHUSDT,SOLUSDT').split(','),
     candleInterval: process.env.CANDLE_INTERVAL || '3m',
     
+    // ═══════════════════════════════════════════════════════════════
+    // PORTFOLIO FLOOR PROTECTION - CRITICAL SAFETY!
+    // ═══════════════════════════════════════════════════════════════
+    portfolioFloor: parseFloat(process.env.PORTFOLIO_FLOOR) || 327, // ~$50 NZD below start
+    
+    // ═══════════════════════════════════════════════════════════════
+    // ADVANCED ANALYSIS (Order Book, Multi-TF, Support/Resistance)
+    // ═══════════════════════════════════════════════════════════════
+    useAdvancedAnalysis: process.env.USE_ADVANCED_ANALYSIS !== 'false', // ON by default
+    
     // Risk settings
     maxPositionSizePercent: parseFloat(process.env.MAX_POSITION_SIZE_PERCENT) || 15,
     maxConcurrentPositions: parseInt(process.env.MAX_CONCURRENT_POSITIONS) || 5,
