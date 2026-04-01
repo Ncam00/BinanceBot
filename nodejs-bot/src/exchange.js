@@ -26,6 +26,41 @@ class Exchange {
         this.priceCache = {};
         this.lastPriceFetch = 0;
     }
+
+    /**
+     * Fetch order book (for advancedAnalysis compatibility)
+     */
+    async fetchOrderBook(symbol, limit = 20) {
+        try {
+            const book = await this.client.book({ symbol, limit });
+            return {
+                bids: book.bids.map(b => [parseFloat(b.price), parseFloat(b.quantity)]),
+                asks: book.asks.map(a => [parseFloat(a.price), parseFloat(a.quantity)])
+            };
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    /**
+     * Fetch OHLCV candles (for advancedAnalysis compatibility)
+     */
+    async fetchOHLCV(symbol, interval = '1h', params = {}, limit = 50) {
+        try {
+            const candles = await this.client.candles({ symbol, interval, limit });
+            // Return as arrays [timestamp, open, high, low, close, volume] for compatibility
+            return candles.map(c => ([
+                c.openTime,
+                parseFloat(c.open),
+                parseFloat(c.high),
+                parseFloat(c.low),
+                parseFloat(c.close),
+                parseFloat(c.volume)
+            ]));
+        } catch (error) {
+            throw error;
+        }
+    }
     
     /**
      * Test API connection

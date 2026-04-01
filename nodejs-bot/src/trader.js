@@ -2,10 +2,13 @@
  * Trader Engine
  * =============
  * Orchestrates trading operations with Advanced Analysis
+ * NEW: DCA, Momentum Scalping, Dynamic Position Sizing
  */
 
 const chalk = require('chalk');
 const AdvancedAnalysis = require('./advancedAnalysis');
+const DCAManager = require('./dcaManager');
+const MomentumScalper = require('./momentumScalper');
 
 class Trader {
     constructor(exchange, strategy, riskManager, db, config) {
@@ -22,6 +25,12 @@ class Trader {
         // Advanced Analysis Module (Order Book, Multi-TF, Support/Resistance)
         this.advancedAnalysis = new AdvancedAnalysis(exchange);
         this.useAdvancedAnalysis = config.useAdvancedAnalysis !== false; // ON by default
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // NEW FEATURES: DCA + Momentum Scalping
+        // ═══════════════════════════════════════════════════════════════════
+        this.dcaManager = new DCAManager(config);
+        this.momentumScalper = new MomentumScalper(exchange, config);
         
         // ═══════════════════════════════════════════════════════════════════
         // PORTFOLIO FLOOR PROTECTION - Never go below this value!
@@ -232,6 +241,31 @@ class Trader {
                 // Check if we have an existing position for this symbol
                 const existingPosition = this.openPositions.find(p => p.symbol === symbol);
                 
+                // ════════════════════════════════════════════════════════════════════
+                // DCA CHECK: If we're losing on this position, consider averaging down
+                // ════════════════════════════════════════════════════════════════════
+                if (existingPosition && !this.floorProtectionActive) {
+                    const currentPrice = signal.indicators.price;
+                    const pnlPercent = ((currentPrice - existingPosition.entryPrice) / existingPosition.entryPrice) * 100;
+                    
+                    // Only DCA on losing positions with bullish/neutral signals
+                    if (pnlPercent < -2 && signal.action !== 'SELL') {
+                        const dcaResult = this.dcaManager.shouldDCA(existingPosition, currentPrice);
+                        
+                        if (dcaResult.shouldDCA) {
+                            console.log(chalk.blue(`\n   📉 DCA OPPORTUNITY ${symbol}: Price down ${Math.abs(pnlPercent).toFixed(2)}%`));
+                            console.log(chalk.blue(`      Reason: ${dcaResult.reason}`));
+                            
+                            // Execute DCA buy
+                            const dcaTrade = await this.executeDCABuy(existingPosition, signal);
+                            if (dcaTrade) {
+                                results.trades.push(dcaTrade);
+                                console.log(chalk.green(`   ✅ DCA executed - new avg entry adjusted`));
+                            }
+                        }
+                    }
+                }
+                
                 // Execute SELL if we have a position and signal is STRONGLY bearish
                 // BUT: Only sell on signals if PROFITABLE or hold time exceeded (patience!)
                 if (existingPosition && signal.action === 'SELL' && signal.strength >= this.sellSignalThreshold) {
@@ -288,6 +322,24 @@ class Trader {
                         console.log(chalk.red(`   🛑 BUY BLOCKED [${symbol}] - Floor protection active`));
                         continue;
                     }
+                    
+                    // ════════════════════════════════════════════════════════════
+                    // MOMENTUM SCALP CHECK: Boost signal for momentum plays
+                    // ════════════════════════════════════════════════════════════
+                    let momentumBoost = 0;
+                    try {
+                        const momentum = await this.momentumScalper.detectMomentum(symbol, candles);
+                        if (momentum.hasMomentum) {
+                            momentumBoost = 0.15; // +15% signal strength boost
+                            console.log(chalk.magenta(`   🚀 MOMENTUM detected ${symbol}: ${momentum.reason}`));
+                            console.log(chalk.magenta(`      Signal boosted: ${signal.strength.toFixed(2)} → ${(signal.strength + momentumBoost).toFixed(2)}`));
+                        }
+                    } catch (e) {
+                        // Momentum check optional, continue without it
+                    }
+                    
+                    // Adjust signal strength with momentum
+                    const adjustedSignal = { ...signal, strength: signal.strength + momentumBoost };
                     
                     // Use Advanced Analysis if enabled
                     let buyConfirmed = true;
@@ -365,9 +417,18 @@ class Trader {
         const balance = await this.exchange.getBalance();
         const price = signal.indicators.price;
         
-        // Calculate position size
+        // Calculate position size with DYNAMIC sizing based on signal strength
         const symbolInfo = this.symbolInfo[symbol];
-        const quantity = this.riskManager.calculatePositionSize(balance, price, symbolInfo);
+        const signalStrength = signal.strength || 0.5;
+        const quantity = this.riskManager.calculatePositionSize(balance, price, symbolInfo, signalStrength);
+        
+        if (quantity <= 0) {
+            console.log(chalk.yellow(`   ⚠️ Position size too small for ${symbol}`));
+            return null;
+        }
+        
+        // Log dynamic sizing
+        console.log(chalk.gray(`   📊 Dynamic sizing: signal ${signalStrength.toFixed(2)} → qty ${quantity.toFixed(6)}`));
         
         if (quantity <= 0) {
             console.log(chalk.yellow(`   ⚠️ Position size too small for ${symbol}`));
@@ -422,11 +483,112 @@ class Trader {
     }
     
     /**
+     * Execute a DCA (Dollar Cost Average) buy to average down on losing position
+     */
+    async executeDCABuy(existingPosition, signal) {
+        const symbol = existingPosition.symbol;
+        
+        // Check if we can trade
+        const canTrade = this.riskManager.canTrade(this.openPositions, symbol, true); // true = DCA exception
+        if (!canTrade.allowed && !canTrade.dcaAllowed) {
+            console.log(chalk.yellow(`   ⚠️ Cannot DCA ${symbol}: ${canTrade.reason}`));
+            return null;
+        }
+        
+        // Get current price and balance
+        const balance = await this.exchange.getBalance();
+        const currentPrice = signal.indicators.price;
+        
+        // Calculate DCA amount (smaller than initial, based on DCA multiplier)
+        const symbolInfo = this.symbolInfo[symbol];
+        const dcaMultiplier = this.config.dcaMultiplier || 1.5;
+        
+        // Base size, then multiply by DCA factor
+        let baseQty = this.riskManager.calculatePositionSize(balance, currentPrice, symbolInfo, 0.6);
+        let dcaQty = baseQty * dcaMultiplier;
+        
+        // Round to step size
+        if (symbolInfo && symbolInfo.stepSize) {
+            dcaQty = Math.floor(dcaQty / symbolInfo.stepSize) * symbolInfo.stepSize;
+        }
+        
+        if (dcaQty <= 0) {
+            console.log(chalk.yellow(`   ⚠️ DCA size too small for ${symbol}`));
+            return null;
+        }
+        
+        try {
+            // Execute the DCA buy
+            const order = await this.exchange.marketBuy(symbol, dcaQty);
+            
+            // Update existing position with averaged entry
+            const totalAmount = existingPosition.amount + order.amount;
+            const totalCost = (existingPosition.amount * existingPosition.entryPrice) + (order.amount * order.price);
+            const newAvgEntry = totalCost / totalAmount;
+            
+            // Update the position
+            existingPosition.amount = totalAmount;
+            existingPosition.entryPrice = newAvgEntry;
+            existingPosition.dcaCount = (existingPosition.dcaCount || 0) + 1;
+            existingPosition.stopLoss = this.riskManager.getStopLossPrice(newAvgEntry);
+            existingPosition.takeProfit = this.riskManager.getTakeProfitPrice(newAvgEntry);
+            
+            // Track DCA with manager
+            this.dcaManager.recordDCA(existingPosition, order.price);
+            
+            // Log to database
+            this.db.logTrade({
+                symbol,
+                side: 'BUY',
+                amount: order.amount,
+                price: order.price,
+                value: order.cost,
+                orderId: order.orderId,
+                paper: order.paper,
+                reason: 'DCA',
+                dcaLevel: existingPosition.dcaCount
+            });
+            
+            console.log(chalk.blue(
+                `\n   📉 DCA BUY ${order.amount.toFixed(6)} ${symbol} @ $${order.price.toFixed(2)}`
+            ));
+            console.log(chalk.blue(
+                `      New avg entry: $${newAvgEntry.toFixed(4)} | Total amount: ${totalAmount.toFixed(6)}`
+            ));
+            
+            return order;
+            
+        } catch (error) {
+            console.error(chalk.red(`   ❌ DCA buy failed for ${symbol}: ${error.message}`));
+            return null;
+        }
+    }
+    
+    /**
      * Execute a sell order
      */
     async executeSell(position, reason = 'SIGNAL') {
         try {
-            const order = await this.exchange.marketSell(position.symbol, position.amount);
+            // Check actual balance to avoid "insufficient balance" errors (fees reduce actual amount)
+            let sellAmount = position.amount;
+            try {
+                const account = await this.exchange.client.accountInfo();
+                const asset = position.symbol.replace('USDT', '');
+                const assetBalance = account.balances.find(b => b.asset === asset);
+                const actualFree = parseFloat(assetBalance?.free || 0);
+                if (actualFree < sellAmount && actualFree > 0) {
+                    console.log(chalk.yellow(`   ⚠️ Adjusted sell amount for ${position.symbol}: ${sellAmount} → ${actualFree} (fee adjustment)`));
+                    sellAmount = actualFree;
+                } else if (actualFree <= 0) {
+                    console.log(chalk.red(`   ❌ No ${asset} balance to sell, removing stale position`));
+                    const idx = this.openPositions.findIndex(p => p.symbol === position.symbol && p.timestamp === position.timestamp);
+                    if (idx !== -1) this.openPositions.splice(idx, 1);
+                    return null;
+                }
+            } catch (balErr) {
+                console.log(chalk.yellow(`   ⚠️ Could not check balance, using tracked amount`));
+            }
+            const order = await this.exchange.marketSell(position.symbol, sellAmount);
             
             // Calculate P&L
             const pnl = (order.price - position.entryPrice) * position.amount;
@@ -650,32 +812,38 @@ class Trader {
         }
         
         // ═══════════════════════════════════════════════════════════════
-        // PROFIT-TAKING RULES (only when profitUSD > 0)
+        // SEMI-AGGRESSIVE+ PROFIT RULES - Capture gains FAST!
+        // Target: $4-6 USD/day = 12-15 wins @ $0.30-$0.50 each
         // ═══════════════════════════════════════════════════════════════
         
-        // $1.00+ profit - take it immediately!
-        if (profitUSD >= 1.00) {
-            return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} (>$1 rule)` };
+        // $0.50+ profit - TAKE IT NOW! (was $1.00)
+        if (profitUSD >= 0.50) {
+            return { shouldSell: true, reason: `💰 QUICK_PROFIT +$${profitUSD.toFixed(2)} (≥$0.50 rule)` };
         }
         
-        // $0.50+ profit after 3 minutes
-        if (profitUSD >= 0.50 && minutesHeld >= 3) {
+        // $0.25+ profit after 1 minute (was $0.50 after 3min)
+        if (profitUSD >= 0.25 && minutesHeld >= 1) {
+            return { shouldSell: true, reason: `💰 FAST_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(1)}min` };
+        }
+        
+        // $0.15+ profit after 90 seconds (was $0.10 after 2min)
+        if (profitUSD >= 0.15 && minutesHeld >= 1.5) {
+            return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} (≥$0.15 rule)` };
+        }
+        
+        // $0.10+ profit after 2 minutes (keep this one)
+        if (profitUSD >= 0.10 && minutesHeld >= 2) {
             return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(0)}min` };
         }
         
-        // $0.10+ profit after 2 minutes (unless bullish - then trail)
-        if (profitUSD >= 0.10 && minutesHeld >= 2 && !isBullish) {
-            return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} (not bullish)` };
+        // Any profit > $0.03 after 10 minutes (was $0.02 after 15min)
+        if (profitUSD > 0.03 && minutesHeld >= 10) {
+            return { shouldSell: true, reason: `💰 PATIENCE_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(0)}min` };
         }
         
-        // Any profit > $0.02 after 15 minutes
-        if (profitUSD > 0.02 && minutesHeld >= 15) {
-            return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(0)}min hold` };
-        }
-        
-        // In bullish market with decent profit - trail tightly instead of selling
-        if (isBullish && profitPercent >= 0.8) {
-            return { shouldSell: false, setTrailingStop: true, trailPercent: 0.4 };
+        // In bullish market with decent profit - trail TIGHTER (0.3% vs 0.4%)
+        if (isBullish && profitPercent >= 0.6) {
+            return { shouldSell: false, setTrailingStop: true, trailPercent: 0.3 };
         }
         
         return { shouldSell: false, reason: 'Holding for more profit' };

@@ -191,16 +191,37 @@ class RiskManager {
     /**
      * Calculate position size for a trade
      * IMPORTANT: Uses the MINIMUM of locked capital OR actual available balance
+     * NEW: Dynamic sizing based on signal strength!
      */
-    calculatePositionSize(balance, price, symbolInfo = null) {
+    calculatePositionSize(balance, price, symbolInfo = null, signalStrength = 0.5) {
         // ═══════════════════════════════════════════════════════════════════
         // PROFIT PROTECTION: Use minimum of locked capital or actual balance
         // ═══════════════════════════════════════════════════════════════════
         // Use actual available balance if less than locked capital
         const tradableBalance = Math.min(this.lockedTradingCapital, balance);
         
-        // Max position is X% of tradable balance
-        const maxPositionValue = tradableBalance * (this.maxPositionSizePercent / 100);
+        // ═══════════════════════════════════════════════════════════════════
+        // DYNAMIC POSITION SIZING based on signal strength!
+        // Stronger signals = bigger positions, weaker signals = smaller
+        // ═══════════════════════════════════════════════════════════════════
+        let dynamicSizePercent = this.maxPositionSizePercent;
+        
+        if (signalStrength >= 0.70) {
+            // VERY STRONG signal: 1.3x normal size
+            dynamicSizePercent = this.maxPositionSizePercent * 1.3;
+        } else if (signalStrength >= 0.55) {
+            // STRONG signal: Normal size
+            dynamicSizePercent = this.maxPositionSizePercent;
+        } else if (signalStrength >= 0.45) {
+            // MEDIUM signal: 0.7x normal size
+            dynamicSizePercent = this.maxPositionSizePercent * 0.7;
+        } else {
+            // WEAK signal: 0.5x normal size
+            dynamicSizePercent = this.maxPositionSizePercent * 0.5;
+        }
+        
+        // Max position is X% of tradable balance (now dynamic!)
+        const maxPositionValue = tradableBalance * (dynamicSizePercent / 100);
         
         // Calculate quantity
         let quantity = maxPositionValue / price;
@@ -228,8 +249,9 @@ class RiskManager {
     
     /**
      * Check if a trade is allowed under current risk rules
+     * @param {boolean} isDCA - If true, this is a DCA buy on existing position
      */
-    canTrade(openPositions, symbol) {
+    canTrade(openPositions, symbol, isDCA = false) {
         this.resetDaily();
         
         // Check if paused
@@ -240,13 +262,14 @@ class RiskManager {
             } else {
                 return {
                     allowed: false,
+                    dcaAllowed: false,
                     reason: `Trading paused: ${this.pauseReason}`
                 };
             }
         }
         
-        // Check max concurrent positions
-        if (openPositions.length >= this.maxConcurrentPositions) {
+        // Check max concurrent positions (skip for DCA)
+        if (!isDCA && openPositions.length >= this.maxConcurrentPositions) {
             return {
                 allowed: false,
                 reason: `Max positions reached (${this.maxConcurrentPositions})`
@@ -254,11 +277,28 @@ class RiskManager {
         }
         
         // Check if already in position for this symbol
-        if (openPositions.some(p => p.symbol === symbol)) {
+        // For DCA, we WANT to be in position already
+        const existingPosition = openPositions.find(p => p.symbol === symbol);
+        if (!isDCA && existingPosition) {
             return {
                 allowed: false,
                 reason: `Already in position for ${symbol}`
             };
+        }
+        
+        // For DCA, check max DCA levels (default 2)
+        if (isDCA && existingPosition) {
+            const maxDCALevels = this.config.maxDCALevels || 2;
+            const currentDCACount = existingPosition.dcaCount || 0;
+            if (currentDCACount >= maxDCALevels) {
+                return {
+                    allowed: false,
+                    dcaAllowed: false,
+                    reason: `Max DCA levels reached (${currentDCACount}/${maxDCALevels})`
+                };
+            }
+            // DCA is allowed
+            return { allowed: true, dcaAllowed: true };
         }
         
         // Check daily loss limit

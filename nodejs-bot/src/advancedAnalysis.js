@@ -1,6 +1,7 @@
 /**
  * Advanced Analysis Module
  * Adds: Order Book Analysis, Multi-Timeframe, Support/Resistance
+ * NEW: Volume Confirmation, BTC Correlation, Bollinger Bands
  */
 
 class AdvancedAnalysis {
@@ -8,6 +9,8 @@ class AdvancedAnalysis {
         this.exchange = exchange;
         this.supportResistanceLevels = new Map(); // symbol -> { supports: [], resistances: [] }
         this.priceHistory = new Map(); // symbol -> price array for S/R detection
+        this.btcTrendCache = { trend: 'neutral', timestamp: 0 }; // Cache BTC trend
+        this.volumeCache = new Map(); // symbol -> { avgVolume, timestamp }
     }
 
     /**
@@ -208,42 +211,286 @@ class AdvancedAnalysis {
     }
 
     /**
+     * 4. VOLUME CONFIRMATION (NEW!)
+     * Only buy when volume is above average - avoids fake breakouts
+     */
+    async analyzeVolume(symbol) {
+        try {
+            const candles = await this.exchange.fetchOHLCV(symbol, '5m', undefined, 50);
+            if (!candles || candles.length < 20) {
+                return { confirmed: true, ratio: 1, reason: 'Insufficient data' };
+            }
+
+            const volumes = candles.map(c => c[5]);
+            const currentVolume = volumes[volumes.length - 1];
+            const avgVolume = volumes.slice(0, -1).reduce((a, b) => a + b, 0) / (volumes.length - 1);
+            
+            const volumeRatio = currentVolume / avgVolume;
+            
+            // Volume should be at least 80% of average for buys
+            const confirmed = volumeRatio >= 0.8;
+            
+            // High volume (>1.5x) is very bullish
+            const highVolume = volumeRatio >= 1.5;
+            
+            let reason = '';
+            if (volumeRatio < 0.5) reason = '⚠️ Very low volume (fake move?)';
+            else if (volumeRatio < 0.8) reason = 'Low volume - weak signal';
+            else if (volumeRatio > 2) reason = '🔥 Volume spike - strong move!';
+            else if (volumeRatio > 1.5) reason = 'High volume - confirmed';
+            else reason = 'Normal volume';
+
+            return {
+                confirmed,
+                highVolume,
+                ratio: volumeRatio,
+                currentVolume,
+                avgVolume,
+                reason
+            };
+        } catch (error) {
+            console.error(`Volume analysis failed for ${symbol}:`, error.message);
+            return { confirmed: true, ratio: 1, reason: 'Error' };
+        }
+    }
+
+    /**
+     * 5. BTC CORRELATION FILTER (NEW!)
+     * Don't buy alts when BTC is dumping - they usually follow
+     */
+    async analyzeBTCTrend() {
+        try {
+            // Cache for 30 seconds to reduce API calls
+            const now = Date.now();
+            if (this.btcTrendCache.timestamp > now - 30000) {
+                return this.btcTrendCache;
+            }
+
+            const candles = await this.exchange.fetchOHLCV('BTCUSDT', '5m', undefined, 20);
+            if (!candles || candles.length < 15) {
+                return { trend: 'neutral', safe: true, reason: 'Insufficient BTC data' };
+            }
+
+            const closes = candles.map(c => c[4]);
+            const currentPrice = closes[closes.length - 1];
+            const price5mAgo = closes[closes.length - 2];
+            const price15mAgo = closes[closes.length - 4];
+            const price1hAgo = closes[0];
+
+            // Calculate short-term momentum
+            const change5m = ((currentPrice - price5mAgo) / price5mAgo) * 100;
+            const change15m = ((currentPrice - price15mAgo) / price15mAgo) * 100;
+            const change1h = ((currentPrice - price1hAgo) / price1hAgo) * 100;
+
+            // Calculate EMA trend
+            const ema10 = this.calculateEMA(closes, 10);
+            const ema20 = this.calculateEMA(closes, 20);
+            const emaTrend = ema10 > ema20 ? 'bullish' : 'bearish';
+
+            let trend = 'neutral';
+            let safe = true;
+            let reason = '';
+
+            // BTC dumping hard - don't buy alts!
+            if (change15m < -0.5 || change1h < -1.5) {
+                trend = 'bearish';
+                safe = false;
+                reason = `🚨 BTC dumping (${change1h.toFixed(2)}% 1h) - AVOID alts!`;
+            }
+            // BTC pumping - good for alts
+            else if (change15m > 0.3 && change1h > 0.5) {
+                trend = 'bullish';
+                safe = true;
+                reason = `✅ BTC bullish (${change1h.toFixed(2)}% 1h) - alts safe`;
+            }
+            // BTC stable
+            else {
+                trend = emaTrend;
+                safe = true;
+                reason = `BTC stable (${change1h.toFixed(2)}% 1h)`;
+            }
+
+            const result = {
+                trend,
+                safe,
+                reason,
+                change5m,
+                change15m,
+                change1h,
+                emaTrend,
+                timestamp: now
+            };
+
+            this.btcTrendCache = result;
+            return result;
+        } catch (error) {
+            console.error('BTC trend analysis failed:', error.message);
+            return { trend: 'neutral', safe: true, reason: 'Error checking BTC' };
+        }
+    }
+
+    /**
+     * 6. BOLLINGER BANDS (NEW!)
+     * Buy at lower band, sell at upper band - great for ranging markets
+     */
+    async analyzeBollingerBands(symbol) {
+        try {
+            const candles = await this.exchange.fetchOHLCV(symbol, '5m', undefined, 30);
+            if (!candles || candles.length < 20) {
+                return { signal: 'neutral', position: 'middle', reason: 'Insufficient data' };
+            }
+
+            const closes = candles.map(c => c[4]);
+            const currentPrice = closes[closes.length - 1];
+
+            // Calculate 20-period SMA (middle band)
+            const period = 20;
+            const sma = closes.slice(-period).reduce((a, b) => a + b, 0) / period;
+
+            // Calculate standard deviation
+            const squaredDiffs = closes.slice(-period).map(c => Math.pow(c - sma, 2));
+            const variance = squaredDiffs.reduce((a, b) => a + b, 0) / period;
+            const stdDev = Math.sqrt(variance);
+
+            // Bollinger Bands (2 standard deviations)
+            const upperBand = sma + (stdDev * 2);
+            const lowerBand = sma - (stdDev * 2);
+            const bandwidth = ((upperBand - lowerBand) / sma) * 100;
+
+            // Calculate position within bands (0 = lower band, 1 = upper band)
+            const position = (currentPrice - lowerBand) / (upperBand - lowerBand);
+
+            // Determine signal
+            let signal = 'neutral';
+            let strength = 0;
+            let reason = '';
+
+            if (position <= 0.15) {
+                signal = 'buy';
+                strength = 1 - position; // Stronger near bottom
+                reason = `📉 At lower Bollinger Band (oversold) - BUY zone`;
+            } else if (position >= 0.85) {
+                signal = 'sell';
+                strength = position;
+                reason = `📈 At upper Bollinger Band (overbought) - SELL zone`;
+            } else if (position < 0.35) {
+                signal = 'buy';
+                strength = 0.5;
+                reason = 'Near lower band - potential entry';
+            } else if (position > 0.65) {
+                signal = 'sell';
+                strength = 0.5;
+                reason = 'Near upper band - consider exit';
+            } else {
+                signal = 'neutral';
+                reason = 'Middle of Bollinger Bands';
+            }
+
+            // Squeeze detection (low bandwidth = breakout coming)
+            const squeeze = bandwidth < 2;
+            if (squeeze) {
+                reason += ' ⚡ Squeeze detected - breakout imminent!';
+            }
+
+            return {
+                signal,
+                strength,
+                position,
+                reason,
+                upperBand,
+                lowerBand,
+                middleBand: sma,
+                bandwidth,
+                squeeze,
+                currentPrice
+            };
+        } catch (error) {
+            console.error(`Bollinger Bands analysis failed for ${symbol}:`, error.message);
+            return { signal: 'neutral', position: 0.5, reason: 'Error' };
+        }
+    }
+
+    // Helper: Calculate EMA
+    calculateEMA(data, period) {
+        const k = 2 / (period + 1);
+        let ema = data.slice(0, period).reduce((a, b) => a + b, 0) / period;
+        
+        for (let i = period; i < data.length; i++) {
+            ema = data[i] * k + ema * (1 - k);
+        }
+        return ema;
+    }
+
+    /**
      * COMBINED ADVANCED SIGNAL
-     * Merges all 3 analyses into one recommendation
+     * Merges ALL 6 analyses into one recommendation
      */
     async getAdvancedSignal(symbol, strategy) {
-        const [orderBook, multiTF, supportResistance] = await Promise.all([
+        // Run all analyses in parallel for speed
+        const [orderBook, multiTF, supportResistance, volume, btcTrend, bollinger] = await Promise.all([
             this.analyzeOrderBook(symbol),
             this.multiTimeframeAnalysis(symbol, strategy),
-            this.detectSupportResistance(symbol)
+            this.detectSupportResistance(symbol),
+            this.analyzeVolume(symbol),
+            this.analyzeBTCTrend(),
+            this.analyzeBollingerBands(symbol)
         ]);
 
         // Score calculation
         let buyScore = 0;
         let sellScore = 0;
         let reasons = [];
+        let blocked = false;
+        let blockReason = '';
 
-        // Order book contribution (weight: 30%)
+        // ========== BTC CORRELATION FILTER (CRITICAL!) ==========
+        // If BTC is dumping, block ALL alt buys
+        if (!btcTrend.safe && symbol !== 'BTCUSDT') {
+            blocked = true;
+            blockReason = btcTrend.reason;
+            reasons.push(btcTrend.reason);
+        }
+
+        // ========== VOLUME CONFIRMATION ==========
+        if (!volume.confirmed) {
+            buyScore -= 0.25; // Penalize low volume buys
+            reasons.push(volume.reason);
+        }
+        if (volume.highVolume) {
+            buyScore += 0.1; // Bonus for high volume
+            reasons.push(volume.reason);
+        }
+
+        // ========== BOLLINGER BANDS (weight: 25%) ==========
+        if (bollinger.signal === 'buy') {
+            buyScore += bollinger.strength * 0.25;
+            reasons.push(bollinger.reason);
+        } else if (bollinger.signal === 'sell') {
+            sellScore += bollinger.strength * 0.25;
+            reasons.push(bollinger.reason);
+        }
+
+        // ========== Order book contribution (weight: 20%) ==========
         if (orderBook.signal === 'bullish') {
-            buyScore += orderBook.strength * 0.3;
+            buyScore += orderBook.strength * 0.2;
             reasons.push(`OrderBook: ${orderBook.reason}`);
         } else if (orderBook.signal === 'bearish') {
-            sellScore += orderBook.strength * 0.3;
+            sellScore += orderBook.strength * 0.2;
             reasons.push(`OrderBook: ${orderBook.reason}`);
         }
 
         // Block buy if there's a nearby sell wall
         if (orderBook.hasNearbyResistance) {
-            buyScore -= 0.2;
+            buyScore -= 0.15;
             reasons.push('⚠️ Sell wall detected nearby');
         }
 
-        // Multi-timeframe contribution (weight: 40%)
+        // ========== Multi-timeframe contribution (weight: 35%) ==========
         if (multiTF.signal === 'bullish') {
-            buyScore += multiTF.confidence * 0.4;
+            buyScore += multiTF.confidence * 0.35;
             reasons.push(`MTF: ${multiTF.reason}`);
         } else if (multiTF.signal === 'bearish') {
-            sellScore += multiTF.confidence * 0.4;
+            sellScore += multiTF.confidence * 0.35;
             reasons.push(`MTF: ${multiTF.reason}`);
         }
 
@@ -254,13 +501,13 @@ class AdvancedAnalysis {
             reasons.push('✓ All timeframes aligned');
         }
 
-        // Support/Resistance contribution (weight: 30%)
+        // ========== Support/Resistance contribution (weight: 20%) ==========
         if (supportResistance.nearSupport) {
-            buyScore += 0.2;
+            buyScore += 0.15;
             reasons.push('Near support level (good entry)');
         }
         if (supportResistance.nearResistance) {
-            sellScore += 0.2;
+            sellScore += 0.15;
             reasons.push('Near resistance level (take profit zone)');
         }
 
@@ -268,10 +515,15 @@ class AdvancedAnalysis {
         let signal = 'HOLD';
         let strength = 0;
         
-        if (buyScore > sellScore && buyScore > 0.4) {
+        // If blocked by BTC correlation, force HOLD for buys
+        if (blocked && buyScore > sellScore) {
+            signal = 'HOLD';
+            strength = 0;
+            reasons.unshift('🚫 BLOCKED: ' + blockReason);
+        } else if (buyScore > sellScore && buyScore > 0.35) {
             signal = 'BUY';
             strength = Math.min(buyScore, 1);
-        } else if (sellScore > buyScore && sellScore > 0.4) {
+        } else if (sellScore > buyScore && sellScore > 0.35) {
             signal = 'SELL';
             strength = Math.min(sellScore, 1);
         }
@@ -282,6 +534,8 @@ class AdvancedAnalysis {
             strength,
             buyScore,
             sellScore,
+            blocked,
+            blockReason,
             reasons,
             analysis: {
                 orderBook: {
@@ -301,6 +555,21 @@ class AdvancedAnalysis {
                         support: supportResistance.nearestSupport,
                         resistance: supportResistance.nearestResistance
                     }
+                },
+                volume: {
+                    confirmed: volume.confirmed,
+                    ratio: volume.ratio,
+                    highVolume: volume.highVolume
+                },
+                btcTrend: {
+                    trend: btcTrend.trend,
+                    safe: btcTrend.safe,
+                    change1h: btcTrend.change1h
+                },
+                bollinger: {
+                    signal: bollinger.signal,
+                    position: bollinger.position,
+                    squeeze: bollinger.squeeze
                 }
             }
         };
