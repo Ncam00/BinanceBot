@@ -59,6 +59,24 @@ class Trader {
         
         // Market sentiment tracking for smart profit-taking
         this.marketSentiment = 'neutral'; // bullish, neutral, bearish
+        
+        // ════════════════════════════════════════════════════════════════════
+        // CORRELATION GUARD - Prevent buying too many correlated coins
+        // ════════════════════════════════════════════════════════════════════
+        this.correlationGroups = {
+            'large_cap': ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT'],
+            'mid_alt':   ['XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT', 'FETUSDT'],
+            'meme':      ['DOGEUSDT', 'PEPEUSDT', 'SHIBUSDT', 'FLOKIUSDT', 'WIFUSDT', 'BONKUSDT', 'TRUMPUSDT', '1000SATSUSDT']
+        };
+        this.maxPerGroup = 2; // Max 2 positions from same correlation group
+        
+        // ════════════════════════════════════════════════════════════════════
+        // SESSION-BASED TRADING - Only open positions during high-volume hours
+        // Hours in UTC: EU open 7-16, US open 13-21, overlap 13-16
+        // Quiet hours (Asia late): UTC 22-07 = NZST 10am-7pm
+        // ════════════════════════════════════════════════════════════════════
+        this.sessionTradingEnabled = true;
+        this.highVolumeHoursUTC = { start: 7, end: 21 }; // 7am-9pm UTC = EU+US sessions
     }
     
     /**
@@ -350,6 +368,30 @@ class Trader {
                     if (bearishGuardActive) {
                         console.log(chalk.yellow(`   🛡️ BUY BLOCKED [${symbol}] - Bearish market guard`));
                         continue;
+                    }
+                    
+                    // ════════════════════════════════════════════════════════════
+                    // SESSION GUARD: Only open new positions during high-volume hours
+                    // ════════════════════════════════════════════════════════════
+                    if (this.sessionTradingEnabled) {
+                        const utcHour = new Date().getUTCHours();
+                        if (utcHour < this.highVolumeHoursUTC.start || utcHour >= this.highVolumeHoursUTC.end) {
+                            console.log(chalk.gray(`   🕐 BUY SKIPPED [${symbol}] - Quiet hours (UTC ${utcHour}:00, active ${this.highVolumeHoursUTC.start}-${this.highVolumeHoursUTC.end})`));
+                            continue;
+                        }
+                    }
+                    
+                    // ════════════════════════════════════════════════════════════
+                    // CORRELATION GUARD: Max 2 positions per correlated group
+                    // ════════════════════════════════════════════════════════════
+                    const symbolGroup = Object.entries(this.correlationGroups).find(([group, symbols]) => symbols.includes(symbol));
+                    if (symbolGroup) {
+                        const [groupName, groupSymbols] = symbolGroup;
+                        const groupPositions = this.openPositions.filter(p => groupSymbols.includes(p.symbol)).length;
+                        if (groupPositions >= this.maxPerGroup) {
+                            console.log(chalk.yellow(`   🔗 BUY BLOCKED [${symbol}] - Max ${this.maxPerGroup} positions in ${groupName} group (have ${groupPositions})`));
+                            continue;
+                        }
                     }
                     
                     // ════════════════════════════════════════════════════════════
@@ -684,6 +726,89 @@ class Trader {
     }
     
     /**
+     * Execute a PARTIAL sell - sell a percentage, keep the rest running
+     */
+    async executePartialSell(position, sellPercent, reason = 'PARTIAL') {
+        try {
+            // Calculate partial amount
+            const partialAmount = position.amount * sellPercent;
+            
+            // Validate with exchange for minimum lot size
+            const symbolInfo = this.symbolInfo[position.symbol];
+            const validQty = await this.exchange.getValidQuantity(position.symbol, partialAmount);
+            
+            if (validQty <= 0) {
+                // Partial too small, sell everything instead
+                console.log(chalk.yellow(`   ⚠️ Partial amount too small for ${position.symbol}, selling all`));
+                return await this.executeSell(position, reason);
+            }
+            
+            // Check actual balance
+            let sellAmount = validQty;
+            try {
+                const account = await this.exchange.client.accountInfo();
+                const asset = position.symbol.replace('USDT', '');
+                const assetBalance = account.balances.find(b => b.asset === asset);
+                const actualFree = parseFloat(assetBalance?.free || 0);
+                if (actualFree < sellAmount && actualFree > 0) {
+                    sellAmount = await this.exchange.getValidQuantity(position.symbol, actualFree * sellPercent);
+                }
+            } catch (e) {}
+            
+            const order = await this.exchange.marketSell(position.symbol, sellAmount);
+            
+            // Calculate P&L on the partial
+            const pnl = (order.price - position.entryPrice) * order.amount;
+            const pnlPercent = ((order.price - position.entryPrice) / position.entryPrice) * 100;
+            
+            // Record partial trade
+            this.riskManager.recordTrade(pnl);
+            if (this.riskManager.updateMarketSentiment) {
+                this.riskManager.updateMarketSentiment(pnl, pnlPercent);
+            }
+            
+            // Update position - reduce amount, mark as partially sold
+            position.amount -= order.amount;
+            position.partialSold = true;
+            position.partialPnl = (position.partialPnl || 0) + pnl;
+            
+            // Set trailing stop on remaining portion
+            const currentPrice = order.price;
+            position.trailingStopActive = true;
+            position.highestPrice = currentPrice;
+            position.trailingStopPrice = currentPrice * (1 - 0.25 / 100); // Tight 0.25% trail on remainder
+            
+            // Log to database
+            this.db.logTrade({
+                symbol: position.symbol,
+                side: 'SELL',
+                amount: order.amount,
+                price: order.price,
+                value: order.revenue,
+                orderId: order.orderId,
+                paper: order.paper,
+                pnl: pnl,
+                pnlPercent: pnlPercent,
+                closeReason: reason + '_PARTIAL'
+            });
+            
+            console.log(chalk.green(
+                `\n   📤 PARTIAL SELL ${Math.round(sellPercent * 100)}% of ${position.symbol} ` +
+                `(${order.amount.toFixed(6)}) @ $${order.price.toFixed(2)} | P&L: +$${pnl.toFixed(2)}`
+            ));
+            console.log(chalk.cyan(
+                `      🔒 Remaining ${(position.amount).toFixed(6)} riding with 0.25% trailing stop`
+            ));
+            
+            return { ...order, pnl, pnlPercent, reason, partial: true };
+            
+        } catch (error) {
+            console.error(chalk.red(`   ❌ Partial sell failed for ${position.symbol}: ${error.message}`));
+            return null;
+        }
+    }
+    
+    /**
      * Check positions for stop-loss/take-profit/trailing-stop
      */
     async checkPositions() {
@@ -713,7 +838,13 @@ class Trader {
                         `\n   ${smartCheck.reason} for ${position.symbol} ` +
                         `(held ${Math.round(positionAge / 60000)}min)`
                     ));
-                    await this.executeSell(position, smartCheck.reason);
+                    
+                    // PARTIAL PROFIT TAKING: Sell only a portion, keep rest running
+                    if (smartCheck.partial && smartCheck.sellPercent) {
+                        await this.executePartialSell(position, smartCheck.sellPercent, smartCheck.reason);
+                    } else {
+                        await this.executeSell(position, smartCheck.reason);
+                    }
                     continue;
                 }
                 
@@ -851,20 +982,27 @@ class Trader {
         }
         
         // ═══════════════════════════════════════════════════════════════
-        // LET-WINNERS-RUN PROFIT RULES (FEE-AWARE)
+        // LET-WINNERS-RUN PROFIT RULES (FEE-AWARE + PARTIAL TAKES)
         // Binance fee: 0.1% per trade = 0.2% round trip (~$0.10 on $50)
-        // Let trailing stop handle exits — only grab obvious wins
-        // Target: 8-18 trades/day, $0.40-$0.80 avg win
+        // Partial sells: take 50% at first target, let rest ride
+        // Target: 8-18 trades/day, $0.50-$0.90 avg win
         // ═══════════════════════════════════════════════════════════════
         
-        // $0.75+ profit - TAKE IT (solid win, no need to risk reversal)
+        const alreadyPartialSold = position.partialSold || false;
+        
+        // $0.75+ profit - TAKE IT ALL (solid win, no need to risk reversal)
         if (profitUSD >= 0.75) {
             return { shouldSell: true, reason: `💰 STRONG_PROFIT +$${profitUSD.toFixed(2)} (≥$0.75 rule)` };
         }
         
-        // $0.50+ profit - set tight trailing stop to lock it in
-        if (profitUSD >= 0.50) {
-            return { shouldSell: false, setTrailingStop: true, trailPercent: 0.25, reason: `🔒 Trailing $0.50+ profit` };
+        // $0.50+ profit - PARTIAL SELL 50%, then trail the rest
+        if (profitUSD >= 0.50 && !alreadyPartialSold) {
+            return { shouldSell: true, partial: true, sellPercent: 0.5, reason: `💰 PARTIAL_PROFIT +$${profitUSD.toFixed(2)} (sell 50%, trail rest)` };
+        }
+        
+        // Already partial sold and still in profit - set tight trailing stop on remainder
+        if (alreadyPartialSold && profitPercent >= 0.3) {
+            return { shouldSell: false, setTrailingStop: true, trailPercent: 0.25, reason: `🔒 Trailing remainder after partial` };
         }
         
         // $0.40+ profit after 2 minutes - take it, good enough
