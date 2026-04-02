@@ -311,12 +311,13 @@ class RiskManager {
             };
         }
         
-        // Check consecutive losses
-        if (this.consecutiveLosses >= 3) {
-            this.pause('3 consecutive losses', 4 * 60);
+        // Check consecutive losses (5 losses = short cooldown, then reset)
+        if (this.consecutiveLosses >= 5) {
+            this.consecutiveLosses = 0; // Reset counter so bot resumes after cooldown
+            this.pause('5 consecutive losses - short cooldown', 10);
             return {
                 allowed: false,
-                reason: '3 consecutive losses - cooling off'
+                reason: '5 consecutive losses - 10 min cooldown'
             };
         }
         

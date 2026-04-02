@@ -54,10 +54,10 @@ class AdvancedAnalysis {
                 reason = `Strong sell pressure (${((1 - imbalanceRatio) * 100).toFixed(1)}% asks)`;
             }
             
-            // Check for walls near current price
+            // Check for walls near current price (only very close massive walls matter)
             const currentPrice = (orderBook.bids[0][0] + orderBook.asks[0][0]) / 2;
-            const nearbyAskWall = askWalls.find(([price]) => price < currentPrice * 1.02);
-            const nearbyBidWall = bidWalls.find(([price]) => price > currentPrice * 0.98);
+            const nearbyAskWall = askWalls.find(([price, amount]) => price < currentPrice * 1.005 && (price * amount) > avgAskSize * 5);
+            const nearbyBidWall = bidWalls.find(([price, amount]) => price > currentPrice * 0.995 && (price * amount) > avgBidSize * 5);
             
             return {
                 signal,

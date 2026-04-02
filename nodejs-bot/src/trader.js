@@ -349,10 +349,14 @@ class Trader {
                         try {
                             const advanced = await this.advancedAnalysis.getAdvancedSignal(symbol, this.strategy);
                             
-                            // Check for blockers
+                            // Check for blockers (sell wall is a warning, not a hard block)
                             if (advanced.analysis.orderBook.hasWall) {
-                                buyConfirmed = false;
-                                advancedReasons.push('❌ Sell wall detected - blocked');
+                                advancedReasons.push('⚠️ Sell wall nearby - caution');
+                                // Only block if wall + bearish timeframes together
+                                if (advanced.analysis.multiTimeframe.signal === 'bearish') {
+                                    buyConfirmed = false;
+                                    advancedReasons.push('❌ Sell wall + bearish timeframes - blocked');
+                                }
                             }
                             
                             // Check multi-timeframe alignment
