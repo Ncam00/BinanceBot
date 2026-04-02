@@ -20,6 +20,7 @@ const RiskManager = require('./src/riskManager');
 const Trader = require('./src/trader');
 const Database = require('./src/database');
 const ArbitrageScanner = require('./src/arbitrage');
+const TelegramBot = require('./src/telegram');
 
 // Configuration
 const CONFIG = {
@@ -56,10 +57,10 @@ const CONFIG = {
     
     // Strategy settings (AGGRESSIVE)
     rsiPeriod: parseInt(process.env.RSI_PERIOD) || 14,
-    rsiOversold: parseInt(process.env.RSI_OVERSOLD) || 40,
-    rsiOverbought: parseInt(process.env.RSI_OVERBOUGHT) || 60,
-    emaFast: parseInt(process.env.EMA_FAST) || 7,
-    emaSlow: parseInt(process.env.EMA_SLOW) || 18,
+    rsiOversold: parseInt(process.env.RSI_OVERSOLD) || 35,
+    rsiOverbought: parseInt(process.env.RSI_OVERBOUGHT) || 65,
+    emaFast: parseInt(process.env.EMA_FAST) || 9,
+    emaSlow: parseInt(process.env.EMA_SLOW) || 21,
     
     // Signal thresholds (LOWERED for more trades)
     buySignalThreshold: parseFloat(process.env.BUY_SIGNAL_THRESHOLD) || 0.4,
@@ -148,11 +149,22 @@ async function initializeBot() {
     // Initialize risk manager with actual balance
     const initialCapital = parseFloat(process.env.INITIAL_CAPITAL) || balance;
     const riskManager = new RiskManager(CONFIG, initialCapital);
-    console.log(chalk.green(`  ✓ Risk manager configured (Locked capital: $${initialCapital.toFixed(2)})`));
+    console.log(chalk.green(`  ✓ Risk manager configured (Locked capital: $${initialCapital.toFixed(2)})`))
+    
+    // Initialize Telegram alerts
+    const telegram = new TelegramBot(
+        process.env.TELEGRAM_BOT_TOKEN,
+        process.env.TELEGRAM_CHAT_ID
+    );
     
     // Initialize trader
     const trader = new Trader(exchange, strategy, riskManager, db, CONFIG);
+    trader.telegram = telegram;
     console.log(chalk.green('  ✓ Trader module ready'));
+    
+    // Send startup alert
+    const portfolioTotal = portfolioInfo ? portfolioInfo.totalUSDT : balance;
+    await telegram.startupAlert(portfolioTotal);
     
     return trader;
 }
@@ -724,6 +736,9 @@ async function main() {
             
             runTradingLoop();
             
+            // Schedule daily P&L summary at UTC 21:00 (end of trading session)
+            scheduleDailySummary();
+            
             // Start Arbitrage Scanner (millisecond trading)
             if (CONFIG.tradingMode === 'live') {
                 console.log(chalk.magenta('\n⚡ Starting Arbitrage Scanner...'));
@@ -755,6 +770,47 @@ async function main() {
         console.error(chalk.red(`\n❌ Failed to start bot: ${error.message}`));
         process.exit(1);
     }
+}
+
+// Schedule daily P&L summary via Telegram
+function scheduleDailySummary() {
+    const sendSummary = async () => {
+        if (!bot || !bot.telegram || !bot.riskManager) return;
+        try {
+            const rm = bot.riskManager;
+            const portfolio = await bot.exchange.getTotalBalanceUSDT();
+            const wins = (rm.todaysProfits || []).filter(p => p.amount > 0).length;
+            const losses = rm.dailyTrades - wins;
+            
+            await bot.telegram.dailySummary({
+                dailyPnL: rm.dailyPnL,
+                dailyTrades: rm.dailyTrades,
+                wins,
+                losses,
+                portfolio: portfolio.totalUSDT,
+                openPositions: bot.openPositions ? bot.openPositions.length : 0
+            });
+            console.log(chalk.cyan('  📱 Daily Telegram summary sent'));
+        } catch (err) {
+            console.log(chalk.yellow(`  ⚠️ Daily summary failed: ${err.message}`));
+        }
+    };
+    
+    // Calculate ms until next UTC 21:00
+    const scheduleNext = () => {
+        const now = new Date();
+        const next = new Date(now);
+        next.setUTCHours(21, 0, 0, 0);
+        if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+        const ms = next - now;
+        console.log(chalk.cyan(`  📱 Daily Telegram summary scheduled in ${Math.round(ms / 3600000)}h`));
+        setTimeout(async () => {
+            await sendSummary();
+            scheduleNext(); // Reschedule for next day
+        }, ms);
+    };
+    
+    scheduleNext();
 }
 
 // Handle graceful shutdown

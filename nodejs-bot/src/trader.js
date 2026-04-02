@@ -569,6 +569,11 @@ class Trader {
                 `      Stop-Loss: $${position.stopLoss.toFixed(2)} (${stopType}) | Take-Profit: $${position.takeProfit.toFixed(2)}${regime}`
             ));
             
+            // Telegram alert
+            if (this.telegram) {
+                this.telegram.tradeAlert('BUY', symbol, order.price, order.amount).catch(() => {});
+            }
+            
             return order;
             
         } catch (error) {
@@ -735,6 +740,15 @@ class Trader {
                 `(${reason}) | P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)`
             ));
             console.log(chalk.gray(`      Market: ${marketIndicator}`));
+            
+            // Telegram alert
+            if (this.telegram) {
+                if (reason.includes('STOP_LOSS') || reason === 'EMERGENCY_STOP') {
+                    this.telegram.stopLossAlert(position.symbol, pnl, reason).catch(() => {});
+                } else {
+                    this.telegram.tradeAlert('SELL', position.symbol, order.price, order.amount, pnl).catch(() => {});
+                }
+            }
             
             return { ...order, pnl, pnlPercent, reason };
             
