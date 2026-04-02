@@ -310,6 +310,30 @@ app.get('/api/positions', async (req, res) => {
     }
 });
 
+// Manual sell endpoint for dashboard
+app.post('/api/sell/:symbol', async (req, res) => {
+    try {
+        if (!bot) {
+            return res.status(400).json({ success: false, error: 'Bot not running' });
+        }
+        const symbol = req.params.symbol;
+        const position = bot.openPositions.find(p => p.symbol === symbol);
+        if (!position) {
+            return res.status(404).json({ success: false, error: 'Position not found' });
+        }
+        console.log(chalk.yellow(`\n   🖐️ MANUAL SELL requested for ${symbol}`));
+        const trade = await bot.executeSell(position, 'MANUAL_SELL');
+        if (trade) {
+            res.json({ success: true, message: `Sold ${symbol}`, pnl: trade.pnl, price: trade.price });
+        } else {
+            res.status(500).json({ success: false, error: 'Sell execution failed' });
+        }
+    } catch (error) {
+        console.error('Manual sell error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 app.get('/api/trades', (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 50;
@@ -561,7 +585,7 @@ app.get('/', (req, res) => {
             <h2>Open Positions</h2>
             <table>
                 <thead>
-                    <tr><th>Symbol</th><th>Side</th><th>Amount</th><th>Entry</th><th>Current</th><th>P/L</th></tr>
+                    <tr><th>Symbol</th><th>Side</th><th>Amount</th><th>Entry</th><th>Current</th><th>P/L</th><th>Action</th></tr>
                 </thead>
                 <tbody id="positions"></tbody>
             </table>
@@ -623,7 +647,7 @@ app.get('/', (req, res) => {
                 // Update positions
                 const positionsEl = document.getElementById('positions');
                 positionsEl.innerHTML = positions.positions.length === 0 
-                    ? '<tr><td colspan="6" style="text-align:center;color:#8b949e;">No open positions</td></tr>'
+                    ? '<tr><td colspan="7" style="text-align:center;color:#8b949e;">No open positions</td></tr>'
                     : positions.positions.map(p => \`
                         <tr>
                             <td>\${p.symbol}</td>
@@ -632,6 +656,7 @@ app.get('/', (req, res) => {
                             <td>$\${p.entryPrice.toFixed(2)}</td>
                             <td>$\${p.currentPrice?.toFixed(2) || '-'}</td>
                             <td class="\${p.pnl >= 0 ? 'trade-buy' : 'trade-sell'}">\${p.pnl >= 0 ? '+' : ''}$\${p.pnl?.toFixed(2) || '0.00'}</td>
+                            <td><button onclick="manualSell('\${p.symbol}')" style="background:#e74c3c;color:white;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;">SELL</button></td>
                         </tr>
                     \`).join('');
                 
@@ -672,6 +697,23 @@ app.get('/', (req, res) => {
                 await fetch('/api/stop', { method: 'POST' });
                 addLog('🛑 Bot stopped');
                 fetchData();
+            }
+        }
+        
+        async function manualSell(symbol) {
+            if (confirm(\`Sell \${symbol} now?\`)) {
+                try {
+                    const res = await fetch(\`/api/sell/\${symbol}\`, { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success) {
+                        addLog(\`🖐️ MANUAL SOLD \${symbol} - P/L: $\${data.pnl?.toFixed(2) || '0.00'}\`);
+                    } else {
+                        addLog(\`❌ Sell failed: \${data.error}\`);
+                    }
+                    fetchData();
+                } catch (err) {
+                    addLog(\`❌ Sell error: \${err.message}\`);
+                }
             }
         }
         
