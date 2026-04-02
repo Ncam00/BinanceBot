@@ -156,16 +156,17 @@ class RiskManager {
     }
     
     /**
-     * Reset daily tracking (call at start of new day)
+     * Reset daily tracking (call at start of new day - NZST timezone)
      */
     resetDaily() {
-        const today = new Date().toDateString();
-        if (today !== this.lastResetDate) {
+        // Use NZST timezone for daily reset
+        const nzToday = new Date().toLocaleDateString('en-CA', { timeZone: 'Pacific/Auckland' });
+        if (nzToday !== this.lastResetDate) {
             this.dailyStartBalance = this.lockedTradingCapital; // Use locked capital, not total
             this.dailyPnL = 0;
             this.dailyTrades = 0;
             this.consecutiveLosses = 0;
-            this.lastResetDate = today;
+            this.lastResetDate = nzToday;
             
             // Reset daily goal tracking
             this.goalHitToday = false;

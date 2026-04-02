@@ -108,9 +108,13 @@ class TradeDatabase {
      * Get today's trades
      */
     getTodayTrades() {
-        const today = new Date().toISOString().split('T')[0];
+        // Use NZST timezone for "today" calculation
+        const nzDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Pacific/Auckland' }); // YYYY-MM-DD format
         return this.data.trades
-            .filter(t => t.timestamp.startsWith(today))
+            .filter(t => {
+                const tradeDate = new Date(t.timestamp).toLocaleDateString('en-CA', { timeZone: 'Pacific/Auckland' });
+                return tradeDate === nzDate;
+            })
             .reverse();
     }
     
