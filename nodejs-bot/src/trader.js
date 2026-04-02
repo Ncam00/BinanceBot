@@ -816,32 +816,29 @@ class Trader {
         }
         
         // ═══════════════════════════════════════════════════════════════
-        // SEMI-AGGRESSIVE+ PROFIT RULES - Capture gains FAST!
-        // Target: $4-6 USD/day = 12-15 wins @ $0.30-$0.50 each
+        // SEMI-AGGRESSIVE+ PROFIT RULES (FEE-AWARE)
+        // Binance fee: 0.1% per trade = 0.2% round trip (~$0.06 on $30)
+        // All thresholds account for fees - no fake profits!
+        // Target: $4-8 USD/day = 15-25 wins @ $0.25-$0.40 each
         // ═══════════════════════════════════════════════════════════════
         
-        // $0.50+ profit - TAKE IT NOW! (was $1.00)
+        // $0.50+ profit - TAKE IT NOW!
         if (profitUSD >= 0.50) {
             return { shouldSell: true, reason: `💰 QUICK_PROFIT +$${profitUSD.toFixed(2)} (≥$0.50 rule)` };
         }
         
-        // $0.25+ profit after 1 minute (was $0.50 after 3min)
-        if (profitUSD >= 0.25 && minutesHeld >= 1) {
+        // $0.30+ profit after 1 minute (clears fees with solid margin)
+        if (profitUSD >= 0.30 && minutesHeld >= 1) {
             return { shouldSell: true, reason: `💰 FAST_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(1)}min` };
         }
         
-        // $0.15+ profit after 90 seconds (was $0.10 after 2min)
-        if (profitUSD >= 0.15 && minutesHeld >= 1.5) {
-            return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} (≥$0.15 rule)` };
-        }
-        
-        // $0.10+ profit after 2 minutes (keep this one)
-        if (profitUSD >= 0.10 && minutesHeld >= 2) {
+        // $0.20+ profit after 2 minutes (still clears fees)
+        if (profitUSD >= 0.20 && minutesHeld >= 2) {
             return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(0)}min` };
         }
         
-        // Any profit > $0.03 after 10 minutes (was $0.02 after 15min)
-        if (profitUSD > 0.03 && minutesHeld >= 10) {
+        // $0.12+ profit after 5 minutes (minimum profitable trade after fees)
+        if (profitUSD >= 0.12 && minutesHeld >= 5) {
             return { shouldSell: true, reason: `💰 PATIENCE_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(0)}min` };
         }
         
