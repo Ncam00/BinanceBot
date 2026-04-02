@@ -388,10 +388,16 @@ class Trader {
                                 }
                             }
                             
-                            // Check multi-timeframe alignment
+                            // Check multi-timeframe alignment (STRICT: must be neutral or bullish)
                             if (advanced.analysis.multiTimeframe.signal === 'bearish') {
                                 buyConfirmed = false;
-                                advancedReasons.push('❌ Higher timeframes bearish');
+                                advancedReasons.push('❌ Higher timeframes bearish - blocked');
+                            }
+                            
+                            // Volume confirmation - skip low volume entries
+                            if (advanced.analysis.volume && advanced.analysis.volume.ratio < 0.7) {
+                                buyConfirmed = false;
+                                advancedReasons.push('❌ Low volume - skip entry');
                             }
                             
                             // Boost if near support
@@ -845,34 +851,34 @@ class Trader {
         }
         
         // ═══════════════════════════════════════════════════════════════
-        // SEMI-AGGRESSIVE+ PROFIT RULES (FEE-AWARE)
-        // Binance fee: 0.1% per trade = 0.2% round trip (~$0.06 on $30)
-        // All thresholds account for fees - no fake profits!
-        // Target: $4-8 USD/day = 15-25 wins @ $0.25-$0.40 each
+        // LET-WINNERS-RUN PROFIT RULES (FEE-AWARE)
+        // Binance fee: 0.1% per trade = 0.2% round trip (~$0.10 on $50)
+        // Let trailing stop handle exits — only grab obvious wins
+        // Target: 8-18 trades/day, $0.40-$0.80 avg win
         // ═══════════════════════════════════════════════════════════════
         
-        // $0.50+ profit - TAKE IT NOW!
+        // $0.75+ profit - TAKE IT (solid win, no need to risk reversal)
+        if (profitUSD >= 0.75) {
+            return { shouldSell: true, reason: `💰 STRONG_PROFIT +$${profitUSD.toFixed(2)} (≥$0.75 rule)` };
+        }
+        
+        // $0.50+ profit - set tight trailing stop to lock it in
         if (profitUSD >= 0.50) {
-            return { shouldSell: true, reason: `💰 QUICK_PROFIT +$${profitUSD.toFixed(2)} (≥$0.50 rule)` };
+            return { shouldSell: false, setTrailingStop: true, trailPercent: 0.25, reason: `🔒 Trailing $0.50+ profit` };
         }
         
-        // $0.30+ profit after 1 minute (clears fees with solid margin)
-        if (profitUSD >= 0.30 && minutesHeld >= 1) {
-            return { shouldSell: true, reason: `💰 FAST_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(1)}min` };
-        }
-        
-        // $0.20+ profit after 2 minutes (still clears fees)
-        if (profitUSD >= 0.20 && minutesHeld >= 2) {
+        // $0.40+ profit after 2 minutes - take it, good enough
+        if (profitUSD >= 0.40 && minutesHeld >= 2) {
             return { shouldSell: true, reason: `💰 SMART_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(0)}min` };
         }
         
-        // $0.12+ profit after 5 minutes (minimum profitable trade after fees)
-        if (profitUSD >= 0.12 && minutesHeld >= 5) {
+        // $0.30+ profit after 5 minutes - position stalling, take and rotate
+        if (profitUSD >= 0.30 && minutesHeld >= 5) {
             return { shouldSell: true, reason: `💰 PATIENCE_PROFIT +$${profitUSD.toFixed(2)} after ${minutesHeld.toFixed(0)}min` };
         }
         
-        // In bullish market with decent profit - trail TIGHTER (0.3% vs 0.4%)
-        if (isBullish && profitPercent >= 0.6) {
+        // In profit and bullish - set trailing stop to let it run further
+        if (isBullish && profitPercent >= 0.4) {
             return { shouldSell: false, setTrailingStop: true, trailPercent: 0.3 };
         }
         
