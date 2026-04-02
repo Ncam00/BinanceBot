@@ -1,16 +1,17 @@
 /**
  * Trading Strategy Engine
  * =======================
- * RSI + MACD + EMA Crossover Strategy with Volume Confirmation
+ * RSI + MACD + EMA Crossover Strategy with ADX Trend Filter,
+ * ATR Volatility, Bollinger Bands, and Volume Confirmation
  */
 
-const { RSI, MACD, EMA, SMA } = require('technicalindicators');
+const { RSI, MACD, EMA, SMA, ADX, ATR, BollingerBands } = require('technicalindicators');
 
 class Strategy {
     constructor(config) {
         this.config = config;
         this.rsiPeriod = config.rsiPeriod || 14;
-        this.rsiOversold = config.rsiOversold || 30;
+        this.rsiOversold = config.rsiOversold || 35;
         this.rsiOverbought = config.rsiOverbought || 70;
         this.emaFast = config.emaFast || 9;
         this.emaSlow = config.emaSlow || 21;
@@ -63,6 +64,90 @@ class Strategy {
         });
         return values;
     }
+
+    /**
+     * Calculate ADX (Average Directional Index) for trend strength
+     * ADX >= 20 = trending, ADX < 20 = ranging/choppy
+     */
+    calculateADX(highs, lows, closes, period = 14) {
+        const values = ADX.calculate({
+            high: highs,
+            low: lows,
+            close: closes,
+            period: period
+        });
+        return values;
+    }
+
+    /**
+     * Calculate ATR (Average True Range) for volatility measurement
+     */
+    calculateATR(highs, lows, closes, period = 14) {
+        const values = ATR.calculate({
+            high: highs,
+            low: lows,
+            close: closes,
+            period: period
+        });
+        return values;
+    }
+
+    /**
+     * Calculate Bollinger Bands for mean-reversion context
+     */
+    calculateBB(closes, period = 20, stdDev = 2) {
+        const values = BollingerBands.calculate({
+            values: closes,
+            period: period,
+            stdDev: stdDev
+        });
+        return values;
+    }
+
+    /**
+     * Detect real RSI divergence using swing highs/lows over lookback period
+     */
+    detectRSIDivergence(closes, rsiValues, lookback = 15) {
+        const result = { bullish: false, bearish: false };
+        if (closes.length < lookback + 2 || rsiValues.length < lookback + 2) return result;
+
+        const len = closes.length;
+        const rsiLen = rsiValues.length;
+        const offset = len - rsiLen;
+
+        const priceLows = [];
+        const priceHighs = [];
+        for (let i = len - lookback; i < len - 1; i++) {
+            if (i < 1) continue;
+            const rsiIdx = i - offset;
+            if (rsiIdx < 1 || rsiIdx >= rsiLen - 1) continue;
+
+            if (closes[i] < closes[i - 1] && closes[i] < closes[i + 1]) {
+                priceLows.push({ price: closes[i], rsi: rsiValues[rsiIdx], idx: i });
+            }
+            if (closes[i] > closes[i - 1] && closes[i] > closes[i + 1]) {
+                priceHighs.push({ price: closes[i], rsi: rsiValues[rsiIdx], idx: i });
+            }
+        }
+
+        if (priceLows.length >= 2) {
+            const prev = priceLows[priceLows.length - 2];
+            const last = priceLows[priceLows.length - 1];
+            if (last.price < prev.price && last.rsi > prev.rsi && last.rsi < 50) {
+                result.bullish = true;
+            }
+        }
+
+        if (priceHighs.length >= 2) {
+            const prev = priceHighs[priceHighs.length - 2];
+            const last = priceHighs[priceHighs.length - 1];
+            if (last.price > prev.price && last.rsi < prev.rsi && last.rsi > 50) {
+                result.bearish = true;
+            }
+        }
+
+        return result;
+    }
     
     /**
      * Analyze candles and generate trading signal
@@ -102,6 +187,34 @@ class Strategy {
         const avgVolume = volumeSMA[volumeSMA.length - 1];
         
         const currentPrice = closes[closes.length - 1];
+
+        // ADX trend detection
+        const adxValues = this.calculateADX(highs, lows, closes, 14);
+        const currentADX = adxValues.length > 0 ? adxValues[adxValues.length - 1] : null;
+        const adxStrength = currentADX ? currentADX.adx : 0;
+        const isTrending = adxStrength >= 20;
+        const isUptrend = currentADX ? currentADX.pdi > currentADX.mdi : false;
+        const marketRegime = isTrending ? 'TRENDING' : 'RANGING';
+
+        // ATR volatility
+        const atrValues = this.calculateATR(highs, lows, closes, 14);
+        const currentATR = atrValues.length > 0 ? atrValues[atrValues.length - 1] : 0;
+        const atrPercent = currentPrice > 0 ? (currentATR / currentPrice) * 100 : 0;
+
+        // Bollinger Bands
+        const bbValues = this.calculateBB(closes, 20, 2);
+        const currentBB = bbValues.length > 0 ? bbValues[bbValues.length - 1] : null;
+        let pbValue = 0.5;
+        let nearLowerBand = false;
+        let nearUpperBand = false;
+        if (currentBB && currentBB.upper !== currentBB.lower) {
+            pbValue = (currentPrice - currentBB.lower) / (currentBB.upper - currentBB.lower);
+            nearLowerBand = pbValue < 0.1;
+            nearUpperBand = pbValue > 0.9;
+        }
+
+        // RSI divergence (proper swing-based detection)
+        const divergence = this.detectRSIDivergence(closes, rsiValues, 15);
         
         // Initialize signal tracking
         let buySignals = 0;
@@ -119,14 +232,14 @@ class Strategy {
             reasons.push(`RSI low (${currentRSI.toFixed(1)})`);
         }
         
-        // 2. RSI Divergence (price making lower lows but RSI making higher lows)
-        if (prevRSI && currentRSI > prevRSI && closes[closes.length - 1] < closes[closes.length - 2]) {
-            buySignals += 1;
-            reasons.push('Bullish RSI divergence');
+        // 2. RSI Divergence (proper swing-based)
+        if (divergence.bullish) {
+            buySignals += 2;
+            reasons.push('Bullish RSI divergence (swing)');
         }
         
-        // 3. MACD Crossover (bullish)
-        if (currentMACD && prevMACD) {
+        // 3. MACD Crossover (bullish) — ONLY in trending markets
+        if (currentMACD && prevMACD && isTrending) {
             if (currentMACD.MACD > currentMACD.signal && prevMACD.MACD <= prevMACD.signal) {
                 buySignals += 2;
                 reasons.push('MACD bullish crossover');
@@ -142,13 +255,21 @@ class Strategy {
             }
         }
         
-        // 4. EMA Crossover (bullish)
-        if (currentEMAFast > currentEMASlow && prevEMAFast <= prevEMASlow) {
-            buySignals += 2;
-            reasons.push('EMA bullish crossover');
-        } else if (currentEMAFast > currentEMASlow) {
+        // 4. EMA Crossover (bullish) — ONLY in trending markets
+        if (isTrending) {
+            if (currentEMAFast > currentEMASlow && prevEMAFast <= prevEMASlow) {
+                buySignals += 2;
+                reasons.push('EMA bullish crossover');
+            } else if (currentEMAFast > currentEMASlow) {
+                buySignals += 1;
+                reasons.push('Price above EMA trend');
+            }
+        }
+
+        // 4b. ADX direction alignment bonus
+        if (isTrending && isUptrend && buySignals > 0) {
             buySignals += 1;
-            reasons.push('Price above EMA trend');
+            reasons.push(`ADX uptrend (${adxStrength.toFixed(0)})`);
         }
         
         // 5. Volume Confirmation
@@ -157,10 +278,16 @@ class Strategy {
             reasons.push('High volume confirmation');
         }
         
-        // 6. Price above EMAs (trend confirmation)
-        if (currentPrice > currentEMAFast && currentPrice > currentEMASlow) {
+        // 6. Price above EMAs (trend confirmation) — only when trending
+        if (isTrending && currentPrice > currentEMAFast && currentPrice > currentEMASlow) {
             buySignals += 1;
             reasons.push('Price in uptrend');
+        }
+
+        // 7. Bollinger Band bounce — RANGING market mean-reversion
+        if (!isTrending && nearLowerBand && currentRSI < 45) {
+            buySignals += 2;
+            reasons.push(`BB lower band bounce (pb=${pbValue.toFixed(2)}, ranging)`);
         }
         
         // ========== SELL SIGNALS ==========
@@ -174,14 +301,14 @@ class Strategy {
             reasons.push(`RSI elevated (${currentRSI.toFixed(1)})`);
         }
         
-        // 2. RSI Divergence (bearish)
-        if (prevRSI && currentRSI < prevRSI && closes[closes.length - 1] > closes[closes.length - 2]) {
-            sellSignals += 1;
-            reasons.push('Bearish RSI divergence');
+        // 2. RSI Divergence (proper swing-based)
+        if (divergence.bearish) {
+            sellSignals += 2;
+            reasons.push('Bearish RSI divergence (swing)');
         }
         
-        // 3. MACD Crossover (bearish)
-        if (currentMACD && prevMACD) {
+        // 3. MACD Crossover (bearish) — ONLY in trending markets
+        if (currentMACD && prevMACD && isTrending) {
             if (currentMACD.MACD < currentMACD.signal && prevMACD.MACD >= prevMACD.signal) {
                 sellSignals += 2;
                 reasons.push('MACD bearish crossover');
@@ -197,19 +324,33 @@ class Strategy {
             }
         }
         
-        // 4. EMA Crossover (bearish)
-        if (currentEMAFast < currentEMASlow && prevEMAFast >= prevEMASlow) {
-            sellSignals += 2;
-            reasons.push('EMA bearish crossover');
-        } else if (currentEMAFast < currentEMASlow) {
+        // 4. EMA Crossover (bearish) — ONLY in trending markets
+        if (isTrending) {
+            if (currentEMAFast < currentEMASlow && prevEMAFast >= prevEMASlow) {
+                sellSignals += 2;
+                reasons.push('EMA bearish crossover');
+            } else if (currentEMAFast < currentEMASlow) {
+                sellSignals += 1;
+                reasons.push('Price below EMA trend');
+            }
+        }
+
+        // 4b. ADX direction alignment bonus (downtrend)
+        if (isTrending && !isUptrend && sellSignals > 0) {
             sellSignals += 1;
-            reasons.push('Price below EMA trend');
+            reasons.push(`ADX downtrend (${adxStrength.toFixed(0)})`);
         }
         
-        // 5. Price below EMAs (downtrend)
-        if (currentPrice < currentEMAFast && currentPrice < currentEMASlow) {
+        // 5. Price below EMAs (downtrend) — only when trending
+        if (isTrending && currentPrice < currentEMAFast && currentPrice < currentEMASlow) {
             sellSignals += 1;
             reasons.push('Price in downtrend');
+        }
+
+        // 6. Bollinger Band upper rejection — mean-reversion sell
+        if (nearUpperBand && currentRSI > 55) {
+            sellSignals += 2;
+            reasons.push(`BB upper band rejection (pb=${pbValue.toFixed(2)})`);
         }
         
         // ========== DETERMINE ACTION ==========
@@ -241,7 +382,14 @@ class Strategy {
                 emaSlow: currentEMASlow,
                 volume: currentVolume,
                 avgVolume,
-                price: currentPrice
+                price: currentPrice,
+                adx: adxStrength,
+                marketRegime,
+                atr: currentATR,
+                atrPercent,
+                bb: currentBB,
+                bbMiddle: currentBB ? currentBB.middle : null,
+                pbValue
             }
         };
     }
