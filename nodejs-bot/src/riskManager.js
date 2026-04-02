@@ -577,6 +577,16 @@ class RiskManager {
     }
     
     /**
+     * Get recent loss rate (0-1) for bearish market guard
+     * Returns ratio of losing trades in last 30 min
+     */
+    getRecentLossRate() {
+        if (!this.recentTrades || this.recentTrades.length < 3) return 0;
+        const losses = this.recentTrades.filter(t => t.pnl < 0).length;
+        return losses / this.recentTrades.length;
+    }
+    
+    /**
      * Check if we should take a quick profit on current position
      * SMART: Takes small profits quickly OR trails in bullish markets
      */

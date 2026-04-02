@@ -207,6 +207,29 @@ class Trader {
         const balance = await this.exchange.getBalance();
         this.riskManager.updateBalance(balance);
         
+        // ════════════════════════════════════════════════════════════════════
+        // 🛡️ BEARISH MARKET GUARD - Don't open new positions in bearish markets
+        // Checks BTC trend + recent trade performance to detect bad conditions
+        // ════════════════════════════════════════════════════════════════════
+        let bearishGuardActive = false;
+        if (this.useAdvancedAnalysis) {
+            try {
+                const btcTrend = await this.advancedAnalysis.analyzeBTCTrend();
+                const recentLosses = this.riskManager.getRecentLossRate ? this.riskManager.getRecentLossRate() : 0;
+                
+                // Block buys when: BTC bearish trend OR losing >60% of recent trades
+                if (btcTrend.trend === 'bearish' || (btcTrend.change1h < -0.3 && btcTrend.emaTrend === 'bearish')) {
+                    bearishGuardActive = true;
+                    console.log(chalk.red(`   🛡️ BEARISH GUARD ACTIVE: ${btcTrend.reason} - New buys paused`));
+                } else if (recentLosses > 0.6) {
+                    bearishGuardActive = true;
+                    console.log(chalk.red(`   🛡️ BEARISH GUARD ACTIVE: ${Math.round(recentLosses * 100)}% recent losses - New buys paused`));
+                }
+            } catch (e) {
+                // Guard check failed, allow trading
+            }
+        }
+        
         // Analyze each trading pair
         for (const symbol of this.config.tradingPairs) {
             try {
@@ -320,6 +343,12 @@ class Trader {
                     // BLOCK BUYS if floor protection is active
                     if (this.floorProtectionActive) {
                         console.log(chalk.red(`   🛑 BUY BLOCKED [${symbol}] - Floor protection active`));
+                        continue;
+                    }
+                    
+                    // BLOCK BUYS if bearish market guard is active
+                    if (bearishGuardActive) {
+                        console.log(chalk.yellow(`   🛡️ BUY BLOCKED [${symbol}] - Bearish market guard`));
                         continue;
                     }
                     
