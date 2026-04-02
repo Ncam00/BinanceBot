@@ -539,12 +539,12 @@ class RiskManager {
      */
     getDynamicStopLoss(basePercent) {
         if (this.dailyPnL >= this.dailyProfitGoalMaxUSD) {
-            // Hit max goal - very tight stop
-            return Math.min(basePercent, 0.5);
+            // Hit max goal - tighter stop but not below noise floor
+            return Math.max(1.0, Math.min(basePercent, 1.5));
         }
         if (this.conservativeMode) {
-            // Hit min goal - tighter stop
-            return Math.min(basePercent, 1.0);
+            // Hit min goal - moderate stop
+            return Math.max(1.0, Math.min(basePercent, 2.0));
         }
         // Normal stop loss
         return basePercent;
@@ -579,11 +579,20 @@ class RiskManager {
     /**
      * Get recent loss rate (0-1) for bearish market guard
      * Returns ratio of losing trades in last 30 min
+     * Returns 0 if no recent trades (prevents deadlock when guard blocks all buys)
      */
     getRecentLossRate() {
-        if (!this.recentTrades || this.recentTrades.length < 3) return 0;
-        const losses = this.recentTrades.filter(t => t.pnl < 0).length;
-        return losses / this.recentTrades.length;
+        if (!this.recentTrades || this.recentTrades.length === 0) return 0;
+        
+        // Only count trades from the last 30 minutes
+        const cutoff = Date.now() - 30 * 60 * 1000;
+        const recentOnly = this.recentTrades.filter(t => t.timestamp > cutoff);
+        
+        // Need at least 3 recent trades to judge — otherwise assume fine
+        if (recentOnly.length < 3) return 0;
+        
+        const losses = recentOnly.filter(t => t.pnl < 0).length;
+        return losses / recentOnly.length;
     }
     
     /**
@@ -654,6 +663,20 @@ class RiskManager {
         return false;
     }
     
+    /**
+     * Calculate ATR-based dynamic stop-loss
+     * Uses ATR * multiplier, capped between 0.3% and 3%
+     */
+    getATRStopLoss(entryPrice, atr, multiplier = 1.5) {
+        const stopDistance = atr * multiplier;
+        const stopPercent = (stopDistance / entryPrice) * 100;
+        const cappedPercent = Math.max(1.0, Math.min(stopPercent, 3.0));
+        return {
+            stopPrice: entryPrice * (1 - cappedPercent / 100),
+            stopPercent: cappedPercent
+        };
+    }
+
     /**
      * Calculate stop-loss price
      */

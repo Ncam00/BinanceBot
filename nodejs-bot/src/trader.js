@@ -136,13 +136,16 @@ class Trader {
                     }
                     
                     // Add as existing position (we don't know entry price, use current)
+                    // Use ATR stop for synced positions (default 1.5% floor)
+                    const defaultAtrStopPercent = 1.5;
                     const existingPos = {
                         symbol,
                         side: 'BUY',
                         amount: validQty, // Use validated quantity
                         entryPrice: currentPrice, // Unknown, estimate as current
                         currentPrice: currentPrice,
-                        stopLoss: currentPrice * (1 - this.config.stopLossPercent / 100),
+                        stopLoss: currentPrice * (1 - defaultAtrStopPercent / 100),
+                        atrStopPercent: defaultAtrStopPercent,
                         takeProfit: currentPrice * (1 + this.config.takeProfitPercent / 100),
                         timestamp: Date.now(),
                         isExisting: true, // Flag to know this came from existing holdings
@@ -241,7 +244,7 @@ class Trader {
                     console.log(chalk.red(`   🛡️ BEARISH GUARD ACTIVE: ${btcTrend.reason} - New buys paused`));
                 } else if (recentLosses > 0.6) {
                     bearishGuardActive = true;
-                    console.log(chalk.red(`   🛡️ BEARISH GUARD ACTIVE: ${Math.round(recentLosses * 100)}% recent losses - New buys paused`));
+                    console.log(chalk.yellow(`   🛡️ LOSS GUARD ACTIVE: ${Math.round(recentLosses * 100)}% recent losses (auto-clears after 30min) - New buys paused`));
                 }
             } catch (e) {
                 // Guard check failed, allow trading
@@ -520,14 +523,23 @@ class Trader {
             // Execute the buy
             const order = await this.exchange.marketBuy(symbol, quantity);
             
-            // Track position
+            // Track position — use ATR-based stop if available
+            let stopLoss = this.riskManager.getStopLossPrice(order.price);
+            let atrStopPercent = null;
+            if (signal.indicators && signal.indicators.atr) {
+                const atrStop = this.riskManager.getATRStopLoss(order.price, signal.indicators.atr, 1.5);
+                stopLoss = atrStop.stopPrice;
+                atrStopPercent = atrStop.stopPercent;
+            }
+
             const position = {
                 symbol,
                 side: 'BUY',
                 amount: order.amount,
                 entryPrice: order.price,
                 currentPrice: order.price,
-                stopLoss: this.riskManager.getStopLossPrice(order.price),
+                stopLoss,
+                atrStopPercent,
                 takeProfit: this.riskManager.getTakeProfitPrice(order.price),
                 timestamp: Date.now(),
                 signal: signal
@@ -551,8 +563,10 @@ class Trader {
             console.log(chalk.green(
                 `\n   ✅ BUY ${order.amount.toFixed(6)} ${symbol} @ $${order.price.toFixed(2)}`
             ));
+            const stopType = atrStopPercent ? `ATR ${atrStopPercent.toFixed(1)}%` : 'fixed';
+            const regime = signal.indicators && signal.indicators.marketRegime ? ` [${signal.indicators.marketRegime}]` : '';
             console.log(chalk.gray(
-                `      Stop-Loss: $${position.stopLoss.toFixed(2)} | Take-Profit: $${position.takeProfit.toFixed(2)}`
+                `      Stop-Loss: $${position.stopLoss.toFixed(2)} (${stopType}) | Take-Profit: $${position.takeProfit.toFixed(2)}${regime}`
             ));
             
             return order;
@@ -611,7 +625,12 @@ class Trader {
             existingPosition.amount = totalAmount;
             existingPosition.entryPrice = newAvgEntry;
             existingPosition.dcaCount = (existingPosition.dcaCount || 0) + 1;
-            existingPosition.stopLoss = this.riskManager.getStopLossPrice(newAvgEntry);
+            // Preserve ATR-based stop if position had one, otherwise use fixed
+            if (existingPosition.atrStopPercent) {
+                existingPosition.stopLoss = newAvgEntry * (1 - existingPosition.atrStopPercent / 100);
+            } else {
+                existingPosition.stopLoss = this.riskManager.getStopLossPrice(newAvgEntry);
+            }
             existingPosition.takeProfit = this.riskManager.getTakeProfitPrice(newAvgEntry);
             
             // Track DCA with manager
@@ -863,7 +882,8 @@ class Trader {
                 // DYNAMIC TAKE PROFIT - Adjusts based on daily goal progress
                 // ════════════════════════════════════════════════════════════════
                 const dynamicTakeProfit = this.riskManager.getDynamicTakeProfit(this.config.takeProfitPercent);
-                const dynamicStopLoss = this.riskManager.getDynamicStopLoss(this.config.stopLossPercent);
+                // Use ATR-based stop if position has one, otherwise fall back to dynamic
+                const dynamicStopLoss = position.atrStopPercent || this.riskManager.getDynamicStopLoss(this.config.stopLossPercent);
                 
                 // Update position's dynamic targets
                 position.dynamicTakeProfit = position.entryPrice * (1 + dynamicTakeProfit / 100);
