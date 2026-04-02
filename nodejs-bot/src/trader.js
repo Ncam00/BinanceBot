@@ -26,28 +26,31 @@ class Trader {
         this.advancedAnalysis = new AdvancedAnalysis(exchange);
         this.useAdvancedAnalysis = config.useAdvancedAnalysis !== false; // ON by default
         
-        // ═══════════════════════════════════════════════════════════════════
+        // ══════════════════════════════════════════════════════════════════�?
         // NEW FEATURES: DCA + Momentum Scalping
-        // ═══════════════════════════════════════════════════════════════════
+        // ══════════════════════════════════════════════════════════════════�?
         this.dcaManager = new DCAManager(config);
         this.momentumScalper = new MomentumScalper(exchange, config);
         
-        // ═══════════════════════════════════════════════════════════════════
+        // ══════════════════════════════════════════════════════════════════�?
         // PORTFOLIO FLOOR PROTECTION - Never go below this value!
-        // ═══════════════════════════════════════════════════════════════════
+        // ══════════════════════════════════════════════════════════════════�?
         this.portfolioFloor = config.portfolioFloor || 327; // ~$50 NZD below start
         this.floorProtectionActive = false;
         
         // ════════════════════════════════════════════════════════════════════
-        // SMARTER THRESHOLDS - Be selective on entries, patient on exits!
+        // HIGH WIN RATE THRESHOLDS - Only trade very strong signals!
         // ════════════════════════════════════════════════════════════════════
-        // Higher buy threshold = fewer but better entries
-        this.buySignalThreshold = config.buySignalThreshold || 0.55;
-        // Higher sell threshold = only sell on STRONG bearish signals
-        this.sellSignalThreshold = config.sellSignalThreshold || 0.70;
+        // Much higher buy threshold = fewer but WINNING entries
+        this.buySignalThreshold = config.buySignalThreshold || 0.72;
+        // Higher sell threshold = don't panic sell on weak signals
+        this.sellSignalThreshold = config.sellSignalThreshold || 0.88;
         
-        // CRITICAL: Minimum hold time before signal-based selling (5 minutes)
-        this.minHoldTime = 5 * 60 * 1000;
+        // CRITICAL: Minimum hold time before signal-based selling (15 minutes)
+        this.minHoldTime = 8 * 60 * 1000;
+        
+        // CRITICAL: Minimum ADX for trend confirmation (skip choppy markets)
+        this.minADX = 22;
         
         // CRITICAL: Only sell on signals if position is in profit
         this.onlySellInProfit = true;
@@ -61,12 +64,12 @@ class Trader {
         this.marketSentiment = 'neutral'; // bullish, neutral, bearish
         
         // ════════════════════════════════════════════════════════════════════
-        // CORRELATION GUARD - Prevent buying too many correlated coins
+        // CORRELATION GUARD - BALANCED: Stable coins + select mid-caps
         // ════════════════════════════════════════════════════════════════════
         this.correlationGroups = {
             'large_cap': ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT'],
-            'mid_alt':   ['XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT', 'FETUSDT'],
-            'meme':      ['DOGEUSDT', 'PEPEUSDT', 'SHIBUSDT', 'FLOKIUSDT', 'WIFUSDT', 'BONKUSDT', 'TRUMPUSDT', '1000SATSUSDT']
+            'mid_alt':   ['XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT', 'NEARUSDT'],
+            'narrative': ['FETUSDT']  // AI play
         };
         this.maxPerGroup = 2; // Max 2 positions from same correlation group
         
@@ -163,7 +166,7 @@ class Trader {
             }
             
             if (this.existingHoldings.length > 0) {
-                console.log(chalk.cyan(`\n   ✓ Synced ${this.existingHoldings.length} tradeable holdings\n`));
+                console.log(chalk.cyan(`\n   �?Synced ${this.existingHoldings.length} tradeable holdings\n`));
             } else {
                 console.log(chalk.yellow(`\n   ⚠️ No existing holdings meet tradeable requirements\n`));
             }
@@ -191,7 +194,7 @@ class Trader {
                 return true; // Floor breached
             } else {
                 if (this.floorProtectionActive) {
-                    console.log(chalk.green(`\n   ✅ Floor protection deactivated - Portfolio recovered to $${totalValue.toFixed(2)}\n`));
+                    console.log(chalk.green(`\n   �?Floor protection deactivated - Portfolio recovered to $${totalValue.toFixed(2)}\n`));
                 }
                 this.floorProtectionActive = false;
                 return false; // OK
@@ -229,7 +232,7 @@ class Trader {
         this.riskManager.updateBalance(balance);
         
         // ════════════════════════════════════════════════════════════════════
-        // 🛡️ BEARISH MARKET GUARD - Don't open new positions in bearish markets
+        // 🛡�?BEARISH MARKET GUARD - Don't open new positions in bearish markets
         // Checks BTC trend + recent trade performance to detect bad conditions
         // ════════════════════════════════════════════════════════════════════
         let bearishGuardActive = false;
@@ -241,10 +244,10 @@ class Trader {
                 // Block buys when: BTC bearish trend OR losing >60% of recent trades
                 if (btcTrend.trend === 'bearish' || (btcTrend.change1h < -0.3 && btcTrend.emaTrend === 'bearish')) {
                     bearishGuardActive = true;
-                    console.log(chalk.red(`   🛡️ BEARISH GUARD ACTIVE: ${btcTrend.reason} - New buys paused`));
+                    console.log(chalk.red(`   🛡�?BEARISH GUARD ACTIVE: ${btcTrend.reason} - New buys paused`));
                 } else if (recentLosses > 0.6) {
                     bearishGuardActive = true;
-                    console.log(chalk.yellow(`   🛡️ LOSS GUARD ACTIVE: ${Math.round(recentLosses * 100)}% recent losses (auto-clears after 30min) - New buys paused`));
+                    console.log(chalk.yellow(`   🛡�?LOSS GUARD ACTIVE: ${Math.round(recentLosses * 100)}% recent losses (auto-clears after 30min) - New buys paused`));
                 }
             } catch (e) {
                 // Guard check failed, allow trading
@@ -304,7 +307,7 @@ class Trader {
                             const dcaTrade = await this.executeDCABuy(existingPosition, signal);
                             if (dcaTrade) {
                                 results.trades.push(dcaTrade);
-                                console.log(chalk.green(`   ✅ DCA executed - new avg entry adjusted`));
+                                console.log(chalk.green(`   �?DCA executed - new avg entry adjusted`));
                             }
                         }
                     }
@@ -369,7 +372,7 @@ class Trader {
                     
                     // BLOCK BUYS if bearish market guard is active
                     if (bearishGuardActive) {
-                        console.log(chalk.yellow(`   🛡️ BUY BLOCKED [${symbol}] - Bearish market guard`));
+                        console.log(chalk.yellow(`   🛡�?BUY BLOCKED [${symbol}] - Bearish market guard`));
                         continue;
                     }
                     
@@ -398,6 +401,16 @@ class Trader {
                     }
                     
                     // ════════════════════════════════════════════════════════════
+                    // ADX FILTER: Skip choppy/ranging markets (HIGH WIN RATE!)
+                    // Only trade when there's a clear trend (ADX >= minADX)
+                    // ════════════════════════════════════════════════════════════
+                    const currentADX = signal.indicators.adx || 0;
+                    if (currentADX < this.minADX) {
+                        console.log(chalk.gray(`   📉 BUY SKIPPED [${symbol}] - Weak trend (ADX ${currentADX.toFixed(1)} < ${this.minADX})`));
+                        continue;
+                    }
+                    
+                    // ════════════════════════════════════════════════════════════
                     // MOMENTUM SCALP CHECK: Boost signal for momentum plays
                     // ════════════════════════════════════════════════════════════
                     let momentumBoost = 0;
@@ -406,7 +419,7 @@ class Trader {
                         if (momentum.hasMomentum) {
                             momentumBoost = 0.15; // +15% signal strength boost
                             console.log(chalk.magenta(`   🚀 MOMENTUM detected ${symbol}: ${momentum.reason}`));
-                            console.log(chalk.magenta(`      Signal boosted: ${signal.strength.toFixed(2)} → ${(signal.strength + momentumBoost).toFixed(2)}`));
+                            console.log(chalk.magenta(`      Signal boosted: ${signal.strength.toFixed(2)} �?${(signal.strength + momentumBoost).toFixed(2)}`));
                         }
                     } catch (e) {
                         // Momentum check optional, continue without it
@@ -429,30 +442,31 @@ class Trader {
                                 // Only block if wall + bearish timeframes together
                                 if (advanced.analysis.multiTimeframe.signal === 'bearish') {
                                     buyConfirmed = false;
-                                    advancedReasons.push('❌ Sell wall + bearish timeframes - blocked');
+                                    advancedReasons.push('�?Sell wall + bearish timeframes - blocked');
                                 }
                             }
                             
-                            // Check multi-timeframe alignment (STRICT: must be neutral or bullish)
-                            if (advanced.analysis.multiTimeframe.signal === 'bearish') {
+                            // HIGH WIN RATE: Require BULLISH multi-timeframe (not just "not bearish")
+                            // This is stricter but results in much higher win rate
+                            if (advanced.analysis.multiTimeframe.signal !== 'bullish') {
                                 buyConfirmed = false;
-                                advancedReasons.push('❌ Higher timeframes bearish - blocked');
+                                advancedReasons.push(`�?Higher timeframes not bullish (${advanced.analysis.multiTimeframe.signal}) - HIGH WIN RATE filter`);
                             }
                             
                             // Volume confirmation - skip low volume entries
-                            if (advanced.analysis.volume && advanced.analysis.volume.ratio < 0.7) {
+                            if (advanced.analysis.volume && advanced.analysis.volume.ratio < 0.8) {
                                 buyConfirmed = false;
-                                advancedReasons.push('❌ Low volume - skip entry');
+                                advancedReasons.push('�?Low volume (<0.8x avg) - skip entry');
                             }
                             
                             // Boost if near support
                             if (advanced.analysis.supportResistance.nearSupport) {
-                                advancedReasons.push('✅ Near support - good entry');
+                                advancedReasons.push('�?Near support - good entry');
                             }
                             
                             // Boost if all timeframes aligned bullish
                             if (advanced.analysis.multiTimeframe.aligned && advanced.analysis.multiTimeframe.signal === 'bullish') {
-                                advancedReasons.push('✅ All timeframes bullish');
+                                advancedReasons.push('�?All timeframes bullish');
                             }
                             
                             // Log advanced analysis
@@ -512,7 +526,7 @@ class Trader {
         }
         
         // Log dynamic sizing
-        console.log(chalk.gray(`   📊 Dynamic sizing: signal ${signalStrength.toFixed(2)} → qty ${quantity.toFixed(6)}`));
+        console.log(chalk.gray(`   📊 Dynamic sizing: signal ${signalStrength.toFixed(2)} �?qty ${quantity.toFixed(6)}`));
         
         if (quantity <= 0) {
             console.log(chalk.yellow(`   ⚠️ Position size too small for ${symbol}`));
@@ -523,7 +537,7 @@ class Trader {
             // Execute the buy
             const order = await this.exchange.marketBuy(symbol, quantity);
             
-            // Track position — use ATR-based stop if available
+            // Track position �?use ATR-based stop if available
             let stopLoss = this.riskManager.getStopLossPrice(order.price);
             let atrStopPercent = null;
             if (signal.indicators && signal.indicators.atr) {
@@ -561,7 +575,7 @@ class Trader {
             });
             
             console.log(chalk.green(
-                `\n   ✅ BUY ${order.amount.toFixed(6)} ${symbol} @ $${order.price.toFixed(2)}`
+                `\n   �?BUY ${order.amount.toFixed(6)} ${symbol} @ $${order.price.toFixed(2)}`
             ));
             const stopType = atrStopPercent ? `ATR ${atrStopPercent.toFixed(1)}%` : 'fixed';
             const regime = signal.indicators && signal.indicators.marketRegime ? ` [${signal.indicators.marketRegime}]` : '';
@@ -577,7 +591,7 @@ class Trader {
             return order;
             
         } catch (error) {
-            console.error(chalk.red(`   ❌ Buy failed for ${symbol}: ${error.message}`));
+            console.error(chalk.red(`   �?Buy failed for ${symbol}: ${error.message}`));
             return null;
         }
     }
@@ -664,7 +678,7 @@ class Trader {
             return order;
             
         } catch (error) {
-            console.error(chalk.red(`   ❌ DCA buy failed for ${symbol}: ${error.message}`));
+            console.error(chalk.red(`   �?DCA buy failed for ${symbol}: ${error.message}`));
             return null;
         }
     }
@@ -682,10 +696,10 @@ class Trader {
                 const assetBalance = account.balances.find(b => b.asset === asset);
                 const actualFree = parseFloat(assetBalance?.free || 0);
                 if (actualFree < sellAmount && actualFree > 0) {
-                    console.log(chalk.yellow(`   ⚠️ Adjusted sell amount for ${position.symbol}: ${sellAmount} → ${actualFree} (fee adjustment)`));
+                    console.log(chalk.yellow(`   ⚠️ Adjusted sell amount for ${position.symbol}: ${sellAmount} �?${actualFree} (fee adjustment)`));
                     sellAmount = actualFree;
                 } else if (actualFree <= 0) {
-                    console.log(chalk.red(`   ❌ No ${asset} balance to sell, removing stale position`));
+                    console.log(chalk.red(`   �?No ${asset} balance to sell, removing stale position`));
                     const idx = this.openPositions.findIndex(p => p.symbol === position.symbol && p.timestamp === position.timestamp);
                     if (idx !== -1) this.openPositions.splice(idx, 1);
                     return null;
@@ -753,7 +767,7 @@ class Trader {
             return { ...order, pnl, pnlPercent, reason };
             
         } catch (error) {
-            console.error(chalk.red(`   ❌ Sell failed for ${position.symbol}: ${error.message}`));
+            console.error(chalk.red(`   �?Sell failed for ${position.symbol}: ${error.message}`));
             return null;
         }
     }
@@ -836,7 +850,7 @@ class Trader {
             return { ...order, pnl, pnlPercent, reason, partial: true };
             
         } catch (error) {
-            console.error(chalk.red(`   ❌ Partial sell failed for ${position.symbol}: ${error.message}`));
+            console.error(chalk.red(`   �?Partial sell failed for ${position.symbol}: ${error.message}`));
             return null;
         }
     }
@@ -1004,9 +1018,9 @@ class Trader {
         const minutesHeld = (Date.now() - position.timestamp) / 60000;
         const isBullish = this.marketSentiment === 'bullish';
         
-        // ═══════════════════════════════════════════════════════════════
+        // ══════════════════════════════════════════════════════════════�?
         // CRITICAL: Never sell if not in profit (except emergency)
-        // ═══════════════════════════════════════════════════════════════
+        // ══════════════════════════════════════════════════════════════�?
         if (profitUSD <= 0) {
             // Only emergency stop-loss at -8%
             if (profitPercent <= -8) {
@@ -1015,18 +1029,18 @@ class Trader {
             return { shouldSell: false, reason: 'Waiting for profit' };
         }
         
-        // ═══════════════════════════════════════════════════════════════
+        // ══════════════════════════════════════════════════════════════�?
         // LET-WINNERS-RUN PROFIT RULES (FEE-AWARE + PARTIAL TAKES)
         // Binance fee: 0.1% per trade = 0.2% round trip (~$0.10 on $50)
         // Partial sells: take 50% at first target, let rest ride
         // Target: 8-18 trades/day, $0.50-$0.90 avg win
-        // ═══════════════════════════════════════════════════════════════
+        // ══════════════════════════════════════════════════════════════�?
         
         const alreadyPartialSold = position.partialSold || false;
         
         // $0.75+ profit - TAKE IT ALL (solid win, no need to risk reversal)
         if (profitUSD >= 0.75) {
-            return { shouldSell: true, reason: `💰 STRONG_PROFIT +$${profitUSD.toFixed(2)} (≥$0.75 rule)` };
+            return { shouldSell: true, reason: `💰 STRONG_PROFIT +$${profitUSD.toFixed(2)} (�?0.75 rule)` };
         }
         
         // $0.50+ profit - PARTIAL SELL 50%, then trail the rest
