@@ -36,11 +36,11 @@ class SmartTrader:
             os.getenv('BINANCE_SECRET_KEY')
         )
         
-        # Trading settings
-        self.trading_pairs = [
-            'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
-            'AVAXUSDT', 'LINKUSDT', 'ADAUSDT', 'DOTUSDT', 'FETUSDT', 'NEARUSDT'
-        ]
+        # ════════════════════════════════════════════════════════════════════
+        # 🔒 STRICT CONTROL: ONE COIN ONLY
+        # ════════════════════════════════════════════════════════════════════
+        self.trading_pairs = ['ETHUSDT']  # ONE COIN ONLY - safest/most liquid
+        self.max_positions = 1            # ONE POSITION AT A TIME
         
         # ════════════════════════════════════════════════════════════════════
         # V2 CORE SETTINGS
@@ -826,6 +826,14 @@ class SmartTrader:
                     time.sleep(300)
                     continue
                 
+                # ════════════════════════════════════════════════════════════════════
+                # 🔒 ONE POSITION AT A TIME - If we have any open position, STOP
+                # ════════════════════════════════════════════════════════════════════
+                if len(self.open_positions) >= self.max_positions:
+                    print(f"\r   🔒 Position open - waiting for exit (no new trades)", end='', flush=True)
+                    time.sleep(10)
+                    continue
+                
                 # Analyze all pairs
                 print(f"\n   📊 Scanning {len(self.trading_pairs)} pairs... [Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
                 
@@ -833,6 +841,10 @@ class SmartTrader:
                     # Skip if we already have position in this symbol
                     if any(p['symbol'] == symbol for p in self.open_positions):
                         continue
+                    
+                    # 🔒 DOUBLE CHECK: One position max
+                    if len(self.open_positions) >= self.max_positions:
+                        break  # Exit loop entirely
                     
                     # Analyze
                     signal = self.analyze(symbol)
@@ -845,13 +857,14 @@ class SmartTrader:
                     
                     # Execute buy if signal is strong enough (session-adjusted threshold)
                     if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
-                        # Check max concurrent positions
-                        if len(self.open_positions) >= 2:
-                            print(f"   ⚠️ Max 2 positions - skip {symbol}")
-                            continue
+                        # 🔒 FINAL CHECK: Max 1 position
+                        if len(self.open_positions) >= self.max_positions:
+                            print(f"   🔒 Already have position - BLOCKED")
+                            break
                         
                         # Execute
                         self.execute_buy(symbol, signal)
+                        break  # Exit loop after buying - ONE TRADE ONLY
                     
                     # Small delay between pairs
                     time.sleep(0.5)
