@@ -500,9 +500,28 @@ class SmartTrader:
         market_type = self.get_market_type(adx['adx'])
         
         # ════════════════════════════════════════════════════════════════════
-        # HARD BLOCK: Get trade zone - if MIDDLE, return immediately
-        # This alone fixes ~60% of losses
+        # 🚫🚫🚫 ABSOLUTE HARD BLOCK - NO EXCEPTIONS 🚫🚫🚫
+        # If NOT near support AND NOT near resistance → IMMEDIATE RETURN
+        # This is NOT scoring. This is NOT soft. This STOPS EVERYTHING.
         # ════════════════════════════════════════════════════════════════════
+        near_support = self.is_near_level(price, support)
+        near_resistance = self.is_near_level(price, resistance)
+        
+        if not near_support and not near_resistance:
+            return {
+                'action': 'HOLD',
+                'strength': 0,
+                'reason': f"🚫 HARD BLOCK: Not at support/resistance (IMMEDIATE RETURN)",
+                'market_type': market_type,
+                'price': price,
+                'support': support,
+                'resistance': resistance,
+                'rsi': rsi,
+                'adx': adx['adx'],
+                'zone': 'middle'
+            }
+        
+        # Also check zone (belt and suspenders)
         zone = self.get_trade_zone(price, support, resistance)
         
         if zone == 'middle':
@@ -776,6 +795,20 @@ class SmartTrader:
                 can_trade, reason = self.can_trade()
                 
                 if not can_trade:
+                    # ════════════════════════════════════════════════════════════════════
+                    # HARD STOP CONDITIONS - These BREAK the loop entirely
+                    # ════════════════════════════════════════════════════════════════════
+                    if "PROFIT LOCKED" in reason or "MAX LOSS" in reason:
+                        print(f"\n\n   🛑 {reason}")
+                        print(f"   💤 TRADING STOPPED FOR TODAY - Bot will sleep until midnight")
+                        self.send_telegram(f"🛑 Trading stopped: {reason}")
+                        
+                        # Sleep until next day (true stop, not just skip)
+                        while datetime.now().date() == self.last_reset_date:
+                            time.sleep(300)  # Check every 5 minutes
+                        continue  # New day, reset and continue
+                    
+                    # Other blocks (cooldown, session limit) - just wait
                     print(f"\r   ⏸️ Trading paused: {reason}", end='', flush=True)
                     time.sleep(30)
                     continue
@@ -784,6 +817,14 @@ class SmartTrader:
                 session, settings = self.get_market_session()
                 min_strength = settings['min_strength']
                 session_max = settings['max_trades']
+                
+                # ════════════════════════════════════════════════════════════════════
+                # GLOBAL TRADE LIMIT CHECK (before scanning any pairs)
+                # ════════════════════════════════════════════════════════════════════
+                if self.daily_trades >= self.hard_max_trades:
+                    print(f"\n   🛑 GLOBAL LIMIT: {self.daily_trades} trades today - STOPPING")
+                    time.sleep(300)
+                    continue
                 
                 # Analyze all pairs
                 print(f"\n   📊 Scanning {len(self.trading_pairs)} pairs... [Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
