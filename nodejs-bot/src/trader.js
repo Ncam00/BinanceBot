@@ -32,25 +32,30 @@ class Trader {
         this.dcaManager = new DCAManager(config);
         this.momentumScalper = new MomentumScalper(exchange, config);
         
-        // ══════════════════════════════════════════════════════════════════�?
+        // ══════════════════════════════════════════════════════════════════
         // PORTFOLIO FLOOR PROTECTION - Never go below this value!
-        // ══════════════════════════════════════════════════════════════════�?
+        // ══════════════════════════════════════════════════════════════════
         this.portfolioFloor = config.portfolioFloor || 327; // ~$50 NZD below start
         this.floorProtectionActive = false;
         
         // ════════════════════════════════════════════════════════════════════
-        // HIGH WIN RATE THRESHOLDS - Only trade very strong signals!
+        // SMART TRADER SETTINGS - Quality over quantity
         // ════════════════════════════════════════════════════════════════════
-        // Much higher buy threshold = fewer but WINNING entries
-        this.buySignalThreshold = config.buySignalThreshold || 0.72;
+        // High threshold = only trade when 4+ signals align
+        this.buySignalThreshold = config.buySignalThreshold || 0.75;
+        // Confirmation threshold for adding to positions
+        this.confirmThreshold = 0.82;
+        // Single entry size - no tiered entries, one quality position
+        this.earlyEntrySize = config.maxPositionSizePercent / 100 || 0.12;
+        this.confirmEntrySize = 0; // Disabled - one entry only
         // Higher sell threshold = don't panic sell on weak signals
         this.sellSignalThreshold = config.sellSignalThreshold || 0.88;
         
-        // CRITICAL: Minimum hold time before signal-based selling (15 minutes)
-        this.minHoldTime = 8 * 60 * 1000;
+        // CRITICAL: Minimum hold time before signal-based selling (10 minutes)
+        this.minHoldTime = 10 * 60 * 1000;
         
         // CRITICAL: Minimum ADX for trend confirmation (skip choppy markets)
-        this.minADX = 22;
+        this.minADX = 23; // Stricter = only clear trends
         
         // CRITICAL: Only sell on signals if position is in profit
         this.onlySellInProfit = true;
@@ -411,6 +416,17 @@ class Trader {
                     }
                     
                     // ════════════════════════════════════════════════════════════
+                    // RSI FILTER: Don't buy when already overbought (SMART TRADER)
+                    // Profitable traders buy on pullbacks, not when RSI elevated
+                    // ════════════════════════════════════════════════════════════
+                    const currentRSI = signal.indicators.rsi || 50;
+                    const rsiLimit = this.config.rsiOverbought || 55;
+                    if (currentRSI > rsiLimit) {
+                        console.log(chalk.gray(`   📈 BUY SKIPPED [${symbol}] - RSI too high (${currentRSI.toFixed(1)} > ${rsiLimit}) - wait for pullback`));
+                        continue;
+                    }
+                    
+                    // ════════════════════════════════════════════════════════════
                     // MOMENTUM SCALP CHECK: Boost signal for momentum plays
                     // ════════════════════════════════════════════════════════════
                     let momentumBoost = 0;
@@ -482,13 +498,39 @@ class Trader {
                     }
                     
                     if (buyConfirmed) {
-                        console.log(chalk.cyan(`\n   📈 BUY signal for ${symbol} (strength: ${signal.strength.toFixed(2)} >= ${this.buySignalThreshold})`));
-                        const trade = await this.executeBuy(symbol, signal);
+                        // ════════════════════════════════════════════════════════════
+                        // TIERED ENTRY LOGIC
+                        // ════════════════════════════════════════════════════════════
+                        const isEarlyEntry = signal.strength >= this.buySignalThreshold && signal.strength < this.confirmThreshold;
+                        const isConfirmEntry = signal.strength >= this.confirmThreshold;
+                        
+                        if (isEarlyEntry) {
+                            console.log(chalk.cyan(`\n   📈 EARLY ENTRY ${symbol} (strength: ${signal.strength.toFixed(2)} >= ${this.buySignalThreshold}, size: 10%)`));
+                        } else {
+                            console.log(chalk.green(`\n   📈 FULL ENTRY ${symbol} (strength: ${signal.strength.toFixed(2)} >= ${this.confirmThreshold}, size: 18%)`));
+                        }
+                        
+                        const trade = await this.executeBuy(symbol, signal, isEarlyEntry ? 'early' : 'full');
                         if (trade) {
                             results.trades.push(trade);
                         }
                     } else {
                         console.log(chalk.yellow(`   ⚠️ BUY signal for ${symbol} REJECTED by advanced analysis`));
+                    }
+                }
+                
+                // ════════════════════════════════════════════════════════════════════
+                // TIERED CONFIRMATION: Add to existing position when signal strengthens
+                // ════════════════════════════════════════════════════════════════════
+                if (existingPosition && signal.action === 'BUY' && signal.strength >= this.confirmThreshold) {
+                    // Check if this is an early entry position that needs confirmation add
+                    if (existingPosition.entryType === 'early' && !existingPosition.confirmed) {
+                        console.log(chalk.green(`\n   📈 CONFIRM ADD ${symbol} (strength: ${signal.strength.toFixed(2)} >= ${this.confirmThreshold}, adding 8%)`));
+                        const trade = await this.executeBuy(symbol, signal, 'confirm');
+                        if (trade) {
+                            existingPosition.confirmed = true;
+                            results.trades.push(trade);
+                        }
                     }
                 }
                 
@@ -501,37 +543,57 @@ class Trader {
     }
     
     /**
-     * Execute a buy order
+     * Execute a buy order (supports tiered entries)
+     * @param {string} entryType - 'early' (10%), 'confirm' (8% add), or 'full' (18%)
      */
-    async executeBuy(symbol, signal) {
-        // Check if we can trade
-        const canTrade = this.riskManager.canTrade(this.openPositions, symbol);
-        if (!canTrade.allowed) {
-            console.log(chalk.yellow(`   ⚠️ Cannot buy ${symbol}: ${canTrade.reason}`));
-            return null;
+    async executeBuy(symbol, signal, entryType = 'full') {
+        // Check if we can trade (skip for confirm adds to existing position)
+        if (entryType !== 'confirm') {
+            const canTrade = this.riskManager.canTrade(this.openPositions, symbol);
+            if (!canTrade.allowed) {
+                console.log(chalk.yellow(`   ⚠️ Cannot buy ${symbol}: ${canTrade.reason}`));
+                return null;
+            }
         }
         
         // Get current price and balance
         const balance = await this.exchange.getBalance();
         const price = signal.indicators.price;
         
-        // Calculate position size with DYNAMIC sizing based on signal strength
+        // Calculate position size based on entry type
         const symbolInfo = this.symbolInfo[symbol];
-        const signalStrength = signal.strength || 0.5;
-        const quantity = this.riskManager.calculatePositionSize(balance, price, symbolInfo, signalStrength);
+        
+        // Override position size based on entry type
+        let positionSizePercent;
+        if (entryType === 'early') {
+            positionSizePercent = this.earlyEntrySize; // 10%
+        } else if (entryType === 'confirm') {
+            positionSizePercent = this.confirmEntrySize; // 8%
+        } else {
+            positionSizePercent = this.earlyEntrySize + this.confirmEntrySize; // 18% full
+        }
+        
+        // Calculate quantity
+        const positionValue = balance * positionSizePercent;
+        let quantity = positionValue / price;
+        
+        // Apply lot size filters
+        if (symbolInfo) {
+            const { stepSize, minQty } = symbolInfo;
+            quantity = Math.floor(quantity / stepSize) * stepSize;
+            if (quantity < minQty) {
+                console.log(chalk.yellow(`   ⚠️ Position size too small for ${symbol}`));
+                return null;
+            }
+        }
         
         if (quantity <= 0) {
             console.log(chalk.yellow(`   ⚠️ Position size too small for ${symbol}`));
             return null;
         }
         
-        // Log dynamic sizing
-        console.log(chalk.gray(`   📊 Dynamic sizing: signal ${signalStrength.toFixed(2)} �?qty ${quantity.toFixed(6)}`));
-        
-        if (quantity <= 0) {
-            console.log(chalk.yellow(`   ⚠️ Position size too small for ${symbol}`));
-            return null;
-        }
+        // Log entry type
+        console.log(chalk.gray(`   📊 ${entryType.toUpperCase()} entry: ${(positionSizePercent * 100).toFixed(0)}% = $${positionValue.toFixed(2)} → qty ${quantity.toFixed(6)}`));
         
         try {
             // Execute the buy
@@ -556,10 +618,26 @@ class Trader {
                 atrStopPercent,
                 takeProfit: this.riskManager.getTakeProfitPrice(order.price),
                 timestamp: Date.now(),
-                signal: signal
+                signal: signal,
+                entryType: entryType, // 'early', 'confirm', or 'full'
+                confirmed: entryType !== 'early' // Track if early entry has been confirmed
             };
             
-            this.openPositions.push(position);
+            // For confirm entries, update existing position instead of creating new
+            if (entryType === 'confirm') {
+                const existingPos = this.openPositions.find(p => p.symbol === symbol);
+                if (existingPos) {
+                    // Average the entry price
+                    const totalAmount = existingPos.amount + order.amount;
+                    const avgPrice = ((existingPos.entryPrice * existingPos.amount) + (order.price * order.amount)) / totalAmount;
+                    existingPos.amount = totalAmount;
+                    existingPos.entryPrice = avgPrice;
+                    existingPos.confirmed = true;
+                    console.log(chalk.green(`   📈 Position updated: ${totalAmount.toFixed(6)} @ avg $${avgPrice.toFixed(2)}`));
+                }
+            } else {
+                this.openPositions.push(position);
+            }
             
             // Log to database
             this.db.logTrade({

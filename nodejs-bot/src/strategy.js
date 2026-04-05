@@ -359,6 +359,11 @@ class Strategy {
         let action = 'HOLD';
         let strength = 0;
         
+        // Calculate strength based on total signals (show even for HOLD)
+        // This lets us see how close we are to BUY/SELL threshold
+        const totalSignals = Math.max(buySignals, sellSignals);
+        const baseStrength = Math.min(totalSignals / 6, 1); // 0-1 based on signal count
+        
         // Require minimum signal strength to act
         if (netSignal >= 3) {
             action = 'BUY';
@@ -366,6 +371,9 @@ class Strategy {
         } else if (netSignal <= -3) {
             action = 'SELL';
             strength = Math.min(Math.abs(netSignal) / 6, 1);
+        } else {
+            // HOLD - but show how strong the potential signal is
+            strength = baseStrength * 0.5; // Scale down for HOLD (max 0.5)
         }
         
         return {
