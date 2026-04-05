@@ -452,13 +452,33 @@ class SmartTrader:
             
             fill_price = float(order['fills'][0]['price'])
             
+            # ════════════════════════════════════════════════════════════════════
+            # V2: STRUCTURE-BASED STOP LOSS
+            # Use support level instead of fixed %, avoids noise stops
+            # ════════════════════════════════════════════════════════════════════
+            support = signal.get('support', fill_price * 0.985)
+            
+            # Stop loss = just below support (with small buffer)
+            structure_sl = support * 0.998  # 0.2% below support
+            
+            # Fallback: use percentage if structure SL is too far (>3%)
+            percent_sl = fill_price * (1 - self.stop_loss_percent / 100)
+            max_sl = fill_price * 0.97  # Never risk more than 3%
+            
+            # Use the tighter of: structure SL or max allowed
+            stop_loss = max(structure_sl, max_sl)
+            
+            # Take profit based on R:R from actual risk
+            actual_risk = fill_price - stop_loss
+            take_profit = fill_price + (actual_risk * 2.0)  # 2:1 R:R minimum
+            
             # Track position
             position = {
                 'symbol': symbol,
                 'quantity': quantity,
                 'entry_price': fill_price,
-                'stop_loss': fill_price * (1 - self.stop_loss_percent / 100),
-                'take_profit': fill_price * (1 + self.take_profit_percent / 100),
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
                 'timestamp': datetime.now(),
                 'signal': signal
             }
