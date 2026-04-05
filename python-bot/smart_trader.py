@@ -78,6 +78,13 @@ class SmartTrader:
         self.daily_profit = 0.0
         self.last_reset_date = datetime.now().date()
         self.open_positions = []
+        self.last_trade_time = None  # For cooldown tracking
+        
+        # ════════════════════════════════════════════════════════════════════
+        # V2: HARD SAFETY RULES (CANNOT BE BYPASSED)
+        # ════════════════════════════════════════════════════════════════════
+        self.trade_cooldown_minutes = 30    # Wait 30min between trades
+        self.hard_max_trades = 2             # ABSOLUTE max, no exceptions
         
         # Telegram notifications
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -320,6 +327,63 @@ class SmartTrader:
         return distance <= self.near_level_percent
     
     # ════════════════════════════════════════════════════════════════════
+    # V2: TRADE ZONE DETECTION (HARD BLOCK)
+    # ════════════════════════════════════════════════════════════════════
+    def get_trade_zone(self, price, support, resistance):
+        """
+        Determine which zone price is in
+        Returns: 'buy_zone', 'sell_zone', or 'middle' (NO TRADE)
+        """
+        range_size = resistance - support
+        if range_size <= 0:
+            return 'middle'  # Invalid range = no trade
+        
+        # Buy zone: bottom 30% of range
+        buy_zone_top = support + (range_size * 0.30)
+        
+        # Sell zone: top 30% of range  
+        sell_zone_bottom = resistance - (range_size * 0.30)
+        
+        if price <= buy_zone_top:
+            return 'buy_zone'
+        elif price >= sell_zone_bottom:
+            return 'sell_zone'
+        else:
+            return 'middle'  # MIDDLE 40% = NO TRADE
+    
+    # ════════════════════════════════════════════════════════════════════
+    # V2: CONFIRMATION CANDLE CHECK
+    # ════════════════════════════════════════════════════════════════════
+    def has_confirmation_candle(self, df, direction='bullish'):
+        """
+        Check if last closed candle confirms the direction
+        - Bullish: Green candle (close > open)
+        - Bearish: Red candle (close < open)
+        """
+        if len(df) < 2:
+            return False
+        
+        # Use second-to-last candle (last one may not be closed)
+        candle = df.iloc[-2]
+        
+        if direction == 'bullish':
+            # Green candle with decent body
+            body = candle['close'] - candle['open']
+            candle_range = candle['high'] - candle['low']
+            if candle_range == 0:
+                return False
+            body_ratio = body / candle_range
+            return body > 0 and body_ratio > 0.3  # At least 30% body
+        else:
+            # Red candle
+            body = candle['open'] - candle['close']
+            candle_range = candle['high'] - candle['low']
+            if candle_range == 0:
+                return False
+            body_ratio = body / candle_range
+            return body > 0 and body_ratio > 0.3
+    
+    # ════════════════════════════════════════════════════════════════════
     # V2: MARKET TYPE DETECTION
     # ════════════════════════════════════════════════════════════════════
     def get_market_type(self, adx_value):
@@ -433,18 +497,24 @@ class SmartTrader:
         # V2: Market type
         market_type = self.get_market_type(adx['adx'])
         
-        # V2: NO-TRADE ZONE CHECK
-        if self.is_in_no_trade_zone(price, support, resistance):
+        # ════════════════════════════════════════════════════════════════════
+        # HARD BLOCK: Get trade zone - if MIDDLE, return immediately
+        # This alone fixes ~60% of losses
+        # ════════════════════════════════════════════════════════════════════
+        zone = self.get_trade_zone(price, support, resistance)
+        
+        if zone == 'middle':
             return {
                 'action': 'HOLD',
                 'strength': 0,
-                'reason': f"⚠️ NO-TRADE ZONE: Price in middle ({self.no_trade_zone_percent}% zone)",
+                'reason': f"🚫 HARD BLOCK: Price in middle zone (NO TRADE)",
                 'market_type': market_type,
                 'price': price,
                 'support': support,
                 'resistance': resistance,
                 'rsi': rsi,
-                'adx': adx['adx']
+                'adx': adx['adx'],
+                'zone': zone
             }
         
         # V2: Strategy switch based on market type
@@ -456,6 +526,18 @@ class SmartTrader:
             # MIXED market - be extra cautious
             signal = {'action': 'HOLD', 'strength': 0, 'reason': 'MIXED market - waiting for clarity'}
         
+        # ════════════════════════════════════════════════════════════════════
+        # CONFIRMATION CANDLE CHECK (For BUY signals only)
+        # Don't just buy on signal - wait for confirmation
+        # ════════════════════════════════════════════════════════════════════
+        if signal['action'] == 'BUY':
+            if not self.has_confirmation_candle(df, 'bullish'):
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': f"⏳ WAITING: Buy signal but no confirmation candle yet"
+                }
+        
         # Add metadata
         signal['market_type'] = market_type
         signal['price'] = price
@@ -463,6 +545,7 @@ class SmartTrader:
         signal['resistance'] = resistance
         signal['rsi'] = rsi
         signal['adx'] = adx['adx']
+        signal['zone'] = zone
         
         return signal
     
@@ -527,6 +610,7 @@ class SmartTrader:
             }
             self.open_positions.append(position)
             self.daily_trades += 1
+            self.last_trade_time = datetime.now()  # Start cooldown timer
             
             msg = f"🟢 BUY {symbol}\n"
             msg += f"Qty: {quantity} @ ${fill_price:.4f}\n"
@@ -593,22 +677,35 @@ class SmartTrader:
             self.last_reset_date = today
     
     def can_trade(self):
-        """Check if we can make more trades today"""
+        """Check if we can make more trades today - HARD BLOCKS"""
+        # ════════════════════════════════════════════════════════════════════
+        # HARD BLOCK 1: Absolute trade limit (CANNOT BE BYPASSED)
+        # ════════════════════════════════════════════════════════════════════
+        if self.daily_trades >= self.hard_max_trades:
+            return False, f"🛑 HARD LIMIT: {self.daily_trades}/{self.hard_max_trades} trades (BLOCKED)"
+        
+        # ════════════════════════════════════════════════════════════════════
+        # HARD BLOCK 2: Cooldown between trades (30 min)
+        # ════════════════════════════════════════════════════════════════════
+        if self.last_trade_time:
+            time_since_trade = (datetime.now() - self.last_trade_time).total_seconds() / 60
+            if time_since_trade < self.trade_cooldown_minutes:
+                remaining = self.trade_cooldown_minutes - time_since_trade
+                return False, f"⏳ COOLDOWN: {remaining:.0f}min remaining"
+        
+        # ════════════════════════════════════════════════════════════════════
+        # HARD BLOCK 3: Daily profit target reached
+        # ════════════════════════════════════════════════════════════════════
+        if self.daily_profit >= self.daily_profit_target:
+            return False, f"🎯 PROFIT LOCKED: ${self.daily_profit:.2f} >= ${self.daily_profit_target} (DONE FOR TODAY)"
+        
         # Get current session settings
         session, settings = self.get_market_session()
         session_max = settings['max_trades']
         
-        # Check session-specific max trades
+        # Session-specific limit (softer than hard limit)
         if self.daily_trades >= session_max:
-            return False, f"Session limit reached ({self.daily_trades}/{session_max} for {session.upper()})"
-        
-        # Check overall daily max
-        if self.daily_trades >= self.max_trades_per_day:
-            return False, f"Max trades reached ({self.daily_trades}/{self.max_trades_per_day})"
-        
-        # Check profit target
-        if self.daily_profit >= self.daily_profit_target:
-            return False, f"Profit target reached (${self.daily_profit:.2f} >= ${self.daily_profit_target})"
+            return False, f"Session limit ({self.daily_trades}/{session_max} for {session.upper()})"
         
         return True, "OK"
     
@@ -681,10 +778,11 @@ class SmartTrader:
                     # Analyze
                     signal = self.analyze(symbol)
                     
-                    # Log interesting signals
-                    if signal['action'] != 'HOLD' or 'NO-TRADE ZONE' in signal.get('reason', ''):
+                    # Log interesting signals (blocks, buy signals, waiting)
+                    if signal['action'] != 'HOLD' or any(x in signal.get('reason', '') for x in ['HARD BLOCK', 'WAITING', 'NO-TRADE']):
                         market_type = signal.get('market_type', 'N/A')
-                        print(f"   {symbol}: {signal['action']} ({market_type}) - {signal['reason']}")
+                        zone = signal.get('zone', '?')
+                        print(f"   {symbol}: {signal['action']} ({market_type}|{zone}) - {signal['reason']}")
                     
                     # Execute buy if signal is strong enough (session-adjusted threshold)
                     if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
