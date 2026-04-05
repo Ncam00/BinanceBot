@@ -23,6 +23,7 @@ import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
 import requests
+import pytz
 
 # Load environment variables
 load_dotenv()
@@ -59,6 +60,19 @@ class SmartTrader:
         self.adx_range_threshold = 20        # ADX < 20 = ranging
         self.adx_trend_threshold = 25        # ADX > 25 = trending
         
+        # ════════════════════════════════════════════════════════════════════
+        # V2: SESSION-BASED TRADING (NZ TIME)
+        # Asia (11:00-19:00): Low risk, max 1 trade
+        # London (19:00-03:00): Normal trading
+        # US (03:00-11:00): Aggressive, best volatility
+        # ════════════════════════════════════════════════════════════════════
+        self.nz_timezone = pytz.timezone('Pacific/Auckland')
+        self.session_settings = {
+            'asia': {'mode': 'low_risk', 'max_trades': 1, 'min_strength': 0.85},
+            'london': {'mode': 'normal', 'max_trades': 2, 'min_strength': 0.75},
+            'us': {'mode': 'aggressive', 'max_trades': 2, 'min_strength': 0.70}
+        }
+        
         # State tracking
         self.daily_trades = 0
         self.daily_profit = 0.0
@@ -74,6 +88,35 @@ class SmartTrader:
         print(f"   Daily profit target: ${self.daily_profit_target}")
         print(f"   Position size: {self.position_size_percent}%")
         print(f"   Stop Loss: {self.stop_loss_percent}% | Take Profit: {self.take_profit_percent}%")
+        session, settings = self.get_market_session()
+        print(f"   Current session: {session.upper()} ({settings['mode']})")
+    
+    # ════════════════════════════════════════════════════════════════════
+    # V2: SESSION DETECTION (NZ TIMEZONE)
+    # ════════════════════════════════════════════════════════════════════
+    def get_nz_hour(self):
+        """Get current hour in NZ timezone"""
+        nz_now = datetime.now(self.nz_timezone)
+        return nz_now.hour
+    
+    def get_market_session(self):
+        """
+        Determine market session based on NZ time
+        Returns: (session_name, session_settings)
+        """
+        hour = self.get_nz_hour()
+        
+        # Asia session: 11:00 - 19:00 NZT (low volatility)
+        if 11 <= hour < 19:
+            return 'asia', self.session_settings['asia']
+        
+        # London session: 19:00 - 03:00 NZT (medium volatility)
+        elif hour >= 19 or hour < 3:
+            return 'london', self.session_settings['london']
+        
+        # US session: 03:00 - 11:00 NZT (high volatility - best for trading)
+        else:
+            return 'us', self.session_settings['us']
     
     # ════════════════════════════════════════════════════════════════════
     # TELEGRAM NOTIFICATIONS
@@ -551,7 +594,15 @@ class SmartTrader:
     
     def can_trade(self):
         """Check if we can make more trades today"""
-        # Check max trades
+        # Get current session settings
+        session, settings = self.get_market_session()
+        session_max = settings['max_trades']
+        
+        # Check session-specific max trades
+        if self.daily_trades >= session_max:
+            return False, f"Session limit reached ({self.daily_trades}/{session_max} for {session.upper()})"
+        
+        # Check overall daily max
         if self.daily_trades >= self.max_trades_per_day:
             return False, f"Max trades reached ({self.daily_trades}/{self.max_trades_per_day})"
         
@@ -614,8 +665,13 @@ class SmartTrader:
                     time.sleep(30)
                     continue
                 
+                # Get current session
+                session, settings = self.get_market_session()
+                min_strength = settings['min_strength']
+                session_max = settings['max_trades']
+                
                 # Analyze all pairs
-                print(f"\n   📊 Scanning {len(self.trading_pairs)} pairs... (Trades: {self.daily_trades}/{self.max_trades_per_day}, Profit: ${self.daily_profit:.2f})")
+                print(f"\n   📊 Scanning {len(self.trading_pairs)} pairs... [Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
                 
                 for symbol in self.trading_pairs:
                     # Skip if we already have position in this symbol
@@ -630,8 +686,8 @@ class SmartTrader:
                         market_type = signal.get('market_type', 'N/A')
                         print(f"   {symbol}: {signal['action']} ({market_type}) - {signal['reason']}")
                     
-                    # Execute buy if signal is strong enough
-                    if signal['action'] == 'BUY' and signal['strength'] >= 0.75:
+                    # Execute buy if signal is strong enough (session-adjusted threshold)
+                    if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
                         # Check max concurrent positions
                         if len(self.open_positions) >= 2:
                             print(f"   ⚠️ Max 2 positions - skip {symbol}")
