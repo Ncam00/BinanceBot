@@ -76,6 +76,7 @@ class SmartTrader:
         # State tracking
         self.daily_trades = 0
         self.daily_profit = 0.0
+        self.daily_loss = 0.0              # Track losses separately
         self.last_reset_date = datetime.now().date()
         self.open_positions = []
         self.last_trade_time = None  # For cooldown tracking
@@ -85,6 +86,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         self.trade_cooldown_minutes = 30    # Wait 30min between trades
         self.hard_max_trades = 2             # ABSOLUTE max, no exceptions
+        self.max_daily_loss = 10.0           # Stop if lose $10 (prevents revenge trading)
         
         # Telegram notifications
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -643,17 +645,23 @@ class SmartTrader:
             pnl = (fill_price - position['entry_price']) * quantity
             pnl_percent = ((fill_price / position['entry_price']) - 1) * 100
             
-            # Update daily profit
-            self.daily_profit += pnl
+            # Update daily profit/loss tracking
+            if pnl >= 0:
+                self.daily_profit += pnl
+            else:
+                self.daily_loss += abs(pnl)  # Track losses as positive number
             
             # Remove from open positions
             self.open_positions = [p for p in self.open_positions if p['symbol'] != symbol]
+            
+            # Net P&L for display
+            net_pnl = self.daily_profit - self.daily_loss
             
             emoji = "🟢" if pnl > 0 else "🔴"
             msg = f"{emoji} SELL {symbol} ({reason})\n"
             msg += f"Qty: {quantity} @ ${fill_price:.4f}\n"
             msg += f"P&L: ${pnl:.2f} ({pnl_percent:+.2f}%)\n"
-            msg += f"Daily Total: ${self.daily_profit:.2f}"
+            msg += f"Daily: +${self.daily_profit:.2f} / -${self.daily_loss:.2f} (Net: ${net_pnl:.2f})"
             
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
@@ -674,6 +682,8 @@ class SmartTrader:
             print(f"\n   🔄 New day - resetting counters")
             self.daily_trades = 0
             self.daily_profit = 0.0
+            self.daily_loss = 0.0
+            self.last_trade_time = None  # Reset cooldown too
             self.last_reset_date = today
     
     def can_trade(self):
@@ -685,7 +695,13 @@ class SmartTrader:
             return False, f"🛑 HARD LIMIT: {self.daily_trades}/{self.hard_max_trades} trades (BLOCKED)"
         
         # ════════════════════════════════════════════════════════════════════
-        # HARD BLOCK 2: Cooldown between trades (30 min)
+        # HARD BLOCK 2: Max daily LOSS protection (prevents revenge trading)
+        # ════════════════════════════════════════════════════════════════════
+        if self.daily_loss >= self.max_daily_loss:
+            return False, f"🔴 MAX LOSS HIT: -${self.daily_loss:.2f} (STOP - NO REVENGE TRADING)"
+        
+        # ════════════════════════════════════════════════════════════════════
+        # HARD BLOCK 3: Cooldown between trades (30 min)
         # ════════════════════════════════════════════════════════════════════
         if self.last_trade_time:
             time_since_trade = (datetime.now() - self.last_trade_time).total_seconds() / 60
@@ -694,16 +710,18 @@ class SmartTrader:
                 return False, f"⏳ COOLDOWN: {remaining:.0f}min remaining"
         
         # ════════════════════════════════════════════════════════════════════
-        # HARD BLOCK 3: Daily profit target reached
+        # HARD BLOCK 4: Daily profit target reached (session-aware)
         # ════════════════════════════════════════════════════════════════════
-        if self.daily_profit >= self.daily_profit_target:
-            return False, f"🎯 PROFIT LOCKED: ${self.daily_profit:.2f} >= ${self.daily_profit_target} (DONE FOR TODAY)"
-        
-        # Get current session settings
         session, settings = self.get_market_session()
-        session_max = settings['max_trades']
         
-        # Session-specific limit (softer than hard limit)
+        # Session-aware profit lock: Lower target during low-volatility Asia
+        session_target = 3.0 if session == 'asia' else self.daily_profit_target
+        
+        if self.daily_profit >= session_target:
+            return False, f"🎯 PROFIT LOCKED: ${self.daily_profit:.2f} >= ${session_target} ({session.upper()} target hit)"
+        
+        # Session-specific trade limit
+        session_max = settings['max_trades']
         if self.daily_trades >= session_max:
             return False, f"Session limit ({self.daily_trades}/{session_max} for {session.upper()})"
         
