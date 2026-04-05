@@ -658,7 +658,9 @@ class SmartTrader:
             actual_risk = fill_price - stop_loss
             take_profit = fill_price + (actual_risk * 2.0)
             
-            # Track position
+            # ════════════════════════════════════════════════════════════════════
+            # 🔒 IMMEDIATELY update state (CRITICAL)
+            # ════════════════════════════════════════════════════════════════════
             position = {
                 'symbol': symbol,
                 'quantity': quantity,
@@ -668,9 +670,9 @@ class SmartTrader:
                 'timestamp': datetime.now(),
                 'signal': signal
             }
-            self.open_positions.append(position)
-            self.daily_trades += 1
-            self.last_trade_time = datetime.now()  # Start cooldown timer
+            self.open_positions.append(position)     # open_position = True
+            self.last_trade_time = datetime.now()    # Start cooldown timer
+            self.daily_trades += 1                   # trades_today += 1
             
             msg = f"🟢 BUY {symbol}\n"
             msg += f"Qty: {quantity} @ ${fill_price:.4f}\n"
@@ -709,7 +711,9 @@ class SmartTrader:
             else:
                 self.daily_loss += abs(pnl)  # Track losses as positive number
             
-            # Remove from open positions
+            # ════════════════════════════════════════════════════════════════════
+            # 🔓 Position closed - open_position = False
+            # ════════════════════════════════════════════════════════════════════
             self.open_positions = [p for p in self.open_positions if p['symbol'] != symbol]
             
             # Net P&L for display
@@ -827,27 +831,50 @@ class SmartTrader:
                 # Reset daily counters if new day
                 self.check_daily_reset()
                 
-                # Check open positions first
+                # Check open positions for SL/TP
                 self.check_positions()
                 
-                # Check if we can trade
-                can_trade, reason = self.can_trade()
+                # ════════════════════════════════════════════════════════════════════
+                # 🔒 HARD GUARDS (FIRST) - Must pass ALL before any trading
+                # ════════════════════════════════════════════════════════════════════
                 
-                if not can_trade:
-                    # ════════════════════════════════════════════════════════════════════
-                    # HARD STOP CONDITIONS - These BREAK the loop entirely
-                    # ════════════════════════════════════════════════════════════════════
+                # GUARD 1: Open position check
+                if len(self.open_positions) >= self.max_positions:
+                    print(f"\r   🔒 Position open - waiting for exit (no new trades)", end='', flush=True)
+                    time.sleep(10)
+                    continue
+                
+                # GUARD 2: Daily trade limit
+                if self.daily_trades >= self.hard_max_trades:
+                    print(f"\n   🛑 GLOBAL LIMIT: {self.daily_trades} trades today - STOPPING")
+                    time.sleep(300)
+                    continue
+                
+                # GUARD 3: Cooldown check (recently traded)
+                if self.last_trade_time:
+                    time_since_trade = (datetime.now() - self.last_trade_time).total_seconds() / 60
+                    if time_since_trade < self.trade_cooldown_minutes:
+                        remaining = self.trade_cooldown_minutes - time_since_trade
+                        print(f"\r   ⏳ COOLDOWN: {remaining:.0f}min remaining", end='', flush=True)
+                        time.sleep(30)
+                        continue
+                
+                # GUARD 4: Profit/Loss limits (can_trade handles full logic)
+                can_trade_result, reason = self.can_trade()
+                
+                if not can_trade_result:
+                    # HARD STOP - These BREAK the loop entirely
                     if "PROFIT LOCKED" in reason or "MAX LOSS" in reason:
                         print(f"\n\n   🛑 {reason}")
                         print(f"   💤 TRADING STOPPED FOR TODAY - Bot will sleep until midnight")
                         self.send_telegram(f"🛑 Trading stopped: {reason}")
                         
-                        # Sleep until next day (true stop, not just skip)
+                        # Sleep until next day (true stop)
                         while datetime.now().date() == self.last_reset_date:
                             time.sleep(300)  # Check every 5 minutes
                         continue  # New day, reset and continue
                     
-                    # Other blocks (cooldown, session limit) - just wait
+                    # Other blocks - just wait
                     print(f"\r   ⏸️ Trading paused: {reason}", end='', flush=True)
                     time.sleep(30)
                     continue
@@ -858,22 +885,8 @@ class SmartTrader:
                 session_max = settings['max_trades']
                 
                 # ════════════════════════════════════════════════════════════════════
-                # GLOBAL TRADE LIMIT CHECK (before scanning any pairs)
+                # 🔍 THEN check strategy - Scan for valid setups
                 # ════════════════════════════════════════════════════════════════════
-                if self.daily_trades >= self.hard_max_trades:
-                    print(f"\n   🛑 GLOBAL LIMIT: {self.daily_trades} trades today - STOPPING")
-                    time.sleep(300)
-                    continue
-                
-                # ════════════════════════════════════════════════════════════════════
-                # 🔒 ONE POSITION AT A TIME - If we have any open position, STOP
-                # ════════════════════════════════════════════════════════════════════
-                if len(self.open_positions) >= self.max_positions:
-                    print(f"\r   🔒 Position open - waiting for exit (no new trades)", end='', flush=True)
-                    time.sleep(10)
-                    continue
-                
-                # Analyze all pairs
                 print(f"\n   📊 Scanning {len(self.trading_pairs)} pairs... [Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
                 
                 for symbol in self.trading_pairs:
@@ -881,34 +894,36 @@ class SmartTrader:
                     if any(p['symbol'] == symbol for p in self.open_positions):
                         continue
                     
-                    # 🔒 DOUBLE CHECK: One position max
+                    # 🔒 Re-check: One position max
                     if len(self.open_positions) >= self.max_positions:
-                        break  # Exit loop entirely
+                        break
                     
-                    # Analyze
+                    # Analyze for valid trade setup
                     signal = self.analyze(symbol)
                     
-                    # Log interesting signals (blocks, buy signals, waiting)
+                    # Log interesting signals
                     if signal['action'] != 'HOLD' or any(x in signal.get('reason', '') for x in ['HARD BLOCK', 'WAITING', 'NO-TRADE']):
                         market_type = signal.get('market_type', 'N/A')
                         zone = signal.get('zone', '?')
                         print(f"   {symbol}: {signal['action']} ({market_type}|{zone}) - {signal['reason']}")
                     
-                    # Execute buy if signal is strong enough (session-adjusted threshold)
+                    # Check if valid trade setup
                     if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
-                        # 🔒 FINAL CHECK: Max 1 position
+                        # Final position check
                         if len(self.open_positions) >= self.max_positions:
                             print(f"   🔒 Already have position - BLOCKED")
                             break
                         
-                        # Execute
+                        # ════════════════════════════════════════════════════════════
+                        # 💰 Place trade
+                        # State update (open_position, last_trade_time, trades_today)
+                        # happens IMMEDIATELY inside execute_buy()
+                        # ════════════════════════════════════════════════════════════
                         self.execute_buy(symbol, signal)
-                        break  # Exit loop after buying - ONE TRADE ONLY
+                        break  # ONE TRADE ONLY
                     
-                    # Small delay between pairs
                     time.sleep(0.5)
                 
-                # Wait before next cycle
                 print(f"   ✅ Cycle complete. Waiting 10s...")
                 time.sleep(10)
                 
