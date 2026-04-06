@@ -469,6 +469,34 @@ class SmartTrader:
         return {'action': 'HOLD', 'strength': 0, 'reason': 'Trend: No clear setup'}
     
     # ════════════════════════════════════════════════════════════════════
+    # ETH SETUP VALIDATION
+    # ════════════════════════════════════════════════════════════════════
+    def is_near_support(self, price, support_level, tolerance=0.003):
+        """Step 1: Detect if price is near support zone (within 0.3%)"""
+        return abs(price - support_level) / price < tolerance
+    
+    def rsi_ok(self, rsi):
+        """Step 2: RSI condition - not overbought"""
+        return rsi < 55
+    
+    def momentum_ok(self, macd, signal):
+        """Step 3: Momentum confirmation - MACD above signal"""
+        return macd > signal
+    
+    def valid_eth_setup(self, price, support, rsi, macd, signal):
+        """Step 4: Combine all conditions for valid ETH buy setup"""
+        if not self.is_near_support(price, support):
+            return False
+        
+        if not self.rsi_ok(rsi):
+            return False
+        
+        if not self.momentum_ok(macd, signal):
+            return False
+        
+        return True
+    
+    # ════════════════════════════════════════════════════════════════════
     # V2: MAIN ANALYSIS (LOCATION-BASED)
     # ════════════════════════════════════════════════════════════════════
     def analyze(self, symbol):
@@ -559,6 +587,18 @@ class SmartTrader:
                     'reason': f"⏳ WAITING: Buy signal but no confirmation candle yet"
                 }
         
+        # ════════════════════════════════════════════════════════════════════
+        # ETH SETUP VALIDATION (Final check)
+        # Price near support + RSI ok + Momentum ok
+        # ════════════════════════════════════════════════════════════════════
+        if signal['action'] == 'BUY':
+            if not self.valid_eth_setup(price, support, rsi, macd['macd'], macd['signal']):
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': f"⏳ WAITING: Not all ETH setup conditions met (support/RSI/momentum)"
+                }
+        
         # Add metadata
         signal['market_type'] = market_type
         signal['price'] = price
@@ -617,7 +657,7 @@ class SmartTrader:
             
             # Get support for stop loss calculation
             support = signal.get('support', price * 0.985)
-            structure_sl = support * 0.998  # 0.2% below support
+            structure_sl = support * 0.995  # 0.5% below support (safer buffer)
             max_sl = price * 0.97  # Never risk more than 3%
             stop_loss_price = max(structure_sl, max_sl)
             
