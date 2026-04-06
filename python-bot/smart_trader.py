@@ -678,7 +678,7 @@ class SmartTrader:
             stop_loss_price = max(structure_sl, max_sl)
             
             # Adjust risk based on session
-            session = self.get_market_session()
+            session, _ = self.get_market_session()
             if session == "asia":
                 risk_percent = 0.01  # safer (1%)
             else:
