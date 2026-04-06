@@ -213,7 +213,8 @@ class SmartTrader:
             'macd': macd_line.iloc[-1],
             'signal': signal_line.iloc[-1],
             'histogram': histogram.iloc[-1],
-            'prev_histogram': histogram.iloc[-2] if len(histogram) > 1 else 0
+            'prev_histogram': histogram.iloc[-2] if len(histogram) > 1 else 0,
+            'prev_macd': macd_line.iloc[-2] if len(macd_line) > 1 else 0
         }
     
     def calculate_ema(self, closes, period):
@@ -469,29 +470,43 @@ class SmartTrader:
         return {'action': 'HOLD', 'strength': 0, 'reason': 'Trend: No clear setup'}
     
     # ════════════════════════════════════════════════════════════════════
-    # ETH SETUP VALIDATION
+    # ETH SETUP VALIDATION (IMPROVED)
     # ════════════════════════════════════════════════════════════════════
-    def is_near_support(self, price, support_level, tolerance=0.003):
-        """Step 1: Detect if price is near support zone (within 0.3%)"""
-        return abs(price - support_level) / price < tolerance
+    def get_support(self, prices, lookback=20):
+        """Step 1: Dynamic support from recent lows"""
+        return min(prices[-lookback:])
     
     def rsi_ok(self, rsi):
         """Step 2: RSI condition - not overbought"""
         return rsi < 55
     
-    def momentum_ok(self, macd, signal):
-        """Step 3: Momentum confirmation - MACD above signal"""
-        return macd > signal
+    def momentum_ok(self, macd, signal, prev_macd):
+        """Step 3: Momentum confirmation - MACD rising AND above signal"""
+        return macd > signal and macd > prev_macd
     
-    def valid_eth_setup(self, price, support, rsi, macd, signal):
-        """Step 4: Combine all conditions for valid ETH buy setup"""
-        if not self.is_near_support(price, support):
+    def trend_ok(self, price, ema):
+        """Step 4: Only trade WITH the trend"""
+        return price > ema
+    
+    def valid_eth_setup(self, price, prices, rsi, macd, signal, prev_macd, ema):
+        """Final validation: ALL conditions must pass"""
+        # Dynamic support from last 20 candles
+        support = self.get_support(prices, lookback=20)
+        
+        # Check if price is near support (within 0.3%)
+        if abs(price - support) / price > 0.003:
             return False
         
-        if not self.rsi_ok(rsi):
+        # RSI not overbought
+        if rsi >= 55:
             return False
         
-        if not self.momentum_ok(macd, signal):
+        # MACD rising and above signal
+        if not (macd > signal and macd > prev_macd):
+            return False
+        
+        # Price above EMA (with trend)
+        if price < ema:
             return False
         
         return True
@@ -589,14 +604,15 @@ class SmartTrader:
         
         # ════════════════════════════════════════════════════════════════════
         # ETH SETUP VALIDATION (Final check)
-        # Price near support + RSI ok + Momentum ok
+        # Price near support + RSI ok + Momentum ok + Trend ok
         # ════════════════════════════════════════════════════════════════════
         if signal['action'] == 'BUY':
-            if not self.valid_eth_setup(price, support, rsi, macd['macd'], macd['signal']):
+            prices_list = closes.tolist()
+            if not self.valid_eth_setup(price, prices_list, rsi, macd['macd'], macd['signal'], macd['prev_macd'], ema_slow):
                 signal = {
                     'action': 'HOLD',
                     'strength': 0,
-                    'reason': f"⏳ WAITING: Not all ETH setup conditions met (support/RSI/momentum)"
+                    'reason': f"⏳ WAITING: Not all ETH setup conditions met (support/RSI/momentum/trend)"
                 }
         
         # Add metadata
