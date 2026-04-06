@@ -817,6 +817,11 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     def run(self):
         """Main trading loop"""
+        # Startup lock - prevent multiple runs
+        if hasattr(self, 'started'):
+            return
+        self.started = True
+        
         print("\n" + "="*60)
         print("   🚀 SMART TRADER V2 - STARTING")
         print(f"   Bot PID: {os.getpid()}")
@@ -824,9 +829,6 @@ class SmartTrader:
         
         balance = self.get_balance()
         print(f"\n   💰 Balance: ${balance:.2f} USDT")
-        
-        # Telegram runs ONCE here (not inside loop)
-        self.send_telegram(f"🚀 Smart Trader V2 Started\nBalance: ${balance:.2f}\nMax trades: {self.max_trades_per_day}/day\nTarget: ${self.daily_profit_target}/day")
         
         while True:
             try:
@@ -948,4 +950,7 @@ class SmartTrader:
 
 if __name__ == '__main__':
     trader = SmartTrader()
+    # Telegram ONLY here (not inside run())
+    balance = trader.get_balance()
+    trader.send_telegram(f"🚀 Smart Trader V2 Started\nBalance: ${balance:.2f}\nMax trades: {trader.max_trades_per_day}/day\nTarget: ${trader.daily_profit_target}/day")
     trader.run()
