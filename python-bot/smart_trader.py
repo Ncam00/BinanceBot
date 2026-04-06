@@ -819,15 +819,20 @@ class SmartTrader:
         """Main trading loop"""
         print("\n" + "="*60)
         print("   🚀 SMART TRADER V2 - STARTING")
+        print(f"   Bot PID: {os.getpid()}")
         print("="*60)
         
         balance = self.get_balance()
         print(f"\n   💰 Balance: ${balance:.2f} USDT")
         
+        # Telegram runs ONCE here (not inside loop)
         self.send_telegram(f"🚀 Smart Trader V2 Started\nBalance: ${balance:.2f}\nMax trades: {self.max_trades_per_day}/day\nTarget: ${self.daily_profit_target}/day")
         
         while True:
             try:
+                # Loop heartbeat (for debugging restarts)
+                print(f"\r   ⏱️ Loop running... {int(time.time())}", end='', flush=True)
+                
                 # Reset daily counters if new day
                 self.check_daily_reset()
                 
