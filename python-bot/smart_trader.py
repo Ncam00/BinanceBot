@@ -730,10 +730,11 @@ class SmartTrader:
             self.last_trade_time = datetime.now()    # Start cooldown timer
             self.daily_trades += 1                   # trades_today += 1
             
-            msg = f"🟢 BUY {symbol}\n"
-            msg += f"Qty: {quantity} @ ${fill_price:.4f}\n"
-            msg += f"Reason: {signal['reason']}\n"
-            msg += f"SL: ${position['stop_loss']:.4f} | TP: ${position['take_profit']:.4f}"
+            msg = f"🚀 TRADE OPENED\n"
+            msg += f"Pair: {symbol}\n"
+            msg += f"Entry: ${fill_price:.4f}\n"
+            msg += f"SL: ${position['stop_loss']:.4f}\n"
+            msg += f"TP: ${position['take_profit']:.4f}"
             
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
@@ -774,12 +775,13 @@ class SmartTrader:
             
             # Net P&L for display
             net_pnl = self.daily_profit - self.daily_loss
+            balance = self.get_balance()
             
             emoji = "🟢" if pnl > 0 else "🔴"
-            msg = f"{emoji} SELL {symbol} ({reason})\n"
-            msg += f"Qty: {quantity} @ ${fill_price:.4f}\n"
-            msg += f"P&L: ${pnl:.2f} ({pnl_percent:+.2f}%)\n"
-            msg += f"Daily: +${self.daily_profit:.2f} / -${self.daily_loss:.2f} (Net: ${net_pnl:.2f})"
+            msg = f"✅ TRADE CLOSED\n"
+            msg += f"Pair: {symbol}\n"
+            msg += f"PnL: ${pnl:.2f} ({pnl_percent:+.2f}%)\n"
+            msg += f"New Balance: ${balance:.2f}"
             
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
