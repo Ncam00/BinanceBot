@@ -624,6 +624,9 @@ class SmartTrader:
             self.breakout_level = resistance
             self.breakout_direction = 'LONG'
             self.retest_candles = 0
+            self.send_telegram(
+                f"📈 Breakout detected\nLevel: {self.breakout_level:.4f}\nWaiting for retest..."
+            )
             return {
                 'action': 'HOLD',
                 'strength': 0,
@@ -658,6 +661,9 @@ class SmartTrader:
                 }
 
             if self.breakout_direction == 'LONG' and price <= self.breakout_level * (1 + tolerance):
+                self.send_telegram(
+                    f"🔁 Retest happening at {price:.4f}"
+                )
                 if current_close > current_open and rsi > 50:
                     signal = {
                         'action': 'BUY',
