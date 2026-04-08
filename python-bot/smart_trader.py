@@ -83,7 +83,7 @@ class SmartTrader:
         self.waiting_for_retest = False
         self.breakout_level = None
         self.breakout_direction = None
-        self.breakout_candles_since = 0
+        self.retest_candles = 0
         
         # ════════════════════════════════════════════════════════════════════
         # V2: HARD SAFETY RULES (CANNOT BE BYPASSED)
@@ -506,7 +506,7 @@ class SmartTrader:
         self.waiting_for_retest = False
         self.breakout_level = None
         self.breakout_direction = None
-        self.breakout_candles_since = 0
+        self.retest_candles = 0
 
     def get_recent_high(self, df, lookback=20):
         """Recent breakout level from highs before the active retest candles."""
@@ -617,11 +617,13 @@ class SmartTrader:
         current_close = df['close'].iloc[-1]
 
         # Stateful breakout tracking: detect breakout first, then wait for retest.
-        if market_type == 'TREND' and not self.waiting_for_retest and price > resistance:
+        tolerance = 0.002
+
+        if market_type == 'TREND' and price > resistance and not self.waiting_for_retest:
             self.waiting_for_retest = True
             self.breakout_level = resistance
             self.breakout_direction = 'LONG'
-            self.breakout_candles_since = 0
+            self.retest_candles = 0
             return {
                 'action': 'HOLD',
                 'strength': 0,
@@ -638,9 +640,9 @@ class SmartTrader:
             }
 
         if self.waiting_for_retest:
-            self.breakout_candles_since += 1
+            self.retest_candles += 1
 
-            if self.breakout_candles_since > 10:
+            if self.retest_candles > 10:
                 self.reset_breakout_state()
                 return {
                     'action': 'HOLD',
@@ -655,7 +657,7 @@ class SmartTrader:
                     'zone': 'breakout_timeout'
                 }
 
-            if self.breakout_direction == 'LONG' and price <= self.breakout_level:
+            if self.breakout_direction == 'LONG' and price <= self.breakout_level * (1 + tolerance):
                 if current_close > current_open and rsi > 50:
                     signal = {
                         'action': 'BUY',
