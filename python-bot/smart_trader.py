@@ -194,6 +194,34 @@ class SmartTrader:
             print(f"   ❌ Error getting balance: {e}")
             return 0.0
 
+    def calculate_order_fee_usdt(self, order, symbol, fallback_price=None):
+        """Estimate order fees in USDT from Binance fill commissions."""
+        try:
+            base_asset = symbol.replace('USDT', '')
+            total_fee = 0.0
+
+            for fill in order.get('fills', []):
+                commission = float(fill.get('commission', 0) or 0)
+                commission_asset = fill.get('commissionAsset')
+                fill_price = float(fill.get('price', fallback_price or 0) or 0)
+
+                if commission <= 0 or not commission_asset:
+                    continue
+
+                if commission_asset == 'USDT':
+                    total_fee += commission
+                elif commission_asset == base_asset:
+                    total_fee += commission * fill_price
+                else:
+                    conversion_symbol = f"{commission_asset}USDT"
+                    conversion_price = self.get_price(conversion_symbol)
+                    if conversion_price:
+                        total_fee += commission * conversion_price
+
+            return total_fee
+        except Exception:
+            return 0.0
+
     def get_symbol_precision(self, symbol):
         """Get quantity precision from Binance LOT_SIZE filter"""
         info = self.client.get_symbol_info(symbol)
@@ -576,12 +604,11 @@ class SmartTrader:
 
         return True
 
-    def log_trade(self, entry_type, symbol, entry_price):
-        """Write a simple runtime trade tag for later review."""
-        log_path = os.path.join(os.path.dirname(__file__), 'trade_log.txt')
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    def log_trade(self, trade_data):
+        """Write a structured trade record as JSON lines."""
+        log_path = os.path.join(os.path.dirname(__file__), 'trade_log.jsonl')
         with open(log_path, 'a', encoding='utf-8') as log_file:
-            log_file.write(f"{timestamp} | {symbol} | {entry_type} | {entry_price:.4f}\n")
+            log_file.write(json.dumps(trade_data, ensure_ascii=True) + "\n")
     
     # ════════════════════════════════════════════════════════════════════
     # V2: MAIN ANALYSIS (LOCATION-BASED)
@@ -841,6 +868,7 @@ class SmartTrader:
         try:
             balance = self.get_balance()
             price = signal['price']
+            entry_time = datetime.now()
             
             # Get support for stop loss calculation
             support = signal.get('support_override', signal.get('support', price * 0.985))
@@ -875,6 +903,7 @@ class SmartTrader:
             )
             
             fill_price = float(order['fills'][0]['price'])
+            entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
             
             # Use pre-calculated stop loss (structure-based)
             stop_loss = stop_loss_price
@@ -882,17 +911,27 @@ class SmartTrader:
             # First take profit at 1R, then manage the runner at breakeven.
             actual_risk = fill_price - stop_loss
             take_profit = fill_price + (actual_risk * 1.0)
+            rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
             
             # ════════════════════════════════════════════════════════════════════
             # 🔒 IMMEDIATELY update state (CRITICAL)
             # ════════════════════════════════════════════════════════════════════
             position = {
+                'trade_id': f"{symbol}-{int(entry_time.timestamp())}",
                 'symbol': symbol,
                 'quantity': quantity,
                 'original_quantity': quantity,
                 'entry_price': fill_price,
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
+                'risk_percent': risk_percent,
+                'rr_target': rr_target,
+                'entry_type': signal.get('entry_type', 'PULLBACK').lower(),
+                'entry_reason': signal.get('reason', ''),
+                'market_condition': signal.get('market_type', '').lower(),
+                'entry_time': entry_time,
+                'entry_fee': entry_fee,
+                'entry_slippage': fill_price - price,
                 'runner_active': False,
                 'partial_taken': False,
                 'timestamp': datetime.now(),
@@ -902,7 +941,6 @@ class SmartTrader:
             self.last_trade_time = datetime.now()    # Start cooldown timer
             self.daily_trades += 1                   # trades_today += 1
             entry_type = signal.get('entry_type', 'PULLBACK')
-            self.log_trade(entry_type, symbol, fill_price)
             if signal.get('clear_breakout_wait'):
                 self.reset_breakout_state()
             
@@ -927,6 +965,7 @@ class SmartTrader:
         try:
             symbol = position['symbol']
             sell_quantity = position['quantity'] if quantity is None else quantity
+            exit_time = datetime.now()
             step_size, precision = self.get_symbol_precision(symbol)
             sell_quantity = round(sell_quantity, precision)
             
@@ -942,6 +981,7 @@ class SmartTrader:
             )
             
             fill_price = float(order['fills'][0]['price'])
+            exit_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
             pnl = (fill_price - position['entry_price']) * sell_quantity
             pnl_percent = ((fill_price / position['entry_price']) - 1) * 100
             
@@ -959,6 +999,40 @@ class SmartTrader:
                 self.open_positions = [p for p in self.open_positions if p['symbol'] != symbol]
             else:
                 position['quantity'] = remaining_quantity
+
+            original_quantity = max(position.get('original_quantity', sell_quantity), 1e-9)
+            entry_fee_share = position.get('entry_fee', 0.0) * (sell_quantity / original_quantity)
+            fees = round(entry_fee_share + exit_fee, 4)
+            risk_per_unit = max(position['entry_price'] - position['stop_loss'], 1e-9)
+            rr_achieved = round((fill_price - position['entry_price']) / risk_per_unit, 2)
+            duration = round((exit_time - position.get('entry_time', exit_time)).total_seconds() / 60, 2)
+            strategy = 'breakout_retest' if position.get('entry_type') == 'breakout' else 'pullback'
+            notes = 'clean retest + strong momentum' if strategy == 'breakout_retest' else position.get('entry_reason', '')
+
+            self.log_trade({
+                'id': position.get('trade_id'),
+                'pair': symbol,
+                'strategy': strategy,
+                'entry_price': position['entry_price'],
+                'exit_price': fill_price,
+                'position_size': sell_quantity,
+                'risk_percent': position.get('risk_percent'),
+                'stop_loss': position['stop_loss'],
+                'take_profit': position['take_profit'],
+                'rr_target': position.get('rr_target'),
+                'rr_achieved': rr_achieved,
+                'profit': round(pnl, 4),
+                'win': pnl > 0,
+                'fees': fees,
+                'entry_time': position.get('entry_time').isoformat() if position.get('entry_time') else None,
+                'exit_time': exit_time.isoformat(),
+                'duration_minutes': duration,
+                'market_condition': position.get('market_condition'),
+                'entry_reason': position.get('entry_reason'),
+                'exit_reason': reason,
+                'slippage': round(position.get('entry_slippage', 0.0), 6),
+                'notes': notes
+            })
             
             # Net P&L for display
             balance = self.get_balance()
