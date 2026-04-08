@@ -455,7 +455,8 @@ class SmartTrader:
             return {
                 'action': 'BUY',
                 'strength': 0.85,
-                'reason': f"TREND BUY: Support pullback (ADX={adx['adx']:.1f}, MACD bullish)"
+                'reason': f"TREND BUY: Support pullback (ADX={adx['adx']:.1f}, MACD bullish)",
+                'entry_type': 'PULLBACK'
             }
         
         # BUY: Breakout above resistance
@@ -463,7 +464,8 @@ class SmartTrader:
             return {
                 'action': 'BUY',
                 'strength': 0.75,
-                'reason': f"TREND BUY: Breakout above resistance"
+                'reason': f"TREND BUY: Breakout above resistance",
+                'entry_type': 'BREAKOUT'
             }
         
         # SELL: Breakdown below support
@@ -494,6 +496,38 @@ class SmartTrader:
     def trend_ok(self, price, ema):
         """Step 4: Only trade WITH the trend"""
         return price > ema
+
+    def get_recent_high(self, df, lookback=20):
+        """Recent breakout level from highs before the active retest candles."""
+        if len(df) <= 3:
+            return df['high'].max()
+        start_index = max(0, len(df) - lookback - 3)
+        end_index = len(df) - 3
+        return df['high'].iloc[start_index:end_index].max()
+
+    def is_breakout(self, df, buffer=0.001):
+        """Require a close above the recent high to avoid weak breakouts."""
+        recent_high = self.get_recent_high(df)
+        recent_closes = df['close'].iloc[-3:]
+        return recent_closes.max() > recent_high * (1 + buffer)
+
+    def is_retest(self, df, tolerance=0.002):
+        """Current price should retest the broken level instead of chasing higher."""
+        recent_high = self.get_recent_high(df)
+        current_price = df['close'].iloc[-1]
+        return abs(current_price - recent_high) / recent_high < tolerance
+
+    def bullish_confirmation(self, df):
+        """Breakout retest confirmation: current candle is bullish and clears prior high."""
+        if len(df) < 2:
+            return False
+        last_candle = df.iloc[-1]
+        previous_candle = df.iloc[-2]
+        return last_candle['close'] > last_candle['open'] and last_candle['close'] > previous_candle['high']
+
+    def breakout_retest_entry(self, df):
+        """Second entry condition: breakout, retest, and bullish follow-through."""
+        return self.is_breakout(df) and self.is_retest(df) and self.bullish_confirmation(df)
     
     def valid_eth_setup(self, price, prices, rsi, macd, signal, prev_macd, ema):
         """Final validation: ALL conditions must pass"""
@@ -517,6 +551,29 @@ class SmartTrader:
             return False
         
         return True
+
+    def valid_breakout_setup(self, df, price, rsi, macd, signal, prev_macd, ema):
+        """Breakout entry validation: retest entry with momentum and trend alignment."""
+        if not self.breakout_retest_entry(df):
+            return False
+
+        if rsi >= 70:
+            return False
+
+        if not (macd > signal and macd > prev_macd):
+            return False
+
+        if price < ema:
+            return False
+
+        return True
+
+    def log_trade(self, entry_type, symbol, entry_price):
+        """Write a simple runtime trade tag for later review."""
+        log_path = os.path.join(os.path.dirname(__file__), 'trade_log.txt')
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with open(log_path, 'a', encoding='utf-8') as log_file:
+            log_file.write(f"{timestamp} | {symbol} | {entry_type} | {entry_price:.4f}\n")
     
     # ════════════════════════════════════════════════════════════════════
     # V2: MAIN ANALYSIS (LOCATION-BASED)
@@ -601,7 +658,7 @@ class SmartTrader:
         # CONFIRMATION CANDLE CHECK (For BUY signals only)
         # Don't just buy on signal - wait for confirmation
         # ════════════════════════════════════════════════════════════════════
-        if signal['action'] == 'BUY':
+        if signal['action'] == 'BUY' and signal.get('entry_type') != 'BREAKOUT':
             if not self.has_confirmation_candle(df, 'bullish'):
                 signal = {
                     'action': 'HOLD',
@@ -615,12 +672,21 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         if signal['action'] == 'BUY':
             prices_list = closes.tolist()
-            if not self.valid_eth_setup(price, prices_list, rsi, macd['macd'], macd['signal'], macd['prev_macd'], ema_slow):
-                signal = {
-                    'action': 'HOLD',
-                    'strength': 0,
-                    'reason': f"⏳ WAITING: Not all ETH setup conditions met (support/RSI/momentum/trend)"
-                }
+            entry_type = signal.get('entry_type', 'PULLBACK')
+            if entry_type == 'BREAKOUT':
+                if not self.valid_breakout_setup(df, price, rsi, macd['macd'], macd['signal'], macd['prev_macd'], ema_slow):
+                    signal = {
+                        'action': 'HOLD',
+                        'strength': 0,
+                        'reason': f"⏳ WAITING: Breakout retest conditions not met"
+                    }
+            else:
+                if not self.valid_eth_setup(price, prices_list, rsi, macd['macd'], macd['signal'], macd['prev_macd'], ema_slow):
+                    signal = {
+                        'action': 'HOLD',
+                        'strength': 0,
+                        'reason': f"⏳ WAITING: Not all ETH setup conditions met (support/RSI/momentum/trend)"
+                    }
         
         # Add metadata
         signal['market_type'] = market_type
@@ -737,9 +803,12 @@ class SmartTrader:
             self.open_positions.append(position)     # open_position = True
             self.last_trade_time = datetime.now()    # Start cooldown timer
             self.daily_trades += 1                   # trades_today += 1
+            entry_type = signal.get('entry_type', 'PULLBACK')
+            self.log_trade(entry_type, symbol, fill_price)
             
             msg = f"🚀 TRADE OPENED\n"
             msg += f"Pair: {symbol}\n"
+            msg += f"Type: {entry_type}\n"
             msg += f"Entry: ${fill_price:.4f}\n"
             msg += f"SL: ${position['stop_loss']:.4f}\n"
             msg += f"TP: ${position['take_profit']:.4f}"
