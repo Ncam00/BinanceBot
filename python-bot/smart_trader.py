@@ -37,9 +37,9 @@ class SmartTrader:
         )
         
         # ════════════════════════════════════════════════════════════════════
-        # 🔒 STRICT CONTROL: ONE COIN ONLY
+        # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['ETHUSDT']  # ONE COIN ONLY - safest/most liquid
+        self.trading_pairs = ['ETHUSDT', 'BTCUSDT']  # Focus on the most liquid pairs
         self.max_positions = 1            # ONE POSITION AT A TIME
         
         # ════════════════════════════════════════════════════════════════════
@@ -82,10 +82,7 @@ class SmartTrader:
         self.last_reset_date = datetime.now().date()
         self.open_positions = []
         self.last_trade_time = None  # For cooldown tracking
-        self.waiting_for_retest = False
-        self.breakout_level = None
-        self.breakout_direction = None
-        self.retest_candles = 0
+        self.symbol_state = {}  # per-symbol state tracking
         
         # ════════════════════════════════════════════════════════════════════
         # V2: HARD SAFETY RULES (CANNOT BE BYPASSED)
@@ -533,12 +530,24 @@ class SmartTrader:
         """Step 4: Only trade WITH the trend"""
         return price > ema
 
-    def reset_breakout_state(self):
+    def get_symbol_state(self, symbol):
+        """Get or initialize per-symbol breakout state."""
+        if symbol not in self.symbol_state:
+            self.symbol_state[symbol] = {
+                'waiting_for_retest': False,
+                'breakout_level': None,
+                'breakout_direction': None,
+                'retest_candles': 0,
+            }
+        return self.symbol_state[symbol]
+
+    def reset_breakout_state(self, symbol):
         """Clear breakout retest state after entry or timeout."""
-        self.waiting_for_retest = False
-        self.breakout_level = None
-        self.breakout_direction = None
-        self.retest_candles = 0
+        state = self.get_symbol_state(symbol)
+        state['waiting_for_retest'] = False
+        state['breakout_level'] = None
+        state['breakout_direction'] = None
+        state['retest_candles'] = 0
 
     def update_risk_controls(self, profit, balance):
         """Update daily loss ratio and consecutive losses, then return risk status."""
@@ -670,17 +679,18 @@ class SmartTrader:
         market_type = self.get_market_type(adx['adx'])
         current_open = df['open'].iloc[-1]
         current_close = df['close'].iloc[-1]
+        state = self.get_symbol_state(symbol)
 
         # Stateful breakout tracking: detect breakout first, then wait for retest.
         tolerance = 0.002
 
-        if market_type == 'TREND' and price > resistance and not self.waiting_for_retest:
-            self.waiting_for_retest = True
-            self.breakout_level = resistance
-            self.breakout_direction = 'LONG'
-            self.retest_candles = 0
+        if market_type == 'TREND' and price > resistance and not state['waiting_for_retest']:
+            state['waiting_for_retest'] = True
+            state['breakout_level'] = resistance
+            state['breakout_direction'] = 'LONG'
+            state['retest_candles'] = 0
             self.send_telegram(
-                f"📈 Breakout detected\nLevel: {self.breakout_level:.4f}\nWaiting for retest..."
+                f"📈 {symbol} Breakout detected\nLevel: {state['breakout_level']:.4f}\nWaiting for retest..."
             )
             return {
                 'action': 'HOLD',
@@ -697,11 +707,11 @@ class SmartTrader:
                 'zone': 'breakout_wait'
             }
 
-        if self.waiting_for_retest:
-            self.retest_candles += 1
+        if state['waiting_for_retest']:
+            state['retest_candles'] += 1
 
-            if self.retest_candles > 10:
-                self.reset_breakout_state()
+            if state['retest_candles'] > 10:
+                self.reset_breakout_state(symbol)
                 return {
                     'action': 'HOLD',
                     'strength': 0,
@@ -715,17 +725,17 @@ class SmartTrader:
                     'zone': 'breakout_timeout'
                 }
 
-            if self.breakout_direction == 'LONG' and price <= self.breakout_level * (1 + tolerance):
+            if state['breakout_direction'] == 'LONG' and price <= state['breakout_level'] * (1 + tolerance):
                 self.send_telegram(
-                    f"🔁 Retest happening at {price:.4f}"
+                    f"🔁 {symbol} Retest happening at {price:.4f}"
                 )
                 if current_close > current_open and rsi > 50:
                     signal = {
                         'action': 'BUY',
                         'strength': 0.80,
-                        'reason': f"BREAKOUT BUY: Retest confirmed at ${self.breakout_level:.4f}",
+                        'reason': f"BREAKOUT BUY: Retest confirmed at ${state['breakout_level']:.4f}",
                         'entry_type': 'BREAKOUT',
-                        'support_override': self.breakout_level,
+                        'support_override': state['breakout_level'],
                         'clear_breakout_wait': True
                     }
                 else:
@@ -737,7 +747,7 @@ class SmartTrader:
                         'market_type': market_type,
                         'price': price,
                         'support': support,
-                        'support_override': self.breakout_level,
+                        'support_override': state['breakout_level'],
                         'resistance': resistance,
                         'rsi': rsi,
                         'adx': adx['adx'],
@@ -747,12 +757,12 @@ class SmartTrader:
                 return {
                     'action': 'HOLD',
                     'strength': 0,
-                    'reason': f"⏳ WAITING: Watching breakout retest at ${self.breakout_level:.4f}",
+                    'reason': f"⏳ WAITING: Watching breakout retest at ${state['breakout_level']:.4f}",
                     'entry_type': 'BREAKOUT',
                     'market_type': market_type,
                     'price': price,
                     'support': support,
-                    'support_override': self.breakout_level,
+                    'support_override': state['breakout_level'],
                     'resistance': resistance,
                     'rsi': rsi,
                     'adx': adx['adx'],
@@ -820,8 +830,7 @@ class SmartTrader:
                 }
         
         # ════════════════════════════════════════════════════════════════════
-        # ETH SETUP VALIDATION (Final check)
-        # Price near support + RSI ok + Momentum ok + Trend ok
+        # ETH/BTC setup validation
         # ════════════════════════════════════════════════════════════════════
         if signal['action'] == 'BUY':
             prices_list = closes.tolist()
@@ -838,8 +847,12 @@ class SmartTrader:
                     signal = {
                         'action': 'HOLD',
                         'strength': 0,
-                        'reason': f"⏳ WAITING: Not all ETH setup conditions met (support/RSI/momentum/trend)"
+                        'reason': f"⏳ WAITING: Not all setup conditions met"
                     }
+
+        # Clear breakout state if trade confirmed
+        if signal.get('clear_breakout_wait'):
+            self.reset_breakout_state(symbol)
         
         # Add metadata
         signal['market_type'] = market_type
@@ -971,7 +984,7 @@ class SmartTrader:
             self.daily_trades += 1                   # trades_today += 1
             entry_type = signal.get('entry_type', 'PULLBACK')
             if signal.get('clear_breakout_wait'):
-                self.reset_breakout_state()
+                self.reset_breakout_state(symbol)
             
             msg = f"🚀 TRADE OPENED\n"
             msg += f"Pair: {symbol}\n"
