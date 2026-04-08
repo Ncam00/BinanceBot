@@ -189,6 +189,13 @@ class SmartTrader:
         except Exception as e:
             print(f"   ❌ Error getting balance: {e}")
             return 0.0
+
+    def get_symbol_precision(self, symbol):
+        """Get quantity precision from Binance LOT_SIZE filter"""
+        info = self.client.get_symbol_info(symbol)
+        step_size = float([f['stepSize'] for f in info['filters'] if f['filterType'] == 'LOT_SIZE'][0])
+        precision = int(round(-np.log10(step_size)))
+        return step_size, precision
     
     # ════════════════════════════════════════════════════════════════════
     # TECHNICAL INDICATORS
@@ -692,9 +699,7 @@ class SmartTrader:
                 return None
             
             # Get symbol info for precision
-            info = self.client.get_symbol_info(symbol)
-            step_size = float([f['stepSize'] for f in info['filters'] if f['filterType'] == 'LOT_SIZE'][0])
-            precision = int(round(-np.log10(step_size)))
+            step_size, precision = self.get_symbol_precision(symbol)
             quantity = round(quantity, precision)
             
             # Execute order
@@ -710,9 +715,9 @@ class SmartTrader:
             # Use pre-calculated stop loss (structure-based)
             stop_loss = stop_loss_price
             
-            # Take profit based on R:R from actual risk (2:1 minimum)
+            # First take profit at 1R, then manage the runner at breakeven.
             actual_risk = fill_price - stop_loss
-            take_profit = fill_price + (actual_risk * 2.0)
+            take_profit = fill_price + (actual_risk * 1.0)
             
             # ════════════════════════════════════════════════════════════════════
             # 🔒 IMMEDIATELY update state (CRITICAL)
@@ -720,9 +725,12 @@ class SmartTrader:
             position = {
                 'symbol': symbol,
                 'quantity': quantity,
+                'original_quantity': quantity,
                 'entry_price': fill_price,
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
+                'runner_active': False,
+                'partial_taken': False,
                 'timestamp': datetime.now(),
                 'signal': signal
             }
@@ -745,21 +753,27 @@ class SmartTrader:
             print(f"   ❌ Buy failed: {e}")
             return None
     
-    def execute_sell(self, position, reason='SIGNAL'):
+    def execute_sell(self, position, reason='SIGNAL', quantity=None):
         """Execute a sell order"""
         try:
             symbol = position['symbol']
-            quantity = position['quantity']
+            sell_quantity = position['quantity'] if quantity is None else quantity
+            step_size, precision = self.get_symbol_precision(symbol)
+            sell_quantity = round(sell_quantity, precision)
+            
+            if sell_quantity <= 0:
+                print(f"   ⚠️ Sell quantity too small for {symbol}, skipping")
+                return None
             
             order = self.client.create_order(
                 symbol=symbol,
                 side=SIDE_SELL,
                 type=ORDER_TYPE_MARKET,
-                quantity=quantity
+                quantity=sell_quantity
             )
             
             fill_price = float(order['fills'][0]['price'])
-            pnl = (fill_price - position['entry_price']) * quantity
+            pnl = (fill_price - position['entry_price']) * sell_quantity
             pnl_percent = ((fill_price / position['entry_price']) - 1) * 100
             
             # Update daily profit/loss tracking
@@ -771,14 +785,19 @@ class SmartTrader:
             # ════════════════════════════════════════════════════════════════════
             # 🔓 Position closed - open_position = False
             # ════════════════════════════════════════════════════════════════════
-            self.open_positions = [p for p in self.open_positions if p['symbol'] != symbol]
+            remaining_quantity = round(position['quantity'] - sell_quantity, precision)
+            if remaining_quantity <= 0:
+                self.open_positions = [p for p in self.open_positions if p['symbol'] != symbol]
+            else:
+                position['quantity'] = remaining_quantity
             
             # Net P&L for display
-            net_pnl = self.daily_profit - self.daily_loss
             balance = self.get_balance()
             
-            emoji = "🟢" if pnl > 0 else "🔴"
-            msg = f"✅ TRADE CLOSED\n"
+            if remaining_quantity > 0:
+                msg = f"✅ PARTIAL TAKE PROFIT\n"
+            else:
+                msg = f"✅ TRADE CLOSED\n"
             msg += f"Pair: {symbol}\n"
             msg += f"PnL: ${pnl:.2f} ({pnl_percent:+.2f}%)\n"
             msg += f"New Balance: ${balance:.2f}"
@@ -856,6 +875,23 @@ class SmartTrader:
             symbol = position['symbol']
             current_price = self.get_price(symbol)
             if not current_price:
+                continue
+
+            # Runner logic: after partial TP, exit the remainder at breakeven.
+            if position.get('runner_active') and current_price <= position['entry_price']:
+                print(f"\n   ⚖️ BREAKEVEN EXIT {symbol}")
+                self.execute_sell(position, 'BREAKEVEN_RUNNER')
+                continue
+
+            # Partial close at first target: take 70% off and move stop to entry.
+            if not position.get('partial_taken') and current_price >= position['take_profit']:
+                partial_quantity = position['original_quantity'] * 0.70
+                result = self.execute_sell(position, 'PARTIAL_TAKE_PROFIT', quantity=partial_quantity)
+                if result:
+                    position['partial_taken'] = True
+                    position['runner_active'] = True
+                    position['stop_loss'] = position['entry_price']
+                    print(f"   🏃 Runner active for {symbol} - stop moved to breakeven")
                 continue
             
             # Check stop loss
