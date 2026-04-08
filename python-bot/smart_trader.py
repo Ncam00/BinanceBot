@@ -80,6 +80,10 @@ class SmartTrader:
         self.last_reset_date = datetime.now().date()
         self.open_positions = []
         self.last_trade_time = None  # For cooldown tracking
+        self.waiting_for_retest = False
+        self.breakout_level = None
+        self.breakout_direction = None
+        self.breakout_candles_since = 0
         
         # ════════════════════════════════════════════════════════════════════
         # V2: HARD SAFETY RULES (CANNOT BE BYPASSED)
@@ -497,6 +501,13 @@ class SmartTrader:
         """Step 4: Only trade WITH the trend"""
         return price > ema
 
+    def reset_breakout_state(self):
+        """Clear breakout retest state after entry or timeout."""
+        self.waiting_for_retest = False
+        self.breakout_level = None
+        self.breakout_direction = None
+        self.breakout_candles_since = 0
+
     def get_recent_high(self, df, lookback=20):
         """Recent breakout level from highs before the active retest candles."""
         if len(df) <= 3:
@@ -554,10 +565,7 @@ class SmartTrader:
 
     def valid_breakout_setup(self, df, price, rsi, macd, signal, prev_macd, ema):
         """Breakout entry validation: retest entry with momentum and trend alignment."""
-        if not self.breakout_retest_entry(df):
-            return False
-
-        if rsi >= 70:
+        if rsi <= 50 or rsi >= 70:
             return False
 
         if not (macd > signal and macd > prev_macd):
@@ -605,6 +613,88 @@ class SmartTrader:
         
         # V2: Market type
         market_type = self.get_market_type(adx['adx'])
+        current_open = df['open'].iloc[-1]
+        current_close = df['close'].iloc[-1]
+
+        # Stateful breakout tracking: detect breakout first, then wait for retest.
+        if market_type == 'TREND' and not self.waiting_for_retest and price > resistance:
+            self.waiting_for_retest = True
+            self.breakout_level = resistance
+            self.breakout_direction = 'LONG'
+            self.breakout_candles_since = 0
+            return {
+                'action': 'HOLD',
+                'strength': 0,
+                'reason': f"⏳ WAITING: Breakout detected at ${resistance:.4f}, waiting for retest",
+                'entry_type': 'BREAKOUT',
+                'market_type': market_type,
+                'price': price,
+                'support': support,
+                'support_override': resistance,
+                'resistance': resistance,
+                'rsi': rsi,
+                'adx': adx['adx'],
+                'zone': 'breakout_wait'
+            }
+
+        if self.waiting_for_retest:
+            self.breakout_candles_since += 1
+
+            if self.breakout_candles_since > 10:
+                self.reset_breakout_state()
+                return {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': '⏳ WAITING: Breakout retest expired after 10 candles',
+                    'market_type': market_type,
+                    'price': price,
+                    'support': support,
+                    'resistance': resistance,
+                    'rsi': rsi,
+                    'adx': adx['adx'],
+                    'zone': 'breakout_timeout'
+                }
+
+            if self.breakout_direction == 'LONG' and price <= self.breakout_level:
+                if current_close > current_open and rsi > 50:
+                    signal = {
+                        'action': 'BUY',
+                        'strength': 0.80,
+                        'reason': f"BREAKOUT BUY: Retest confirmed at ${self.breakout_level:.4f}",
+                        'entry_type': 'BREAKOUT',
+                        'support_override': self.breakout_level,
+                        'clear_breakout_wait': True
+                    }
+                else:
+                    return {
+                        'action': 'HOLD',
+                        'strength': 0,
+                        'reason': '⏳ WAITING: Retest touched but confirmation candle not ready',
+                        'entry_type': 'BREAKOUT',
+                        'market_type': market_type,
+                        'price': price,
+                        'support': support,
+                        'support_override': self.breakout_level,
+                        'resistance': resistance,
+                        'rsi': rsi,
+                        'adx': adx['adx'],
+                        'zone': 'breakout_retest'
+                    }
+            else:
+                return {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': f"⏳ WAITING: Watching breakout retest at ${self.breakout_level:.4f}",
+                    'entry_type': 'BREAKOUT',
+                    'market_type': market_type,
+                    'price': price,
+                    'support': support,
+                    'support_override': self.breakout_level,
+                    'resistance': resistance,
+                    'rsi': rsi,
+                    'adx': adx['adx'],
+                    'zone': 'breakout_wait'
+                }
         
         # ════════════════════════════════════════════════════════════════════
         # 🚫🚫🚫 ABSOLUTE HARD BLOCK - NO EXCEPTIONS 🚫🚫🚫
@@ -745,7 +835,7 @@ class SmartTrader:
             price = signal['price']
             
             # Get support for stop loss calculation
-            support = signal.get('support', price * 0.985)
+            support = signal.get('support_override', signal.get('support', price * 0.985))
             structure_sl = support * 0.995  # 0.5% below support (safer buffer)
             max_sl = price * 0.97  # Never risk more than 3%
             stop_loss_price = max(structure_sl, max_sl)
@@ -805,6 +895,8 @@ class SmartTrader:
             self.daily_trades += 1                   # trades_today += 1
             entry_type = signal.get('entry_type', 'PULLBACK')
             self.log_trade(entry_type, symbol, fill_price)
+            if signal.get('clear_breakout_wait'):
+                self.reset_breakout_state()
             
             msg = f"🚀 TRADE OPENED\n"
             msg += f"Pair: {symbol}\n"
