@@ -77,6 +77,8 @@ class SmartTrader:
         self.daily_trades = 0
         self.daily_profit = 0.0
         self.daily_loss = 0.0              # Track losses separately
+        self.daily_loss_ratio = 0.0
+        self.consecutive_losses = 0
         self.last_reset_date = datetime.now().date()
         self.open_positions = []
         self.last_trade_time = None  # For cooldown tracking
@@ -91,6 +93,8 @@ class SmartTrader:
         self.trade_cooldown_minutes = 30    # Wait 30min between trades
         self.hard_max_trades = 2             # ABSOLUTE max, no exceptions
         self.max_daily_loss = 10.0           # Stop if lose $10 (prevents revenge trading)
+        self.max_daily_loss_ratio = 0.03     # Stop if losses hit 3% of balance
+        self.max_consecutive_losses = 2      # Stop after 2 losing trades in a row
         
         # Telegram notifications
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -536,6 +540,30 @@ class SmartTrader:
         self.breakout_direction = None
         self.retest_candles = 0
 
+    def update_risk_controls(self, profit, balance):
+        """Update daily loss ratio and consecutive losses, then return risk status."""
+        safe_balance = max(balance, 1e-9)
+
+        if profit < 0:
+            self.daily_loss_ratio += abs(profit) / safe_balance
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+
+        if self.daily_loss_ratio >= self.max_daily_loss_ratio:
+            return 'STOP_DAILY_LOSS'
+
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            return 'STOP_CONSECUTIVE_LOSSES'
+
+        return 'OK'
+
+    def reset_daily(self):
+        """Reset risk counters for a new trading day."""
+        self.daily_loss = 0.0
+        self.daily_loss_ratio = 0.0
+        self.consecutive_losses = 0
+
     def get_recent_high(self, df, lookback=20):
         """Recent breakout level from highs before the active retest candles."""
         if len(df) <= 3:
@@ -932,6 +960,7 @@ class SmartTrader:
                 'entry_time': entry_time,
                 'entry_fee': entry_fee,
                 'entry_slippage': fill_price - price,
+                'realized_pnl': 0.0,
                 'runner_active': False,
                 'partial_taken': False,
                 'timestamp': datetime.now(),
@@ -984,6 +1013,8 @@ class SmartTrader:
             exit_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
             pnl = (fill_price - position['entry_price']) * sell_quantity
             pnl_percent = ((fill_price / position['entry_price']) - 1) * 100
+            total_trade_pnl = position.get('realized_pnl', 0.0) + pnl
+            position['realized_pnl'] = total_trade_pnl
             
             # Update daily profit/loss tracking
             if pnl >= 0:
@@ -1036,6 +1067,11 @@ class SmartTrader:
             
             # Net P&L for display
             balance = self.get_balance()
+
+            if remaining_quantity <= 0:
+                risk_status = self.update_risk_controls(total_trade_pnl, balance)
+                if risk_status != 'OK':
+                    print(f"   🛑 Trading stopped: {risk_status}")
             
             if remaining_quantity > 0:
                 msg = f"✅ PARTIAL TAKE PROFIT\n"
@@ -1064,7 +1100,7 @@ class SmartTrader:
             print(f"\n   🔄 New day - resetting counters")
             self.daily_trades = 0
             self.daily_profit = 0.0
-            self.daily_loss = 0.0
+            self.reset_daily()
             self.last_trade_time = None  # Reset cooldown too
             self.last_reset_date = today
     
@@ -1079,8 +1115,14 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # HARD BLOCK 2: Max daily LOSS protection (prevents revenge trading)
         # ════════════════════════════════════════════════════════════════════
-        if self.daily_loss >= self.max_daily_loss:
-            return False, f"🔴 MAX LOSS HIT: -${self.daily_loss:.2f} (STOP - NO REVENGE TRADING)"
+        if self.daily_loss >= self.max_daily_loss or self.daily_loss_ratio >= self.max_daily_loss_ratio:
+            return False, f"🔴 MAX LOSS HIT: -${self.daily_loss:.2f} ({self.daily_loss_ratio * 100:.2f}% daily loss)"
+
+        # ════════════════════════════════════════════════════════════════════
+        # HARD BLOCK 2B: Consecutive loss protection
+        # ════════════════════════════════════════════════════════════════════
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            return False, f"🛑 CONSECUTIVE LOSSES HIT: {self.consecutive_losses}/{self.max_consecutive_losses}"
         
         # ════════════════════════════════════════════════════════════════════
         # HARD BLOCK 3: Cooldown between trades (30 min)
@@ -1208,7 +1250,7 @@ class SmartTrader:
                 
                 if not can_trade_result:
                     # HARD STOP - These BREAK the loop entirely
-                    if "PROFIT LOCKED" in reason or "MAX LOSS" in reason:
+                    if "PROFIT LOCKED" in reason or "MAX LOSS" in reason or "CONSECUTIVE LOSSES" in reason:
                         print(f"\n\n   🛑 {reason}")
                         print(f"   💤 TRADING STOPPED FOR TODAY - Bot will sleep until midnight")
                         self.send_telegram(f"🛑 Trading stopped: {reason}")
