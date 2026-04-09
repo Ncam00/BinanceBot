@@ -1255,7 +1255,22 @@ class SmartTrader:
                 
                 # Reset daily counters if new day
                 self.check_daily_reset()
-                
+
+                # Heartbeat every 6 hours
+                if not hasattr(self, 'last_heartbeat') or \
+                        (datetime.now() - self.last_heartbeat).seconds > 21600:
+                    balance = self.get_balance()
+                    session, _ = self.get_market_session()
+                    self.send_telegram(
+                        f"❤️ Bot Heartbeat\n"
+                        f"Balance: ${balance:.2f}\n"
+                        f"Session: {session.upper()}\n"
+                        f"Trades today: {self.daily_trades}/{self.hard_max_trades}\n"
+                        f"Daily P&L: ${self.daily_profit:.2f}\n"
+                        f"Open positions: {len(self.open_positions)}"
+                    )
+                    self.last_heartbeat = datetime.now()
+
                 # Check open positions for SL/TP
                 self.check_positions()
                 
