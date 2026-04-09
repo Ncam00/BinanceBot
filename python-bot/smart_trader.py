@@ -39,7 +39,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['ETHUSDT', 'BTCUSDT']  # Focus on the most liquid pairs
+        self.trading_pairs = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT']  # Focus on the most liquid pairs
         self.max_positions = 1            # ONE POSITION AT A TIME
         
         # ════════════════════════════════════════════════════════════════════
