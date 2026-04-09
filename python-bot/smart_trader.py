@@ -667,7 +667,7 @@ class SmartTrader:
         V2 Analysis: Location-based trading
         Only generates signals when price is at key levels
         """
-        df = self.get_candles(symbol, '1m', 100)
+        df = self.get_candles(symbol, '15m', 100)
         if df is None or len(df) < 50:
             return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
         
