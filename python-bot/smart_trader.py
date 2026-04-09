@@ -78,8 +78,10 @@ class SmartTrader:
         self.daily_profit = 0.0
         self.daily_loss = 0.0              # Track losses separately
         self.daily_loss_ratio = 0.0
+        self.weekly_pnl = 0.0
         self.consecutive_losses = 0
         self.last_reset_date = datetime.now().date()
+        self.last_week_reset_key = datetime.now().date().isocalendar()[:2]
         self.open_positions = []
         self.last_trade_time = None  # For cooldown tracking
         self.symbol_state = {}  # per-symbol state tracking
@@ -573,6 +575,16 @@ class SmartTrader:
         self.daily_loss_ratio = 0.0
         self.consecutive_losses = 0
 
+    def reset_weekly(self):
+        """Reset weekly realized PnL when a new ISO week starts."""
+        self.weekly_pnl = 0.0
+
+    def get_week_key(self):
+        """Return (year, week) for weekly guard resets."""
+        today = datetime.now().date()
+        iso = today.isocalendar()
+        return (iso.year, iso.week)
+
     def get_recent_high(self, df, lookback=20):
         """Recent breakout level from highs before the active retest candles."""
         if len(df) <= 3:
@@ -1034,6 +1046,7 @@ class SmartTrader:
                 self.daily_profit += pnl
             else:
                 self.daily_loss += abs(pnl)  # Track losses as positive number
+            self.weekly_pnl += pnl
             
             # ════════════════════════════════════════════════════════════════════
             # 🔓 Position closed - open_position = False
@@ -1107,8 +1120,15 @@ class SmartTrader:
     # V2: DAILY LIMITS
     # ════════════════════════════════════════════════════════════════════
     def check_daily_reset(self):
-        """Reset daily counters at midnight"""
+        """Reset daily counters at midnight and weekly counters on new week"""
         today = datetime.now().date()
+        current_week_key = self.get_week_key()
+
+        if current_week_key != self.last_week_reset_key:
+            print(f"\n   🔄 New week - resetting weekly P&L guard")
+            self.reset_weekly()
+            self.last_week_reset_key = current_week_key
+
         if today != self.last_reset_date:
             print(f"\n   🔄 New day - resetting counters")
             self.daily_trades = 0
@@ -1119,6 +1139,12 @@ class SmartTrader:
     
     def can_trade(self):
         """Check if we can make more trades today - HARD BLOCKS"""
+        # ════════════════════════════════════════════════════════════════════
+        # HARD BLOCK 0: Weekly loss guard
+        # ════════════════════════════════════════════════════════════════════
+        if self.weekly_pnl <= -20:
+            return False, f"🛑 WEEKLY LOSS LIMIT HIT: ${self.weekly_pnl:.2f} - resuming next week"
+
         # ════════════════════════════════════════════════════════════════════
         # HARD BLOCK 1: Absolute trade limit (CANNOT BE BYPASSED)
         # ════════════════════════════════════════════════════════════════════
@@ -1263,7 +1289,7 @@ class SmartTrader:
                 
                 if not can_trade_result:
                     # HARD STOP - These BREAK the loop entirely
-                    if "PROFIT LOCKED" in reason or "MAX LOSS" in reason or "CONSECUTIVE LOSSES" in reason:
+                    if "PROFIT LOCKED" in reason or "MAX LOSS" in reason or "CONSECUTIVE LOSSES" in reason or "WEEKLY LOSS LIMIT" in reason:
                         print(f"\n\n   🛑 {reason}")
                         print(f"   💤 TRADING STOPPED FOR TODAY - Bot will sleep until midnight")
                         self.send_telegram(f"🛑 Trading stopped: {reason}")
