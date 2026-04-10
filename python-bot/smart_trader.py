@@ -39,7 +39,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT']  # Focus on the most liquid pairs
+        self.trading_pairs = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT']  # Keep BTC in trading pairs so manual BTC position is respected
         self.max_positions = 1            # ONE POSITION AT A TIME
         
         # ════════════════════════════════════════════════════════════════════
@@ -107,10 +107,29 @@ class SmartTrader:
         print(f"   Stop Loss: {self.stop_loss_percent}% | Take Profit: {self.take_profit_percent}%")
         session, settings = self.get_market_session()
         print(f"   Current session: {session.upper()} ({settings['mode']})")
+
+        # Pre-load existing BTC position
+        self.open_positions.append({
+            'symbol': 'BTCUSDT',
+            'quantity': 0.00282,
+            'original_quantity': 0.00282,
+            'entry_price': 72753.0,
+            'stop_loss': 71388.0,
+            'take_profit': 74108.0,
+            'trailing_stop_active': False,
+            'partial_taken': False,
+            'runner_active': False,
+            'entry_time': datetime.now(),
+            'entry_fee': 0,
+            'entry_slippage': 0,
+            'realized_pnl': 0.0,
+            'risk_percent': 0.015,
+            'trade_id': 'BTC-manual-recovery'
+        })
     
     # ════════════════════════════════════════════════════════════════════
     # V2: SESSION DETECTION (NZ TIMEZONE)
-    # ════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════
     def get_nz_hour(self):
         """Get current hour in NZ timezone"""
         nz_now = datetime.now(self.nz_timezone)
