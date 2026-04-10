@@ -85,6 +85,7 @@ class SmartTrader:
         self.open_positions = []
         self.last_trade_time = None  # For cooldown tracking
         self.symbol_state = {}  # per-symbol state tracking
+        self.trade_lock = False  # Prevents duplicate entries
         
         # ════════════════════════════════════════════════════════════════════
         # V2: HARD SAFETY RULES (CANNOT BE BYPASSED)
@@ -721,6 +722,8 @@ class SmartTrader:
 
         if state['waiting_for_retest']:
             state['retest_candles'] += 1
+            if state['retest_candles'] > 1:
+                pass  # Only alert on first retest candle
 
             if state['retest_candles'] > 10:
                 self.reset_breakout_state(symbol)
@@ -738,9 +741,10 @@ class SmartTrader:
                 }
 
             if state['breakout_direction'] == 'LONG' and price <= state['breakout_level'] * (1 + tolerance):
-                self.send_telegram(
-                    f"🔁 {symbol} Retest happening at {price:.4f}"
-                )
+                if state['retest_candles'] == 1:
+                    self.send_telegram(
+                        f"🔁 {symbol} Retest happening at {price:.4f}"
+                    )
                 if current_close > current_open and rsi > 50:
                     signal = {
                         'action': 'BUY',
@@ -918,6 +922,10 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     def execute_buy(self, symbol, signal):
         """Execute a buy order"""
+        if self.trade_lock:
+            print(f"   🔒 TRADE LOCK ACTIVE - skipping duplicate entry for {symbol}")
+            return None
+        self.trade_lock = True
         try:
             balance = self.get_balance()
             price = signal['price']
@@ -1008,11 +1016,15 @@ class SmartTrader:
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
             
+            self.trade_lock = False
             return position
             
         except Exception as e:
             print(f"   ❌ Buy failed: {e}")
+            self.trade_lock = False
             return None
+        finally:
+            self.trade_lock = False
     
     def execute_sell(self, position, reason='SIGNAL', quantity=None):
         """Execute a sell order"""
