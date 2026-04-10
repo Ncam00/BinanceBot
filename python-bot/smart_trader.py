@@ -533,6 +533,36 @@ class SmartTrader:
         """Step 4: Only trade WITH the trend"""
         return price > ema
 
+    def btc_is_healthy(self):
+        """
+        Check if BTC trend is healthy before allowing alt trades.
+        Returns True if safe to trade alts, False if BTC is dumping.
+        """
+        try:
+            df = self.get_candles('BTCUSDT', '15m', 20)
+            if df is None or len(df) < 10:
+                return True  # If can't check, allow trading
+
+            closes = df['close']
+            current_price = closes.iloc[-1]
+            price_15m_ago = closes.iloc[-2]
+            price_1h_ago = closes.iloc[-4]
+
+            # Calculate short term moves
+            change_15m = ((current_price - price_15m_ago) / price_15m_ago) * 100
+            change_1h = ((current_price - price_1h_ago) / price_1h_ago) * 100
+
+            # BTC dumping hard - block alt buys
+            if change_15m < -0.5 or change_1h < -1.5:
+                print(f"   ⚠️ BTC FILTER: BTC dropping ({change_1h:.2f}% 1h) - blocking alts")
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"   ⚠️ BTC filter check failed: {e}")
+            return True  # On error, allow trading
+
     def get_symbol_state(self, symbol):
         """Get or initialize per-symbol breakout state."""
         if symbol not in self.symbol_state:
@@ -1349,6 +1379,11 @@ class SmartTrader:
                     # 🔒 Re-check: One position max
                     if len(self.open_positions) >= self.max_positions:
                         break
+
+                    # BTC correlation filter for alts
+                    if symbol != 'BTCUSDT' and not self.btc_is_healthy():
+                        print(f"   ⚠️ {symbol} skipped - BTC filter active")
+                        continue
                     
                     # Analyze for valid trade setup
                     signal = self.analyze(symbol)
