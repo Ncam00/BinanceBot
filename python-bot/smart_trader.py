@@ -1236,20 +1236,55 @@ class SmartTrader:
     # POSITION MANAGEMENT
     # ════════════════════════════════════════════════════════════════════
     def check_positions(self):
-        """Check open positions for SL/TP"""
-        for position in self.open_positions[:]:  # Copy list for safe modification
+        """Check open positions for SL/TP and trailing stop"""
+        for position in self.open_positions[:]:
             symbol = position['symbol']
             current_price = self.get_price(symbol)
             if not current_price:
                 continue
 
-            # Runner logic: after partial TP, exit the remainder at breakeven.
+            # Calculate current P&L
+            pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
+
+            # ════════════════════════════════════════════════════════════
+            # TRAILING STOP LOGIC
+            # Activates after 1.5% profit, trails at 0.8% distance
+            # ════════════════════════════════════════════════════════════
+            if pnl_percent >= 1.5:
+                # Initialize trailing stop if not set
+                if not position.get('trailing_stop_active'):
+                    position['trailing_stop_active'] = True
+                    position['highest_price'] = current_price
+                    position['trailing_stop_price'] = current_price * (1 - 0.008)
+                    print(f"   🔒 TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
+                    self.send_telegram(
+                        f"🔒 Trailing Stop Activated\n"
+                        f"Pair: {symbol}\n"
+                        f"Profit: +{pnl_percent:.2f}%\n"
+                        f"Trail: ${position['trailing_stop_price']:.4f}"
+                    )
+
+                # Update trailing stop if price moves higher
+                if current_price > position.get('highest_price', 0):
+                    position['highest_price'] = current_price
+                    new_trail = current_price * (1 - 0.008)
+                    if new_trail > position['trailing_stop_price']:
+                        position['trailing_stop_price'] = new_trail
+                        print(f"   📈 TRAILING STOP RAISED {symbol} @ ${position['trailing_stop_price']:.4f}")
+
+                # Check if trailing stop hit
+                if current_price <= position['trailing_stop_price']:
+                    print(f"\n   🔒 TRAILING STOP HIT {symbol} @ ${current_price:.4f}")
+                    self.execute_sell(position, 'TRAILING_STOP')
+                    continue
+
+            # Runner logic: after partial TP, exit remainder at breakeven
             if position.get('runner_active') and current_price <= position['entry_price']:
                 print(f"\n   ⚖️ BREAKEVEN EXIT {symbol}")
                 self.execute_sell(position, 'BREAKEVEN_RUNNER')
                 continue
 
-            # Partial close at first target: take 70% off and move stop to entry.
+            # Partial close at first target: take 70% off, move stop to entry
             if not position.get('partial_taken') and current_price >= position['take_profit']:
                 partial_quantity = position['original_quantity'] * 0.70
                 result = self.execute_sell(position, 'PARTIAL_TAKE_PROFIT', quantity=partial_quantity)
@@ -1259,13 +1294,13 @@ class SmartTrader:
                     position['stop_loss'] = position['entry_price']
                     print(f"   🏃 Runner active for {symbol} - stop moved to breakeven")
                 continue
-            
+
             # Check stop loss
             if current_price <= position['stop_loss']:
                 print(f"\n   🛑 STOP LOSS HIT {symbol}")
                 self.execute_sell(position, 'STOP_LOSS')
                 continue
-            
+
             # Check take profit
             if current_price >= position['take_profit']:
                 print(f"\n   🎯 TAKE PROFIT HIT {symbol}")
