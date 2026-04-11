@@ -873,21 +873,16 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # ETH/BTC setup validation
         # ════════════════════════════════════════════════════════════════════
-        if signal['action'] == 'BUY' and symbol == 'ETHUSDT':
-            if not self.check_btc_trend():
-                signal = {
-                    'action': 'HOLD',
-                    'strength': 0,
-                    'reason': '🚫 BTC GUARD: BTC dumping - blocking ETH entry'
-                }
-
         if signal['action'] == 'BUY':
+            # BTC correlation check
+            if not self.check_btc_trend():
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '🛡️ BTC dumping - ETH entry blocked'}
+
+            # Volume confirmation
             if not self.check_volume(df):
-                signal = {
-                    'action': 'HOLD',
-                    'strength': 0,
-                    'reason': '📉 VOLUME GUARD: Volume too low - skipping entry'
-                }
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '📉 Low volume - entry blocked'}
 
         if signal['action'] == 'BUY':
             prices_list = closes.tolist()
