@@ -40,7 +40,7 @@ class SmartTrader:
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
         self.trading_pairs = ['ETHUSDT','BTCUSDT', 'SOLUSDT']
-        self.max_positions = 2
+        self.max_positions = 3
         
         # ════════════════════════════════════════════════════════════════════
         # V2 CORE SETTINGS
@@ -91,8 +91,8 @@ class SmartTrader:
         # V2: HARD SAFETY RULES (CANNOT BE BYPASSED)
         # ════════════════════════════════════════════════════════════════════
         self.trade_cooldown_minutes = 30    # Wait 30min between trades
-        self.hard_max_trades = 2             # ABSOLUTE max, no exceptions
-        self.max_daily_loss = 10.0           # Stop if lose $10 (prevents revenge trading)
+        self.hard_max_trades = 3             # ABSOLUTE max, no exceptions
+        self.max_daily_loss = 12.0           # Stop if lose $12 (prevents revenge trading)
         self.max_daily_loss_ratio = 0.03     # Stop if losses hit 3% of balance
         self.max_consecutive_losses = 2      # Stop after 2 losing trades in a row
         
