@@ -532,6 +532,23 @@ class SmartTrader:
         """Step 4: Only trade WITH the trend"""
         return price > ema
 
+    def check_btc_trend(self):
+        """Don't trade ETH when BTC is dumping"""
+        df = self.get_candles('BTCUSDT', '5m', 20)
+        if df is None:
+            return True  # If can't check, allow trade
+
+        closes = df['close'].tolist()
+        current = closes[-1]
+        price_1h_ago = closes[0]
+        change_1h = ((current - price_1h_ago) / price_1h_ago) * 100
+
+        # Block if BTC down more than 0.3% in last hour
+        if change_1h < -0.3:
+            print(f"   BTC GUARD: BTC down {change_1h:.2f}% - blocking ETH entry")
+            return False
+        return True
+
     def get_symbol_state(self, symbol):
         """Get or initialize per-symbol breakout state."""
         if symbol not in self.symbol_state:
@@ -844,6 +861,14 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # ETH/BTC setup validation
         # ════════════════════════════════════════════════════════════════════
+        if signal['action'] == 'BUY' and symbol == 'ETHUSDT':
+            if not self.check_btc_trend():
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': '🚫 BTC GUARD: BTC dumping - blocking ETH entry'
+                }
+
         if signal['action'] == 'BUY':
             prices_list = closes.tolist()
             entry_type = signal.get('entry_type', 'PULLBACK')
