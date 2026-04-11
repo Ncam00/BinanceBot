@@ -19,6 +19,7 @@ import json
 from datetime import datetime, timedelta
 from binance.client import Client
 from binance.enums import *
+from binance.exceptions import BinanceAPIException
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
@@ -1593,6 +1594,13 @@ class SmartTrader:
             except KeyboardInterrupt:
                 print("\n\n   🛑 Stopping bot...")
                 break
+            except BinanceAPIException as e:
+                if e.status_code == 429:
+                    print("Rate limit reached! Sleeping for 60 seconds...")
+                    time.sleep(60)
+                else:
+                    print(f"\n   ❌ Binance API error: {e}")
+                    time.sleep(10)
             except Exception as e:
                 print(f"\n   ❌ Error: {e}")
                 time.sleep(10)
