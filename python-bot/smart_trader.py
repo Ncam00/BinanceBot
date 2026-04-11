@@ -39,8 +39,8 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT']  # Focus on the most liquid pairs
-        self.max_positions = 1            # ONE POSITION AT A TIME
+        self.trading_pairs = ['ETHUSDT']
+        self.max_positions = 2
         
         # ════════════════════════════════════════════════════════════════════
         # V2 CORE SETTINGS
@@ -85,6 +85,7 @@ class SmartTrader:
         self.open_positions = []
         self.last_trade_time = None  # For cooldown tracking
         self.symbol_state = {}  # per-symbol state tracking
+        self.trade_lock = False  # Prevents duplicate entries
         
         # ════════════════════════════════════════════════════════════════════
         # V2: HARD SAFETY RULES (CANNOT BE BYPASSED)
@@ -106,10 +107,82 @@ class SmartTrader:
         print(f"   Stop Loss: {self.stop_loss_percent}% | Take Profit: {self.take_profit_percent}%")
         session, settings = self.get_market_session()
         print(f"   Current session: {session.upper()} ({settings['mode']})")
+
+        # Sync existing holdings into bot state on startup
+        self.sync_existing_positions()
     
-    # ════════════════════════════════════════════════════════════════════
-    # V2: SESSION DETECTION (NZ TIMEZONE)
-    # ════════════════════════════════════════════════════════════════════
+    def sync_existing_positions(self):
+        """Import existing holdings into bot management on startup"""
+        print("\n   🔄 Checking for existing positions to sync...")
+        
+        known_entries = {
+            'BTCUSDT': 72753.0  # Your actual average buy price
+        }
+        
+        try:
+            account = self.client.get_account()
+            for balance in account['balances']:
+                asset = balance['asset']
+                symbol = f"{asset}USDT"
+                
+                if symbol not in self.trading_pairs:
+                    continue
+                    
+                amount = float(balance['free'])
+                if amount <= 0:
+                    continue
+                    
+                current_price = self.get_price(symbol)
+                if not current_price:
+                    continue
+                    
+                # Skip dust (less than $10 value)
+                if amount * current_price < 10:
+                    continue
+                    
+                # Skip if already tracked
+                if any(p['symbol'] == symbol for p in self.open_positions):
+                    continue
+                    
+                # Use known entry price or current price as fallback
+                entry_price = known_entries.get(symbol, current_price)
+                
+                # Structure-based SL/TP
+                stop_loss = entry_price * (1 - self.stop_loss_percent / 100)
+                take_profit = entry_price * (1 + self.take_profit_percent / 100)
+                
+                position = {
+                    'trade_id': f"{symbol}-synced",
+                    'symbol': symbol,
+                    'quantity': amount,
+                    'original_quantity': amount,
+                    'entry_price': entry_price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'risk_percent': self.stop_loss_percent / 100,
+                    'rr_target': 2.0,
+                    'entry_type': 'synced',
+                    'entry_reason': 'Imported existing position on startup',
+                    'market_condition': 'unknown',
+                    'entry_time': datetime.now(),
+                    'entry_fee': 0,
+                    'entry_slippage': 0,
+                    'realized_pnl': 0.0,
+                    'runner_active': False,
+                    'partial_taken': False,
+                    'timestamp': datetime.now(),
+                    'signal': {}
+                }
+                
+                self.open_positions.append(position)
+                pnl = (current_price - entry_price) * amount
+                print(f"   ✅ Synced: {amount:.8f} {asset} @ entry ${entry_price:.2f}")
+                print(f"      Current: ${current_price:.2f} | P&L: ${pnl:.2f}")
+                print(f"      SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
+                
+        except Exception as e:
+            print(f"   ❌ Sync error: {e}")
+    # ════════════════════════════════════════════════════════════
     def get_nz_hour(self):
         """Get current hour in NZ timezone"""
         nz_now = datetime.now(self.nz_timezone)
@@ -584,6 +657,36 @@ class SmartTrader:
             return False
         return True
 
+    def btc_is_healthy(self):
+        """
+        Check if BTC trend is healthy before allowing alt trades.
+        Returns True if safe to trade alts, False if BTC is dumping.
+        """
+        try:
+            df = self.get_candles('BTCUSDT', '15m', 20)
+            if df is None or len(df) < 10:
+                return True  # If can't check, allow trading
+
+            closes = df['close']
+            current_price = closes.iloc[-1]
+            price_15m_ago = closes.iloc[-2]
+            price_1h_ago = closes.iloc[-4]
+
+            # Calculate short term moves
+            change_15m = ((current_price - price_15m_ago) / price_15m_ago) * 100
+            change_1h = ((current_price - price_1h_ago) / price_1h_ago) * 100
+
+            # BTC dumping hard - block alt buys
+            if change_15m < -0.5 or change_1h < -1.5:
+                print(f"   ⚠️ BTC FILTER: BTC dropping ({change_1h:.2f}% 1h) - blocking alts")
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"   ⚠️ BTC filter check failed: {e}")
+            return True  # On error, allow trading
+
     def get_symbol_state(self, symbol):
         """Get or initialize per-symbol breakout state."""
         if symbol not in self.symbol_state:
@@ -596,12 +699,13 @@ class SmartTrader:
         return self.symbol_state[symbol]
 
     def reset_breakout_state(self, symbol):
-        """Clear breakout retest state after entry or timeout."""
-        state = self.get_symbol_state(symbol)
-        state['waiting_for_retest'] = False
-        state['breakout_level'] = None
-        state['breakout_direction'] = None
-        state['retest_candles'] = 0
+        """Clear breakout retest state for a specific symbol"""
+        self.symbol_state[symbol] = {
+            'waiting_for_retest': False,
+            'breakout_level': None,
+            'breakout_direction': None,
+            'retest_candles': 0
+        }
 
     def update_risk_controls(self, profit, balance):
         """Update daily loss ratio and consecutive losses, then return risk status."""
@@ -719,7 +823,7 @@ class SmartTrader:
         V2 Analysis: Location-based trading
         Only generates signals when price is at key levels
         """
-        df = self.get_candles(symbol, '1m', 100)
+        df = self.get_candles(symbol, '15m', 100)
         if df is None or len(df) < 50:
             return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
         
@@ -773,6 +877,8 @@ class SmartTrader:
 
         if state['waiting_for_retest']:
             state['retest_candles'] += 1
+            if state['retest_candles'] > 1:
+                pass  # Only alert on first retest candle
 
             if state['retest_candles'] > 10:
                 self.reset_breakout_state(symbol)
@@ -790,9 +896,10 @@ class SmartTrader:
                 }
 
             if state['breakout_direction'] == 'LONG' and price <= state['breakout_level'] * (1 + tolerance):
-                self.send_telegram(
-                    f"🔁 {symbol} Retest happening at {price:.4f}"
-                )
+                if state['retest_candles'] == 1:
+                    self.send_telegram(
+                        f"🔁 {symbol} Retest happening at {price:.4f}"
+                    )
                 if current_close > current_open and rsi > 50:
                     signal = {
                         'action': 'BUY',
@@ -986,6 +1093,10 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     def execute_buy(self, symbol, signal):
         """Execute a buy order"""
+        if self.trade_lock:
+            print(f"   🔒 TRADE LOCK ACTIVE - skipping duplicate entry for {symbol}")
+            return None
+        self.trade_lock = True
         try:
             balance = self.get_balance()
             price = signal['price']
@@ -1076,11 +1187,15 @@ class SmartTrader:
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
             
+            self.trade_lock = False
             return position
             
         except Exception as e:
             print(f"   ❌ Buy failed: {e}")
+            self.trade_lock = False
             return None
+        finally:
+            self.trade_lock = False
     
     def execute_sell(self, position, reason='SIGNAL', quantity=None):
         """Execute a sell order"""
@@ -1262,20 +1377,55 @@ class SmartTrader:
     # POSITION MANAGEMENT
     # ════════════════════════════════════════════════════════════════════
     def check_positions(self):
-        """Check open positions for SL/TP"""
-        for position in self.open_positions[:]:  # Copy list for safe modification
+        """Check open positions for SL/TP and trailing stop"""
+        for position in self.open_positions[:]:
             symbol = position['symbol']
             current_price = self.get_price(symbol)
             if not current_price:
                 continue
 
-            # Runner logic: after partial TP, exit the remainder at breakeven.
+            # Calculate current P&L
+            pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
+
+            # ════════════════════════════════════════════════════════════
+            # TRAILING STOP LOGIC
+            # Activates after 1.5% profit, trails at 0.8% distance
+            # ════════════════════════════════════════════════════════════
+            if pnl_percent >= 1.5:
+                # Initialize trailing stop if not set
+                if not position.get('trailing_stop_active'):
+                    position['trailing_stop_active'] = True
+                    position['highest_price'] = current_price
+                    position['trailing_stop_price'] = current_price * (1 - 0.008)
+                    print(f"   🔒 TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
+                    self.send_telegram(
+                        f"🔒 Trailing Stop Activated\n"
+                        f"Pair: {symbol}\n"
+                        f"Profit: +{pnl_percent:.2f}%\n"
+                        f"Trail: ${position['trailing_stop_price']:.4f}"
+                    )
+
+                # Update trailing stop if price moves higher
+                if current_price > position.get('highest_price', 0):
+                    position['highest_price'] = current_price
+                    new_trail = current_price * (1 - 0.008)
+                    if new_trail > position['trailing_stop_price']:
+                        position['trailing_stop_price'] = new_trail
+                        print(f"   📈 TRAILING STOP RAISED {symbol} @ ${position['trailing_stop_price']:.4f}")
+
+                # Check if trailing stop hit
+                if current_price <= position['trailing_stop_price']:
+                    print(f"\n   🔒 TRAILING STOP HIT {symbol} @ ${current_price:.4f}")
+                    self.execute_sell(position, 'TRAILING_STOP')
+                    continue
+
+            # Runner logic: after partial TP, exit remainder at breakeven
             if position.get('runner_active') and current_price <= position['entry_price']:
                 print(f"\n   ⚖️ BREAKEVEN EXIT {symbol}")
                 self.execute_sell(position, 'BREAKEVEN_RUNNER')
                 continue
 
-            # Partial close at first target: take 70% off and move stop to entry.
+            # Partial close at first target: take 70% off, move stop to entry
             if not position.get('partial_taken') and current_price >= position['take_profit']:
                 partial_quantity = position['original_quantity'] * 0.70
                 result = self.execute_sell(position, 'PARTIAL_TAKE_PROFIT', quantity=partial_quantity)
@@ -1285,13 +1435,13 @@ class SmartTrader:
                     position['stop_loss'] = position['entry_price']
                     print(f"   🏃 Runner active for {symbol} - stop moved to breakeven")
                 continue
-            
+
             # Check stop loss
             if current_price <= position['stop_loss']:
                 print(f"\n   🛑 STOP LOSS HIT {symbol}")
                 self.execute_sell(position, 'STOP_LOSS')
                 continue
-            
+
             # Check take profit
             if current_price >= position['take_profit']:
                 print(f"\n   🎯 TAKE PROFIT HIT {symbol}")
@@ -1333,7 +1483,7 @@ class SmartTrader:
                         f"❤️ Bot Heartbeat\n"
                         f"Balance: ${balance:.2f}\n"
                         f"Session: {session.upper()}\n"
-                        f"Trades today: {self.daily_trades}/{self.hard_max_trades}\n"
+                        f"Trades today: {self.daily_trades}/{self.max_trades_per_day}\n"
                         f"Daily P&L: ${self.daily_profit:.2f}\n"
                         f"Open positions: {len(self.open_positions)}"
                     )
@@ -1405,6 +1555,11 @@ class SmartTrader:
                     # 🔒 Re-check: One position max
                     if len(self.open_positions) >= self.max_positions:
                         break
+
+                    # BTC correlation filter for alts
+                    if symbol != 'BTCUSDT' and not self.btc_is_healthy():
+                        print(f"   ⚠️ {symbol} skipped - BTC filter active")
+                        continue
                     
                     # Analyze for valid trade setup
                     signal = self.analyze(symbol)
