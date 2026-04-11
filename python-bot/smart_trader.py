@@ -69,8 +69,8 @@ class SmartTrader:
         self.nz_timezone = pytz.timezone('Pacific/Auckland')
         self.session_settings = {
             'asia': {'mode': 'low_risk', 'max_trades': 1, 'min_strength': 0.85},
-            'london': {'mode': 'normal', 'max_trades': 2, 'min_strength': 0.75},
-            'us': {'mode': 'aggressive', 'max_trades': 2, 'min_strength': 0.70}
+            'london': {'mode': 'normal', 'max_trades': 3, 'min_strength': 0.75},
+            'us': {'mode': 'aggressive', 'max_trades': 3, 'min_strength': 0.70}
         }
         
         # State tracking
