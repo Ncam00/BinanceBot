@@ -605,6 +605,58 @@ class SmartTrader:
         """Step 4: Only trade WITH the trend"""
         return price > ema
 
+    def check_multi_timeframe(self, symbol):
+        """All timeframes should agree before entry"""
+        timeframes = ['1m', '5m', '15m']
+        bullish_count = 0
+
+        for tf in timeframes:
+            df = self.get_candles(symbol, tf, 50)
+            if df is None:
+                continue
+            closes = df['close']
+            ema7 = closes.ewm(span=7).mean().iloc[-1]
+            ema18 = closes.ewm(span=18).mean().iloc[-1]
+            price = closes.iloc[-1]
+
+            if price > ema7 and ema7 > ema18:
+                bullish_count += 1
+
+        if bullish_count >= 2:
+            return True
+
+        print(f"   MTF: Only {bullish_count}/3 timeframes bullish - blocking")
+        return False
+
+    def check_volume(self, df):
+        """Only enter if volume is real"""
+        volumes = df['volume'].tolist()
+        current_volume = volumes[-1]
+        avg_volume = sum(volumes[-20:-1]) / 19
+        ratio = current_volume / avg_volume
+
+        if ratio < 0.8:
+            print(f"   📉 LOW VOLUME: {ratio:.2f}x avg - skipping entry")
+            return False
+        return True
+
+    def check_btc_trend(self):
+        """Don't trade ETH when BTC is dumping"""
+        df = self.get_candles('BTCUSDT', '5m', 20)
+        if df is None:
+            return True  # If can't check, allow trade
+
+        closes = df['close'].tolist()
+        current = closes[-1]
+        price_1h_ago = closes[0]
+        change_1h = ((current - price_1h_ago) / price_1h_ago) * 100
+
+        # Block if BTC down more than 0.3% in last hour
+        if change_1h < -0.3:
+            print(f"   BTC GUARD: BTC down {change_1h:.2f}% - blocking ETH entry")
+            return False
+        return True
+
     def btc_is_healthy(self):
         """
         Check if BTC trend is healthy before allowing alt trades.
@@ -951,6 +1003,22 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # ETH/BTC setup validation
         # ════════════════════════════════════════════════════════════════════
+        if signal['action'] == 'BUY':
+            # BTC correlation check
+            if not self.check_btc_trend():
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '🛡️ BTC dumping - ETH entry blocked'}
+
+            # Volume confirmation
+            if not self.check_volume(df):
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '📉 Low volume - entry blocked'}
+
+            # Multi-timeframe confirmation
+            if not self.check_multi_timeframe(symbol):
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '⏱️ MTF: Timeframes not aligned - entry blocked'}
+
         if signal['action'] == 'BUY':
             prices_list = closes.tolist()
             entry_type = signal.get('entry_type', 'PULLBACK')
