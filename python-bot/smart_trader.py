@@ -532,6 +532,18 @@ class SmartTrader:
         """Step 4: Only trade WITH the trend"""
         return price > ema
 
+    def check_volume(self, df):
+        """Only enter if volume is real"""
+        volumes = df['volume'].tolist()
+        current_volume = volumes[-1]
+        avg_volume = sum(volumes[-20:-1]) / 19
+        ratio = current_volume / avg_volume
+
+        if ratio < 0.8:
+            print(f"   📉 LOW VOLUME: {ratio:.2f}x avg - skipping entry")
+            return False
+        return True
+
     def check_btc_trend(self):
         """Don't trade ETH when BTC is dumping"""
         df = self.get_candles('BTCUSDT', '5m', 20)
@@ -867,6 +879,14 @@ class SmartTrader:
                     'action': 'HOLD',
                     'strength': 0,
                     'reason': '🚫 BTC GUARD: BTC dumping - blocking ETH entry'
+                }
+
+        if signal['action'] == 'BUY':
+            if not self.check_volume(df):
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': '📉 VOLUME GUARD: Volume too low - skipping entry'
                 }
 
         if signal['action'] == 'BUY':
