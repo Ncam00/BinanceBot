@@ -1092,6 +1092,49 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # ORDER EXECUTION
     # ════════════════════════════════════════════════════════════════════
+    def get_limit_prices(self, symbol):
+        """Fetches the current Bid and Ask to ensure frictionless entry/exit."""
+        order_book = self.client.get_order_book(symbol=symbol, limit=5)
+        best_bid = float(order_book['bids'][0][0])  # Highest price a buyer will pay
+        best_ask = float(order_book['asks'][0][0])  # Lowest price a seller will accept
+        return best_bid, best_ask
+
+    def execute_frictionless_trade(self, symbol, side, quantity):
+        """
+        Executes a LIMIT order at the best possible price to avoid slippage.
+        Side: SIDE_BUY or SIDE_SELL
+        """
+        best_bid, best_ask = self.get_limit_prices(symbol)
+
+        # For a BUY, sit at the Bid to save money;
+        # for a SELL, sit at the Ask. Uses top-of-book price.
+        target_price = best_bid if side == SIDE_BUY else best_ask
+
+        try:
+            order = self.client.create_order(
+                symbol=symbol,
+                side=side,
+                type=ORDER_TYPE_LIMIT,
+                timeInForce=TIME_IN_FORCE_GTC,  # Good 'Til Canceled
+                quantity=quantity,
+                price=str(target_price)
+            )
+            print(f"Limit {side} Order Placed at {target_price}")
+            return order
+        except Exception as e:
+            print(f"Execution Error: {e}")
+            return None
+
+    def check_bnb_balance(self):
+        """Checks BNB balance — ensures 25% fee discount is active."""
+        asset_bal = self.client.get_asset_balance(asset='BNB')
+        free_bnb = float(asset_bal['free'])
+
+        if free_bnb < 0.05:
+            print("Warning: Low BNB balance. You are paying 25% extra in fees!")
+        else:
+            print(f"BNB Balance: {free_bnb} - 25% Fee Discount Active.")
+
     def execute_buy(self, symbol, signal):
         """Execute a buy order"""
         if self.trade_lock:
@@ -1466,7 +1509,8 @@ class SmartTrader:
         
         balance = self.get_balance()
         print(f"\n   💰 Balance: ${balance:.2f} USDT")
-        
+        self.check_bnb_balance()
+
         while True:
             try:
                 # Loop heartbeat (for debugging restarts)
