@@ -39,8 +39,8 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT']  # Keep BTC in trading pairs so manual BTC position is respected
-        self.max_positions = 1            # ONE POSITION AT A TIME
+        self.trading_pairs = ['ETHUSDT']
+        self.max_positions = 2
         
         # ════════════════════════════════════════════════════════════════════
         # V2 CORE SETTINGS
@@ -108,27 +108,80 @@ class SmartTrader:
         session, settings = self.get_market_session()
         print(f"   Current session: {session.upper()} ({settings['mode']})")
 
-        # Pre-load existing BTC position
-        self.open_positions.append({
-            'symbol': 'BTCUSDT',
-            'quantity': 0.00282,
-            'original_quantity': 0.00282,
-            'entry_price': 72753.0,
-            'stop_loss': 71388.0,
-            'take_profit': 74108.0,
-            'trailing_stop_active': False,
-            'partial_taken': False,
-            'runner_active': False,
-            'entry_time': datetime.now(),
-            'entry_fee': 0,
-            'entry_slippage': 0,
-            'realized_pnl': 0.0,
-            'risk_percent': 0.015,
-            'trade_id': 'BTC-manual-recovery'
-        })
+        # Sync existing holdings into bot state on startup
+        self.sync_existing_positions()
     
-    # ════════════════════════════════════════════════════════════════════
-    # V2: SESSION DETECTION (NZ TIMEZONE)
+    def sync_existing_positions(self):
+        """Import existing holdings into bot management on startup"""
+        print("\n   🔄 Checking for existing positions to sync...")
+        
+        known_entries = {
+            'BTCUSDT': 72753.0  # Your actual average buy price
+        }
+        
+        try:
+            account = self.client.get_account()
+            for balance in account['balances']:
+                asset = balance['asset']
+                symbol = f"{asset}USDT"
+                
+                if symbol not in self.trading_pairs:
+                    continue
+                    
+                amount = float(balance['free'])
+                if amount <= 0:
+                    continue
+                    
+                current_price = self.get_price(symbol)
+                if not current_price:
+                    continue
+                    
+                # Skip dust (less than $10 value)
+                if amount * current_price < 10:
+                    continue
+                    
+                # Skip if already tracked
+                if any(p['symbol'] == symbol for p in self.open_positions):
+                    continue
+                    
+                # Use known entry price or current price as fallback
+                entry_price = known_entries.get(symbol, current_price)
+                
+                # Structure-based SL/TP
+                stop_loss = entry_price * (1 - self.stop_loss_percent / 100)
+                take_profit = entry_price * (1 + self.take_profit_percent / 100)
+                
+                position = {
+                    'trade_id': f"{symbol}-synced",
+                    'symbol': symbol,
+                    'quantity': amount,
+                    'original_quantity': amount,
+                    'entry_price': entry_price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'risk_percent': self.stop_loss_percent / 100,
+                    'rr_target': 2.0,
+                    'entry_type': 'synced',
+                    'entry_reason': 'Imported existing position on startup',
+                    'market_condition': 'unknown',
+                    'entry_time': datetime.now(),
+                    'entry_fee': 0,
+                    'entry_slippage': 0,
+                    'realized_pnl': 0.0,
+                    'runner_active': False,
+                    'partial_taken': False,
+                    'timestamp': datetime.now(),
+                    'signal': {}
+                }
+                
+                self.open_positions.append(position)
+                pnl = (current_price - entry_price) * amount
+                print(f"   ✅ Synced: {amount:.8f} {asset} @ entry ${entry_price:.2f}")
+                print(f"      Current: ${current_price:.2f} | P&L: ${pnl:.2f}")
+                print(f"      SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
+                
+        except Exception as e:
+            print(f"   ❌ Sync error: {e}")
     # ════════════════════════════════════════════════════════════
     def get_nz_hour(self):
         """Get current hour in NZ timezone"""
@@ -594,12 +647,13 @@ class SmartTrader:
         return self.symbol_state[symbol]
 
     def reset_breakout_state(self, symbol):
-        """Clear breakout retest state after entry or timeout."""
-        state = self.get_symbol_state(symbol)
-        state['waiting_for_retest'] = False
-        state['breakout_level'] = None
-        state['breakout_direction'] = None
-        state['retest_candles'] = 0
+        """Clear breakout retest state for a specific symbol"""
+        self.symbol_state[symbol] = {
+            'waiting_for_retest': False,
+            'breakout_level': None,
+            'breakout_direction': None,
+            'retest_candles': 0
+        }
 
     def update_risk_controls(self, profit, balance):
         """Update daily loss ratio and consecutive losses, then return risk status."""
@@ -1361,7 +1415,7 @@ class SmartTrader:
                         f"❤️ Bot Heartbeat\n"
                         f"Balance: ${balance:.2f}\n"
                         f"Session: {session.upper()}\n"
-                        f"Trades today: {self.daily_trades}/{self.hard_max_trades}\n"
+                        f"Trades today: {self.daily_trades}/{self.max_trades_per_day}\n"
                         f"Daily P&L: ${self.daily_profit:.2f}\n"
                         f"Open positions: {len(self.open_positions)}"
                     )
