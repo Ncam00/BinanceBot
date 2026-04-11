@@ -39,12 +39,12 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['ETHUSDT']
+        self.trading_pairs = ['ETHUSDT','BTCUSDT', 'SOLUSDT']
         self.max_positions = 2
         
         # ════════════════════════════════════════════════════════════════════
         # V2 CORE SETTINGS
-        # ════════════════════════════════════════════════════════════════════
+        # ══════════════════════
         self.max_trades_per_day = 2          # Only 2 trades max
         self.daily_profit_target = 5.0       # Stop at $5 profit
         self.position_size_percent = 12      # 12% per trade
