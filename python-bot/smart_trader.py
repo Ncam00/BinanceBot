@@ -1160,6 +1160,29 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # ATR-BASED DYNAMIC STOPS
     # ════════════════════════════════════════════════════════════════════
+    def calculate_atr(self, klines, period=14):
+        """
+        Pure-Python 14-period ATR from raw klines.
+        klines format: [time, open, high, low, close, volume, ...]
+        Useful as a lightweight fallback that doesn't require pandas_ta.
+        """
+        true_ranges = []
+
+        for i in range(1, len(klines)):
+            high = float(klines[i][2])
+            low = float(klines[i][3])
+            prev_close = float(klines[i - 1][4])
+
+            tr1 = high - low
+            tr2 = abs(high - prev_close)
+            tr3 = abs(low - prev_close)
+
+            true_ranges.append(max(tr1, tr2, tr3))
+
+        if len(true_ranges) >= period:
+            return sum(true_ranges[-period:]) / period
+        return 0
+
     def get_atr_values(self, symbol, interval='1m'):
         """Fetches klines and calculates the ATR for dynamic stops."""
         klines = self.client.get_historical_klines(symbol, interval, "100 minutes ago UTC")
