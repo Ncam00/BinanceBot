@@ -1420,6 +1420,25 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # POSITION MANAGEMENT
     # ════════════════════════════════════════════════════════════════════
+    def manage_open_trade(self, symbol, entry_price, stop_loss, take_profit):
+        """
+        Enhances the trade while active.
+        At 50% of the way to take profit, moves stop loss to breakeven + fees.
+        """
+        current_price = float(self.client.get_symbol_ticker(symbol=symbol)['price'])
+
+        # 1:1 Breakeven Logic
+        profit_distance = take_profit - entry_price
+        mid_point = entry_price + (profit_distance / 2)
+
+        if current_price >= mid_point:
+            # Move Stop Loss to Entry + a tiny bit for fees
+            new_stop = entry_price * 1.001
+            print(f"Trade is safe! Moving Stop-Loss to {new_stop}")
+            return new_stop
+
+        return stop_loss
+
     def check_positions(self):
         """Check open positions for SL/TP and trailing stop"""
         for position in self.open_positions[:]:
@@ -1430,6 +1449,11 @@ class SmartTrader:
 
             # Calculate current P&L
             pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
+
+            # Midpoint breakeven: move stop to entry+fees once 50% to target
+            position['stop_loss'] = self.manage_open_trade(
+                symbol, position['entry_price'], position['stop_loss'], position['take_profit']
+            )
 
             # ════════════════════════════════════════════════════════════
             # TRAILING STOP LOGIC
