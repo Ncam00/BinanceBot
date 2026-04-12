@@ -271,6 +271,18 @@ class SmartTrader:
             return float(ticker['price'])
         except:
             return None
+
+    def get_current_price(self, symbol):
+        """Alias for get_price — returns current ticker price."""
+        return self.get_price(symbol)
+
+    def get_levels(self, symbol, interval='15m', limit=100):
+        """Returns (support, resistance) calculated from recent candles."""
+        df = self.get_candles(symbol, interval, limit)
+        if df is None or len(df) < 50:
+            return None, None
+        sr = self.calculate_support_resistance(df)
+        return sr['support'], sr['resistance']
     
     def get_balance(self):
         """Get USDT balance"""
@@ -930,35 +942,32 @@ class SmartTrader:
         V2 Analysis: Location-based trading
         Only generates signals when price is at key levels
         """
-        # 1. Always get price first — visible even if candle fetch fails
-        price = self.get_price(symbol) or 0
+        # 1. Always get the data first so we can see it
+        price = self.get_current_price(symbol) or 0
+        support, resistance = self.get_levels(symbol)
 
-        df = self.get_candles(symbol, '15m', 100)
-        if df is None or len(df) < 50:
+        if support is None or resistance is None:
             print(f"   🔍 {symbol}: ${price:.2f} | ⚠️ Insufficient candle data")
             return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
 
-        closes = df['close']
-        price = closes.iloc[-1]  # Use candle close for accuracy
+        location = ((price - support) / (resistance - support)) * 100
 
-        # V2: Support/Resistance
-        sr = self.calculate_support_resistance(df)
-        support = sr['support']
-        resistance = sr['resistance']
-
-        # 2. Always print location before any guards fire
-        sr_range = resistance - support
-        location = ((price - support) / sr_range * 100) if sr_range > 0 else 0
+        # 2. Always print the status so you know the bot is alive
         print(f"   🔍 {symbol}: ${price:.2f} | 📍 Location: {location:.1f}%")
 
         # 3. Safety checks — printed after location so you see WHY it's blocked
         if not self.btc_is_healthy():
             return {'action': 'HOLD', 'strength': 0, 'reason': '🚫 BTC too volatile - strategy paused'}
 
-        # Middle zone block — only trade near support (<30%) or resistance (>70%)
         if 30 < location < 70:
             print(f"   ⏳ {symbol} in 'Middle Zone' - No trade.")
             return {'action': 'HOLD', 'strength': 0, 'reason': f"🚫 Middle zone ({location:.1f}%) - no trade", 'zone': 'middle'}
+
+        # Fetch candles for indicator calculation
+        df = self.get_candles(symbol, '15m', 100)
+        if df is None or len(df) < 50:
+            return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
+        closes = df['close']
 
         # Calculate indicators
         rsi = self.calculate_rsi(closes)
