@@ -1649,6 +1649,12 @@ class SmartTrader:
             # Calculate current P&L
             pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
 
+            # Simplified break-even: move stop to entry once price is up 1%
+            if current_price >= (position['entry_price'] * 1.01):
+                if position['stop_loss'] < position['entry_price']:
+                    position['stop_loss'] = position['entry_price']
+                    print(f"   ✅ Break-Even Activated for {symbol} at {position['entry_price']}")
+
             # 1:1 RR breakeven: move stop to entry once price hits entry + risk distance
             position['stop_loss'] = self.update_breakeven_logic(
                 symbol, position['entry_price'], position['stop_loss'], position['take_profit']
