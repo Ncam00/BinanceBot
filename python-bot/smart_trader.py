@@ -1169,8 +1169,9 @@ class SmartTrader:
         return df['ATR'].iloc[-1]
 
     def calculate_dynamic_targets(self, entry_price, atr_value):
-        """Sets SL at 2x ATR and TP at 4x ATR for a 1:2 Risk/Reward."""
-        stop_loss = entry_price - (atr_value * 2)
+        """Sets SL at 1.5x ATR (volatility shield) and TP at 4x ATR for a 1:2.67 Risk/Reward."""
+        atr_multiplier = 1.5  # Wider stop avoids wicks in volatile conditions
+        stop_loss = entry_price - (atr_value * atr_multiplier)
         take_profit = entry_price + (atr_value * 4)
         return round(stop_loss, 2), round(take_profit, 2)
 
@@ -1661,15 +1662,18 @@ class SmartTrader:
             )
 
             # ════════════════════════════════════════════════════════════
-            # TRAILING STOP LOGIC
-            # Activates after 1.5% profit, trails at 0.8% distance
+            # TRAILING TAKE PROFIT
+            # Activates at 2.5% profit, trails price by 0.5%
             # ════════════════════════════════════════════════════════════
-            if pnl_percent >= 1.5:
+            activation_price = position['entry_price'] * 1.025
+            trailing_percent = 0.005  # 0.5% trail distance
+
+            if current_price >= activation_price:
                 # Initialize trailing stop if not set
                 if not position.get('trailing_stop_active'):
                     position['trailing_stop_active'] = True
                     position['highest_price'] = current_price
-                    position['trailing_stop_price'] = current_price * (1 - 0.008)
+                    position['trailing_stop_price'] = current_price * (1 - trailing_percent)
                     print(f"   🔒 TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
                     self.send_telegram(
                         f"🔒 Trailing Stop Activated\n"
@@ -1678,12 +1682,12 @@ class SmartTrader:
                         f"Trail: ${position['trailing_stop_price']:.4f}"
                     )
 
-                # Update trailing stop if price moves higher
+                # Only move the stop loss up, never down
                 if current_price > position.get('highest_price', 0):
                     position['highest_price'] = current_price
-                    new_trail = current_price * (1 - 0.008)
-                    if new_trail > position['trailing_stop_price']:
-                        position['trailing_stop_price'] = new_trail
+                    new_trailing_stop = current_price * (1 - trailing_percent)
+                    if new_trailing_stop > position['trailing_stop_price']:
+                        position['trailing_stop_price'] = new_trailing_stop
                         print(f"   📈 TRAILING STOP RAISED {symbol} @ ${position['trailing_stop_price']:.4f}")
 
                 # Check if trailing stop hit
