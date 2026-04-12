@@ -1420,24 +1420,25 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # POSITION MANAGEMENT
     # ════════════════════════════════════════════════════════════════════
-    def manage_open_trade(self, symbol, entry_price, stop_loss, take_profit):
+    def update_breakeven_logic(self, symbol, entry_price, current_sl, take_profit):
         """
-        Enhances the trade while active.
-        At 50% of the way to take profit, moves stop loss to breakeven + fees.
+        Moves Stop-Loss to Entry once price hits 1:1 RR.
+        entry_price: The price you bought at.
+        current_sl: Your current Stop-Loss (initially the ATR-based one).
+        take_profit: Your target price.
         """
         current_price = float(self.client.get_symbol_ticker(symbol=symbol)['price'])
 
-        # 1:1 Breakeven Logic
-        profit_distance = take_profit - entry_price
-        mid_point = entry_price + (profit_distance / 2)
+        # Risk distance was (Entry - Original SL)
+        # We want to trigger breakeven when Price = Entry + Risk Distance
+        risk_amount = entry_price - current_sl
+        trigger_price = entry_price + risk_amount
 
-        if current_price >= mid_point:
-            # Move Stop Loss to Entry + a tiny bit for fees
-            new_stop = entry_price * 1.001
-            print(f"Trade is safe! Moving Stop-Loss to {new_stop}")
-            return new_stop
+        if current_price >= trigger_price and current_sl < entry_price:
+            print(f"Target 1:1 Hit! Moving Stop-Loss to Breakeven: {entry_price}")
+            return entry_price  # New Stop Loss is now the Entry Price
 
-        return stop_loss
+        return current_sl  # Keep existing Stop Loss
 
     def check_positions(self):
         """Check open positions for SL/TP and trailing stop"""
@@ -1450,8 +1451,8 @@ class SmartTrader:
             # Calculate current P&L
             pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
 
-            # Midpoint breakeven: move stop to entry+fees once 50% to target
-            position['stop_loss'] = self.manage_open_trade(
+            # 1:1 RR breakeven: move stop to entry once price hits entry + risk distance
+            position['stop_loss'] = self.update_breakeven_logic(
                 symbol, position['entry_price'], position['stop_loss'], position['take_profit']
             )
 
