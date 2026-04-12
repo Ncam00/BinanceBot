@@ -1482,10 +1482,30 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # V2: DAILY LIMITS
     # ════════════════════════════════════════════════════════════════════
+    def daily_maintenance(self):
+        """Runs once per day: BNB top-up and scheduled USDT transitions."""
+        now = datetime.now()
+
+        # 1. Daily BNB check
+        self.maintain_bnb_balance()
+
+        # 2. April 16 USDT transition
+        if now.month == 4 and now.day == 16:
+            try:
+                usdt_bal = float(self.client.get_asset_balance(asset='USDT')['free'])
+                if usdt_bal > 10:
+                    self.client.order_market_sell(symbol='USDTU', quantity=usdt_bal)
+                    self.send_telegram("USDT converted to 'U' automatically. Zero-fee mode ready!")
+            except Exception as e:
+                print(f"   ⚠️ USDT transition error: {e}")
+
     def check_daily_reset(self):
         """Reset daily counters at midnight and weekly counters on new week"""
         today = datetime.now().date()
         current_week_key = self.get_week_key()
+
+        if today != self.last_reset_date:
+            self.daily_maintenance()
 
         if current_week_key != self.last_week_reset_key:
             print(f"\n   🔄 New week - resetting weekly P&L guard")
