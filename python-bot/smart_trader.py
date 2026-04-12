@@ -1192,10 +1192,10 @@ class SmartTrader:
         return df['ATR'].iloc[-1]
 
     def calculate_dynamic_targets(self, entry_price, atr_value):
-        """Sets SL at 1.5x ATR (volatility shield) and TP at 4x ATR for a 1:2.67 Risk/Reward."""
-        atr_multiplier = 1.5  # Wider stop avoids wicks in volatile conditions
+        """Sets SL at 2x ATR (volatility shield) and TP at fixed 2.5% above entry."""
+        atr_multiplier = 2  # 2x ATR stop based on volatility
         stop_loss = entry_price - (atr_value * atr_multiplier)
-        take_profit = entry_price + (atr_value * 4)
+        take_profit = entry_price * 1.025  # Fixed 2.5% target
         return round(stop_loss, 2), round(take_profit, 2)
 
     # ════════════════════════════════════════════════════════════════════
@@ -1337,11 +1337,14 @@ class SmartTrader:
             fill_price = float(order['fills'][0]['price'])
             entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
             
-            # ATR-based SL/TP recalculated on actual fill price (2x ATR stop, 4x ATR target)
+            # ATR-based SL/TP on actual fill price (2x ATR stop, 2.5% fixed TP)
             stop_loss, take_profit = self.calculate_dynamic_targets(fill_price, atr)
             stop_loss = max(stop_loss, fill_price * 0.97)  # Never risk more than 3%
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
+
+            print(f"   Entry: {symbol} at {fill_price}")
+            print(f"   Dynamic SL set at {stop_loss:.4f} based on volatility")
             
             # ════════════════════════════════════════════════════════════════════
             # 🔒 IMMEDIATELY update state (CRITICAL)
