@@ -771,20 +771,21 @@ class SmartTrader:
         try:
             df = self.get_candles('BTCUSDT', '15m', 20)
             if df is None or len(df) < 10:
-                return True  # If can't check, allow trading
+                return True
 
             closes = df['close']
             current_price = closes.iloc[-1]
-            price_15m_ago = closes.iloc[-2]
             price_1h_ago = closes.iloc[-4]
-
-            # Calculate short term moves
-            change_15m = ((current_price - price_15m_ago) / price_15m_ago) * 100
             change_1h = ((current_price - price_1h_ago) / price_1h_ago) * 100
 
-            # BTC dumping hard - block alt buys
-            if change_15m < -0.5 or change_1h < -1.5:
-                print(f"   ⚠️ BTC FILTER: BTC dropping ({change_1h:.2f}% 1h) - blocking alts")
+            # Strength Meter Logic
+            status = "🔴 DUMPING" if change_1h < -1.5 else "🟡 WEAK" if change_1h < 0 else "🟢 STRONG"
+
+            print(f"   📊 BTC TREND METER: {status} | 1h Move: {change_1h:.2f}%")
+            print(f"   🌡️ Safety Threshold: -1.50% (Current: {change_1h:.2f}%)")
+
+            if change_1h < -1.5:
+                print(f"   ⚠️ BTC FILTER ACTIVE: Blocking alts to protect ${self.get_balance():.2f} USDT")
                 return False
 
             return True
