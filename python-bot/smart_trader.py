@@ -45,7 +45,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['ETHUSDT','BTCUSDT', 'SOLUSDT']
+        self.trading_pairs = ['BTCUSDT', 'SOLUSDT', 'AVAXUSDT', 'BNBUSDT', 'ETHUSDT']
         self.max_positions = 3
         
         # ════════════════════════════════════════════════════════════════════
@@ -680,6 +680,50 @@ class SmartTrader:
             print(f"   📉 LOW VOLUME: {ratio:.2f}x avg - skipping entry")
             return False
         return True
+
+    def is_trending_up(self, symbol):
+        """Returns True if price is above the 15m EMA — basic trend filter."""
+        df = self.get_candles(symbol, '15m', 30)
+        if df is None or len(df) < 20:
+            return False
+        closes = df['close']
+        ema = closes.ewm(span=20).mean().iloc[-1]
+        return closes.iloc[-1] > ema
+
+    def get_volume_velocity(self, symbol):
+        """Returns ratio of current volume to 20-candle average — momentum proxy."""
+        df = self.get_candles(symbol, '1m', 21)
+        if df is None or len(df) < 21:
+            return 0
+        volumes = df['volume'].tolist()
+        current = volumes[-1]
+        avg = sum(volumes[:-1]) / 20
+        return current / avg if avg > 0 else 0
+
+    def scan_markets(self, symbols):
+        """
+        Scores each symbol by volume velocity / ATR.
+        Higher volume with lower relative volatility = cleaner entry.
+        Returns the best candidate symbol.
+        """
+        best_candidate = None
+        highest_score = 0
+
+        for symbol in symbols:
+            if not self.is_trending_up(symbol):
+                continue
+            try:
+                atr = self.get_atr_values(symbol)
+                volume_change = self.get_volume_velocity(symbol)
+                if atr and atr > 0:
+                    score = volume_change / atr
+                    if score > highest_score:
+                        highest_score = score
+                        best_candidate = symbol
+            except Exception as e:
+                print(f"   ⚠️ scan_markets error for {symbol}: {e}")
+
+        return best_candidate
 
     def check_btc_trend(self):
         """Don't trade ETH when BTC is dumping"""
@@ -1689,9 +1733,12 @@ class SmartTrader:
                 # ════════════════════════════════════════════════════════════════════
                 # 🔍 THEN check strategy - Scan for valid setups
                 # ════════════════════════════════════════════════════════════════════
-                print(f"\n   📊 Scanning {len(self.trading_pairs)} pairs... [Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
-                
-                for symbol in self.trading_pairs:
+                # Rank pairs by opportunity score, lead with best candidate
+                best = self.scan_markets(self.trading_pairs)
+                scan_order = ([best] + [s for s in self.trading_pairs if s != best]) if best else self.trading_pairs
+                print(f"\n   📊 Scanning {len(scan_order)} pairs... [Best: {best or 'none'} | Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
+
+                for symbol in scan_order:
                     # Skip if we already have position in this symbol
                     if any(p['symbol'] == symbol for p in self.open_positions):
                         continue
