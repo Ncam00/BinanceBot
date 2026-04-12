@@ -21,6 +21,7 @@ from binance.client import Client
 from binance.enums import *
 from binance.exceptions import BinanceAPIException
 import pandas as pd
+import pandas_ta as ta
 import numpy as np
 from dotenv import load_dotenv
 import requests
@@ -1053,6 +1054,23 @@ class SmartTrader:
         
         return signal
     
+    # ════════════════════════════════════════════════════════════════════
+    # ATR-BASED DYNAMIC STOPS
+    # ════════════════════════════════════════════════════════════════════
+    def get_atr_values(self, symbol, interval='1m'):
+        """Fetches klines and calculates the ATR for dynamic stops."""
+        klines = self.client.get_historical_klines(symbol, interval, "100 minutes ago UTC")
+        df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'vol', 'ct', 'qv', 'nt', 'tb', 'tq', 'i'])
+        df[['high', 'low', 'close']] = df[['high', 'low', 'close']].apply(pd.to_numeric)
+        df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        return df['ATR'].iloc[-1]
+
+    def calculate_dynamic_targets(self, entry_price, atr_value):
+        """Sets SL at 2x ATR and TP at 4x ATR for a 1:2 Risk/Reward."""
+        stop_loss = entry_price - (atr_value * 2)
+        take_profit = entry_price + (atr_value * 4)
+        return round(stop_loss, 2), round(take_profit, 2)
+
     # ════════════════════════════════════════════════════════════════════
     # POSITION SIZING (Risk-Based)
     # ════════════════════════════════════════════════════════════════════
