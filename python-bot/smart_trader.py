@@ -1164,19 +1164,19 @@ class SmartTrader:
             price = signal['price']
             entry_time = datetime.now()
             
-            # Get support for stop loss calculation
-            support = signal.get('support_override', signal.get('support', price * 0.985))
-            structure_sl = support * 0.995  # 0.5% below support (safer buffer)
+            # ATR-based dynamic stop for position sizing
+            atr = self.get_atr_values(symbol)
+            stop_loss_price, _ = self.calculate_dynamic_targets(price, atr)
             max_sl = price * 0.97  # Never risk more than 3%
-            stop_loss_price = max(structure_sl, max_sl)
-            
+            stop_loss_price = max(stop_loss_price, max_sl)
+
             # Adjust risk based on session
             session, _ = self.get_market_session()
             if session == "asia":
                 risk_percent = 0.01  # safer (1%)
             else:
                 risk_percent = 0.015  # normal (1.5%)
-            
+
             # Calculate position size using risk-based method
             quantity = self.calculate_position_size(balance, price, stop_loss_price, risk_percent)
             
@@ -1199,12 +1199,10 @@ class SmartTrader:
             fill_price = float(order['fills'][0]['price'])
             entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
             
-            # Use pre-calculated stop loss (structure-based)
-            stop_loss = stop_loss_price
-            
-            # First take profit at 1R, then manage the runner at breakeven.
+            # ATR-based SL/TP recalculated on actual fill price (2x ATR stop, 4x ATR target)
+            stop_loss, take_profit = self.calculate_dynamic_targets(fill_price, atr)
+            stop_loss = max(stop_loss, fill_price * 0.97)  # Never risk more than 3%
             actual_risk = fill_price - stop_loss
-            take_profit = fill_price + (actual_risk * 1.0)
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
             
             # ════════════════════════════════════════════════════════════════════
