@@ -930,13 +930,18 @@ class SmartTrader:
         V2 Analysis: Location-based trading
         Only generates signals when price is at key levels
         """
+        # 1. BTC health check first (fast-fail before fetching data)
+        if symbol != 'BTCUSDT' and not self.btc_is_healthy():
+            print(f"   🚫 {symbol} STRATEGY PAUSED: BTC is too volatile. Waiting for recovery...")
+            return {'action': 'HOLD', 'strength': 0, 'reason': '🚫 BTC too volatile - strategy paused'}
+
         df = self.get_candles(symbol, '15m', 100)
         if df is None or len(df) < 50:
             return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
-        
+
         closes = df['close']
         price = closes.iloc[-1]
-        
+
         # Calculate indicators
         rsi = self.calculate_rsi(closes)
         macd = self.calculate_macd(closes)
@@ -944,11 +949,16 @@ class SmartTrader:
         ema_slow = self.calculate_ema(closes, 18)
         adx = self.calculate_adx(df)
         bb = self.calculate_bollinger(closes)
-        
+
         # V2: Support/Resistance
         sr = self.calculate_support_resistance(df)
         support = sr['support']
         resistance = sr['resistance']
+
+        # Visual feedback: position within the S/R range
+        sr_range = resistance - support
+        position_pct = ((price - support) / sr_range * 100) if sr_range > 0 else 0
+        print(f"   🔍 {symbol} @ ${price:.2f} | Dist from Support: {position_pct:.1f}%")
         
         # V2: Market type
         market_type = self.get_market_type(adx['adx'])
