@@ -45,8 +45,8 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['BTCUSDT', 'SOLUSDT', 'AVAXUSDT', 'BNBUSDT', 'ETHUSDT']
-        self.max_positions = 3
+        self.trading_pairs = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT']
+        self.max_positions = 2
         
         # ════════════════════════════════════════════════════════════════════
         # V2 CORE SETTINGS
@@ -54,6 +54,7 @@ class SmartTrader:
         self.max_trades_per_day = 3          # Only 3 trades max
         self.daily_profit_target = 6.5       # Stop at $6.5 profit
         self.position_size_percent = 12      # 12% per trade
+        self.portion_size = 100              # $100 NZD fixed per trade (1/8th of $800)
         self.stop_loss_percent = 1.5         # 1.5% stop loss
         self.take_profit_percent = 2.5       # 2.5% take profit (better R:R)
         
@@ -725,6 +726,19 @@ class SmartTrader:
 
         return best_candidate
 
+    def manage_portfolio(self):
+        """
+        Checks active positions against MAX_ACTIVE_TRADES.
+        If a slot is open, uses scan_markets to find the best setup.
+        Returns the best candidate symbol, or None if no slot available.
+        """
+        if len(self.open_positions) < self.max_positions:
+            best_pick = self.scan_markets(self.trading_pairs)
+            if best_pick:
+                print(f"   🎯 Portfolio manager selected: {best_pick}")
+            return best_pick
+        return None
+
     def check_btc_trend(self):
         """Don't trade ETH when BTC is dumping"""
         df = self.get_candles('BTCUSDT', '5m', 20)
@@ -1184,8 +1198,8 @@ class SmartTrader:
         # 3. Position size
         position_size = risk_amount / risk_per_unit
         
-        # 4. Optional cap (prevents overexposure)
-        max_position_value = account_balance * 0.25  # max 25% of account
+        # 4. Optional cap (prevents overexposure) — capped at portion_size ($100 NZD)
+        max_position_value = min(self.portion_size, account_balance * 0.25)
         max_position_size = max_position_value / entry_price
         
         position_size = min(position_size, max_position_size)
@@ -1733,8 +1747,8 @@ class SmartTrader:
                 # ════════════════════════════════════════════════════════════════════
                 # 🔍 THEN check strategy - Scan for valid setups
                 # ════════════════════════════════════════════════════════════════════
-                # Rank pairs by opportunity score, lead with best candidate
-                best = self.scan_markets(self.trading_pairs)
+                # Portfolio manager: picks best candidate, respects max positions
+                best = self.manage_portfolio()
                 scan_order = ([best] + [s for s in self.trading_pairs if s != best]) if best else self.trading_pairs
                 print(f"\n   📊 Scanning {len(scan_order)} pairs... [Best: {best or 'none'} | Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
 
