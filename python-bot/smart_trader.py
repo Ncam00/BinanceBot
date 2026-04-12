@@ -45,14 +45,14 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['ETHUSDT']
-        self.max_positions = 2
+        self.trading_pairs = ['ETHUSDT','BTCUSDT', 'SOLUSDT']
+        self.max_positions = 3
         
         # ════════════════════════════════════════════════════════════════════
         # V2 CORE SETTINGS
-        # ════════════════════════════════════════════════════════════════════
-        self.max_trades_per_day = 2          # Only 2 trades max
-        self.daily_profit_target = 5.0       # Stop at $5 profit
+        # ══════════════════════
+        self.max_trades_per_day = 3          # Only 3 trades max
+        self.daily_profit_target = 6.5       # Stop at $6.5 profit
         self.position_size_percent = 12      # 12% per trade
         self.stop_loss_percent = 1.5         # 1.5% stop loss
         self.take_profit_percent = 2.5       # 2.5% take profit (better R:R)
@@ -75,8 +75,8 @@ class SmartTrader:
         self.nz_timezone = pytz.timezone('Pacific/Auckland')
         self.session_settings = {
             'asia': {'mode': 'low_risk', 'max_trades': 1, 'min_strength': 0.85},
-            'london': {'mode': 'normal', 'max_trades': 2, 'min_strength': 0.75},
-            'us': {'mode': 'aggressive', 'max_trades': 2, 'min_strength': 0.70}
+            'london': {'mode': 'normal', 'max_trades': 3, 'min_strength': 0.75},
+            'us': {'mode': 'aggressive', 'max_trades': 3, 'min_strength': 0.70}
         }
         
         # State tracking
