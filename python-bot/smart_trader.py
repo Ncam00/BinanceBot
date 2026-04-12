@@ -1827,7 +1827,7 @@ class SmartTrader:
                 # Portfolio manager: picks best candidate, respects max positions
                 best = self.manage_portfolio()
                 scan_order = ([best] + [s for s in self.trading_pairs if s != best]) if best else self.trading_pairs
-                print(f"\n   📊 Scanning {len(scan_order)} pairs... [Best: {best or 'none'} | Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
+                print(f"\n   📊 Scanning {len(self.trading_pairs)} pairs... [Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{self.hard_max_trades}]")
 
                 for symbol in scan_order:
                     # Skip if we already have position in this symbol
