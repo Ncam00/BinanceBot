@@ -5,3 +5,4 @@ python-dotenv==1.0.0
 requests==2.31.0
 pytz>=2023.3
 pandas_ta>=0.3.14b
+tradingeconomics>=4.5.9
