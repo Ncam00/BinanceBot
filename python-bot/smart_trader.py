@@ -930,17 +930,31 @@ class SmartTrader:
         V2 Analysis: Location-based trading
         Only generates signals when price is at key levels
         """
-        # 1. BTC health check first (fast-fail before fetching data)
-        if symbol != 'BTCUSDT' and not self.btc_is_healthy():
-            print(f"   🚫 {symbol} STRATEGY PAUSED: BTC is too volatile. Waiting for recovery...")
-            return {'action': 'HOLD', 'strength': 0, 'reason': '🚫 BTC too volatile - strategy paused'}
-
         df = self.get_candles(symbol, '15m', 100)
         if df is None or len(df) < 50:
             return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
 
         closes = df['close']
         price = closes.iloc[-1]
+
+        # V2: Support/Resistance
+        sr = self.calculate_support_resistance(df)
+        support = sr['support']
+        resistance = sr['resistance']
+
+        # Always print location — visible every loop before any guards
+        sr_range = resistance - support
+        location = ((price - support) / sr_range * 100) if sr_range > 0 else 0
+        print(f"   🔍 {symbol}: ${price:.2f} | 📍 Location: {location:.1f}%")
+
+        # BTC health check (prints its own warning internally)
+        if symbol != 'BTCUSDT' and not self.btc_is_healthy():
+            return {'action': 'HOLD', 'strength': 0, 'reason': '🚫 BTC too volatile - strategy paused'}
+
+        # Middle zone block — only trade near support (<30%) or resistance (>70%)
+        if 30 < location < 70:
+            print(f"   ⏳ {symbol} in Middle Zone ({location:.1f}%) - No trade.")
+            return {'action': 'HOLD', 'strength': 0, 'reason': f"🚫 Middle zone ({location:.1f}%) - no trade", 'zone': 'middle'}
 
         # Calculate indicators
         rsi = self.calculate_rsi(closes)
@@ -949,16 +963,6 @@ class SmartTrader:
         ema_slow = self.calculate_ema(closes, 18)
         adx = self.calculate_adx(df)
         bb = self.calculate_bollinger(closes)
-
-        # V2: Support/Resistance
-        sr = self.calculate_support_resistance(df)
-        support = sr['support']
-        resistance = sr['resistance']
-
-        # Visual feedback: position within the S/R range
-        sr_range = resistance - support
-        pos_pct = ((price - support) / sr_range * 100) if sr_range > 0 else 0
-        print(f"   🔍 {symbol}: ${price:.2f} | Location: {pos_pct:.1f}% (Aiming for <30% or >70%)")
         
         # V2: Market type
         market_type = self.get_market_type(adx['adx'])
@@ -1056,45 +1060,6 @@ class SmartTrader:
                     'adx': adx['adx'],
                     'zone': 'breakout_wait'
                 }
-        
-        # ════════════════════════════════════════════════════════════════════
-        # 🚫🚫🚫 ABSOLUTE HARD BLOCK - NO EXCEPTIONS 🚫🚫🚫
-        # If NOT near support AND NOT near resistance → IMMEDIATE RETURN
-        # This is NOT scoring. This is NOT soft. This STOPS EVERYTHING.
-        # ════════════════════════════════════════════════════════════════════
-        near_support = self.is_near_level(price, support)
-        near_resistance = self.is_near_level(price, resistance)
-        
-        if not near_support and not near_resistance:
-            return {
-                'action': 'HOLD',
-                'strength': 0,
-                'reason': f"🚫 HARD BLOCK: Not at support/resistance (IMMEDIATE RETURN)",
-                'market_type': market_type,
-                'price': price,
-                'support': support,
-                'resistance': resistance,
-                'rsi': rsi,
-                'adx': adx['adx'],
-                'zone': 'middle'
-            }
-        
-        # Also check zone (belt and suspenders)
-        zone = self.get_trade_zone(price, support, resistance)
-        
-        if zone == 'middle':
-            return {
-                'action': 'HOLD',
-                'strength': 0,
-                'reason': f"🚫 HARD BLOCK: Price in middle zone (NO TRADE)",
-                'market_type': market_type,
-                'price': price,
-                'support': support,
-                'resistance': resistance,
-                'rsi': rsi,
-                'adx': adx['adx'],
-                'zone': zone
-            }
         
         # V2: Strategy switch based on market type
         if market_type == 'RANGE':
