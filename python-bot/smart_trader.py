@@ -1260,6 +1260,19 @@ class SmartTrader:
         else:
             print(f"BNB Balance: {free_bnb} - 25% Fee Discount Active.")
 
+    def maintain_bnb_balance(self):
+        """Auto-buys $9 USDT of BNB when balance drops below $6 USDT to keep fees discounted."""
+        try:
+            bnb_balance = float(self.client.get_asset_balance(asset='BNB')['free'])
+            bnb_price = float(self.client.get_symbol_ticker(symbol='BNBUSDT')['price'])
+
+            if (bnb_balance * bnb_price) < 6.0:
+                print("🚨 BNB Low. Purchasing $15 NZD (~9 USDT) for fees...")
+                self.client.order_market_buy(symbol='BNBUSDT', quoteOrderQty=9)
+                self.send_telegram("🚨 BNB replenished: bought $9 USDT worth to maintain fee discount.")
+        except Exception as e:
+            print(f"   ⚠️ maintain_bnb_balance error: {e}")
+
     def execute_buy(self, symbol, signal):
         """Execute a buy order"""
         if self.trade_lock:
@@ -1661,6 +1674,7 @@ class SmartTrader:
         balance = self.get_balance()
         print(f"\n   💰 Balance: ${balance:.2f} USDT")
         self.check_bnb_balance()
+        self.maintain_bnb_balance()
 
         while True:
             try:
@@ -1683,6 +1697,7 @@ class SmartTrader:
                         f"Daily P&L: ${self.daily_profit:.2f}\n"
                         f"Open positions: {len(self.open_positions)}"
                     )
+                    self.maintain_bnb_balance()
                     self.last_heartbeat = datetime.now()
 
                 # News safety check - pause 5 minutes if market is unstable
