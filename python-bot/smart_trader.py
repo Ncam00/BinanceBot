@@ -90,6 +90,13 @@ class SmartTrader:
         self.last_reset_date = datetime.now().date()
         self.last_week_reset_key = datetime.now().date().isocalendar()[:2]
         self.open_positions = []
+
+        # Daily stats tracker
+        self.daily_wins = 0
+        self.daily_losses_count = 0
+        self.daily_breakevens = 0
+        self.daily_total_pnl = 0.0
+        self.daily_fees_saved = 0.0
         self.last_trade_time = None  # For cooldown tracking
         self.symbol_state = {}  # per-symbol state tracking
         self.trade_lock = False  # Prevents duplicate entries
@@ -1408,6 +1415,16 @@ class SmartTrader:
             else:
                 self.daily_loss += abs(pnl)  # Track losses as positive number
             self.weekly_pnl += pnl
+
+            # Update daily stats tracker
+            self.daily_total_pnl += pnl
+            if pnl > 0:
+                self.daily_wins += 1
+            elif pnl == 0:
+                self.daily_breakevens += 1
+            else:
+                self.daily_losses_count += 1
+            self.daily_fees_saved += fees * 0.25  # 25% BNB discount on fees
             
             # ════════════════════════════════════════════════════════════════════
             # 🔓 Position closed - open_position = False
@@ -1540,11 +1557,18 @@ class SmartTrader:
 
         if today != self.last_reset_date:
             print(f"\n   🔄 New day - resetting counters")
+            print(f"   📊 Yesterday: {self.daily_wins}W / {self.daily_losses_count}L / {self.daily_breakevens}BE | PnL: ${self.daily_total_pnl:.2f} | Fees saved: ${self.daily_fees_saved:.4f}")
             self.daily_trades = 0
             self.daily_profit = 0.0
             self.reset_daily()
-            self.last_trade_time = None  # Reset cooldown too
+            self.last_trade_time = None
             self.last_reset_date = today
+            # Reset daily stats
+            self.daily_wins = 0
+            self.daily_losses_count = 0
+            self.daily_breakevens = 0
+            self.daily_total_pnl = 0.0
+            self.daily_fees_saved = 0.0
     
     def can_trade(self):
         """Check if we can make more trades today - HARD BLOCKS"""
@@ -1741,7 +1765,9 @@ class SmartTrader:
                         f"Balance: ${balance:.2f}\n"
                         f"Session: {session.upper()}\n"
                         f"Trades today: {self.daily_trades}/{self.max_trades_per_day}\n"
-                        f"Daily P&L: ${self.daily_profit:.2f}\n"
+                        f"Daily P&L: ${self.daily_total_pnl:.2f}\n"
+                        f"W/L/BE: {self.daily_wins}/{self.daily_losses_count}/{self.daily_breakevens}\n"
+                        f"Fees saved: ${self.daily_fees_saved:.4f}\n"
                         f"Open positions: {len(self.open_positions)}"
                     )
                     self.maintain_bnb_balance()
