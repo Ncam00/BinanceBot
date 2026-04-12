@@ -21,7 +21,9 @@ from binance.client import Client
 from binance.enums import *
 from binance.exceptions import BinanceAPIException
 import pandas as pd
+import pandas_ta as ta
 import numpy as np
+import tradingeconomics as te
 from dotenv import load_dotenv
 import requests
 import pytz
@@ -36,12 +38,15 @@ class SmartTrader:
             os.getenv('BINANCE_API_KEY'),
             os.getenv('BINANCE_SECRET_KEY')
         )
+
+        # Trading Economics API
+        te.login(os.getenv('TE_API_KEY'))
         
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['ETHUSDT','BTCUSDT', 'SOLUSDT']
-        self.max_positions = 3
+        self.trading_pairs = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'AVAXUSDT']
+        self.max_positions = 2
         
         # ════════════════════════════════════════════════════════════════════
         # V2 CORE SETTINGS
@@ -49,6 +54,7 @@ class SmartTrader:
         self.max_trades_per_day = 3          # Only 3 trades max
         self.daily_profit_target = 6.5       # Stop at $6.5 profit
         self.position_size_percent = 12      # 12% per trade
+        self.portion_size = 100              # $100 NZD fixed per trade (1/8th of $800)
         self.stop_loss_percent = 1.5         # 1.5% stop loss
         self.take_profit_percent = 2.5       # 2.5% take profit (better R:R)
         
@@ -84,6 +90,13 @@ class SmartTrader:
         self.last_reset_date = datetime.now().date()
         self.last_week_reset_key = datetime.now().date().isocalendar()[:2]
         self.open_positions = []
+
+        # Daily stats tracker
+        self.daily_wins = 0
+        self.daily_losses_count = 0
+        self.daily_breakevens = 0
+        self.daily_total_pnl = 0.0
+        self.daily_fees_saved = 0.0
         self.last_trade_time = None  # For cooldown tracking
         self.symbol_state = {}  # per-symbol state tracking
         self.trade_lock = False  # Prevents duplicate entries
@@ -92,8 +105,8 @@ class SmartTrader:
         # V2: HARD SAFETY RULES (CANNOT BE BYPASSED)
         # ════════════════════════════════════════════════════════════════════
         self.trade_cooldown_minutes = 30    # Wait 30min between trades
-        self.hard_max_trades = 3             # ABSOLUTE max, no exceptions
-        self.max_daily_loss = 12.0           # Stop if lose $12 (prevents revenge trading)
+        self.hard_max_trades = 2             # ABSOLUTE max, no exceptions
+        self.max_daily_loss = 16.0           # Stop if lose $16 NZD (prevents revenge trading)
         self.max_daily_loss_ratio = 0.03     # Stop if losses hit 3% of balance
         self.max_consecutive_losses = 2      # Stop after 2 losing trades in a row
         
@@ -258,6 +271,18 @@ class SmartTrader:
             return float(ticker['price'])
         except:
             return None
+
+    def get_current_price(self, symbol):
+        """Alias for get_price — returns current ticker price."""
+        return self.get_price(symbol)
+
+    def get_levels(self, symbol, interval='15m', limit=100):
+        """Returns (support, resistance) calculated from recent candles."""
+        df = self.get_candles(symbol, interval, limit)
+        if df is None or len(df) < 50:
+            return None, None
+        sr = self.calculate_support_resistance(df)
+        return sr['support'], sr['resistance']
     
     def get_balance(self):
         """Get USDT balance"""
@@ -606,6 +631,41 @@ class SmartTrader:
         """Step 4: Only trade WITH the trend"""
         return price > ema
 
+    def is_market_volatile_news(self):
+        """
+        Checks CryptoPanic for high-impact news keywords.
+        Returns True if trading should pause, False if safe to trade.
+        """
+        try:
+            token = os.getenv('CRYPTOPANIC_TOKEN')
+            response = requests.get(
+                f"https://cryptopanic.com/api/v1/posts/?auth_token={token}&filter=hot"
+            )
+            news_data = response.json()
+            keywords = ['CPI', 'FOMC', 'FED', 'INFLATION', 'INTEREST RATE']
+            for post in news_data['results']:
+                if any(word in post['title'].upper() for word in keywords):
+                    print(f"   📰 HIGH-IMPACT NEWS: {post['title']} - pausing trading")
+                    return True
+            return False
+        except:
+            return False  # If API fails, default to safe (trading allowed)
+
+    def is_market_safe(self):
+        """Returns False if a high-impact news event is due in the next 30 minutes."""
+        try:
+            now = datetime.now()
+            buffer_time = now + timedelta(minutes=30)
+            events = te.getCalendarData(importance='High')
+            for event in events:
+                event_time = datetime.strptime(event['Date'], '%Y-%m-%dT%H:%M:%SZ')
+                if now <= event_time <= buffer_time:
+                    print(f"   📰 CRITICAL NEWS: {event['Event']} at {event['Date']} - blocking entry")
+                    return False
+        except Exception as e:
+            print(f"   ⚠️ News check failed: {e} - allowing trade")
+        return True
+
     def check_multi_timeframe(self, symbol):
         """All timeframes should agree before entry"""
         timeframes = ['1m', '5m', '15m']
@@ -641,6 +701,63 @@ class SmartTrader:
             return False
         return True
 
+    def is_trending_up(self, symbol):
+        """Returns True if price is above the 15m EMA — basic trend filter."""
+        df = self.get_candles(symbol, '15m', 30)
+        if df is None or len(df) < 20:
+            return False
+        closes = df['close']
+        ema = closes.ewm(span=20).mean().iloc[-1]
+        return closes.iloc[-1] > ema
+
+    def get_volume_velocity(self, symbol):
+        """Returns ratio of current volume to 20-candle average — momentum proxy."""
+        df = self.get_candles(symbol, '1m', 21)
+        if df is None or len(df) < 21:
+            return 0
+        volumes = df['volume'].tolist()
+        current = volumes[-1]
+        avg = sum(volumes[:-1]) / 20
+        return current / avg if avg > 0 else 0
+
+    def scan_markets(self, symbols):
+        """
+        Scores each symbol by volume velocity / ATR.
+        Higher volume with lower relative volatility = cleaner entry.
+        Returns the best candidate symbol.
+        """
+        best_candidate = None
+        highest_score = 0
+
+        for symbol in symbols:
+            if not self.is_trending_up(symbol):
+                continue
+            try:
+                atr = self.get_atr_values(symbol)
+                volume_change = self.get_volume_velocity(symbol)
+                if atr and atr > 0:
+                    score = volume_change / atr
+                    if score > highest_score:
+                        highest_score = score
+                        best_candidate = symbol
+            except Exception as e:
+                print(f"   ⚠️ scan_markets error for {symbol}: {e}")
+
+        return best_candidate
+
+    def manage_portfolio(self):
+        """
+        Checks active positions against MAX_ACTIVE_TRADES.
+        If a slot is open, uses scan_markets to find the best setup.
+        Returns the best candidate symbol, or None if no slot available.
+        """
+        if len(self.open_positions) < self.max_positions:
+            best_pick = self.scan_markets(self.trading_pairs)
+            if best_pick:
+                print(f"   🎯 Portfolio manager selected: {best_pick}")
+            return best_pick
+        return None
+
     def check_btc_trend(self):
         """Don't trade ETH when BTC is dumping"""
         df = self.get_candles('BTCUSDT', '5m', 20)
@@ -666,20 +783,21 @@ class SmartTrader:
         try:
             df = self.get_candles('BTCUSDT', '15m', 20)
             if df is None or len(df) < 10:
-                return True  # If can't check, allow trading
+                return True
 
             closes = df['close']
             current_price = closes.iloc[-1]
-            price_15m_ago = closes.iloc[-2]
             price_1h_ago = closes.iloc[-4]
-
-            # Calculate short term moves
-            change_15m = ((current_price - price_15m_ago) / price_15m_ago) * 100
             change_1h = ((current_price - price_1h_ago) / price_1h_ago) * 100
 
-            # BTC dumping hard - block alt buys
-            if change_15m < -0.5 or change_1h < -1.5:
-                print(f"   ⚠️ BTC FILTER: BTC dropping ({change_1h:.2f}% 1h) - blocking alts")
+            # Strength Meter Logic
+            status = "🔴 DUMPING" if change_1h < -1.5 else "🟡 WEAK" if change_1h < 0 else "🟢 STRONG"
+
+            print(f"   📊 BTC TREND METER: {status} | 1h Move: {change_1h:.2f}%")
+            print(f"   🌡️ Safety Threshold: -1.50% (Current: {change_1h:.2f}%)")
+
+            if change_1h < -1.5:
+                print(f"   ⚠️ BTC FILTER ACTIVE: Blocking alts to protect ${self.get_balance():.2f} USDT")
                 return False
 
             return True
@@ -824,13 +942,33 @@ class SmartTrader:
         V2 Analysis: Location-based trading
         Only generates signals when price is at key levels
         """
+        # 1. Always get the data first so we can see it
+        price = self.get_current_price(symbol) or 0
+        support, resistance = self.get_levels(symbol)
+
+        if support is None or resistance is None:
+            print(f"   🔍 {symbol}: ${price:.2f} | ⚠️ Insufficient candle data")
+            return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
+
+        location = ((price - support) / (resistance - support)) * 100
+
+        # 2. Always print the status so you know the bot is alive
+        print(f"   🔍 {symbol}: ${price:.2f} | 📍 Location: {location:.1f}%")
+
+        # 3. Safety checks — printed after location so you see WHY it's blocked
+        if not self.btc_is_healthy():
+            return {'action': 'HOLD', 'strength': 0, 'reason': '🚫 BTC too volatile - strategy paused'}
+
+        if 30 < location < 70:
+            print(f"   ⏳ {symbol} in 'Middle Zone' - No trade.")
+            return {'action': 'HOLD', 'strength': 0, 'reason': f"🚫 Middle zone ({location:.1f}%) - no trade", 'zone': 'middle'}
+
+        # Fetch candles for indicator calculation
         df = self.get_candles(symbol, '15m', 100)
         if df is None or len(df) < 50:
             return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
-        
         closes = df['close']
-        price = closes.iloc[-1]
-        
+
         # Calculate indicators
         rsi = self.calculate_rsi(closes)
         macd = self.calculate_macd(closes)
@@ -838,11 +976,6 @@ class SmartTrader:
         ema_slow = self.calculate_ema(closes, 18)
         adx = self.calculate_adx(df)
         bb = self.calculate_bollinger(closes)
-        
-        # V2: Support/Resistance
-        sr = self.calculate_support_resistance(df)
-        support = sr['support']
-        resistance = sr['resistance']
         
         # V2: Market type
         market_type = self.get_market_type(adx['adx'])
@@ -941,45 +1074,6 @@ class SmartTrader:
                     'zone': 'breakout_wait'
                 }
         
-        # ════════════════════════════════════════════════════════════════════
-        # 🚫🚫🚫 ABSOLUTE HARD BLOCK - NO EXCEPTIONS 🚫🚫🚫
-        # If NOT near support AND NOT near resistance → IMMEDIATE RETURN
-        # This is NOT scoring. This is NOT soft. This STOPS EVERYTHING.
-        # ════════════════════════════════════════════════════════════════════
-        near_support = self.is_near_level(price, support)
-        near_resistance = self.is_near_level(price, resistance)
-        
-        if not near_support and not near_resistance:
-            return {
-                'action': 'HOLD',
-                'strength': 0,
-                'reason': f"🚫 HARD BLOCK: Not at support/resistance (IMMEDIATE RETURN)",
-                'market_type': market_type,
-                'price': price,
-                'support': support,
-                'resistance': resistance,
-                'rsi': rsi,
-                'adx': adx['adx'],
-                'zone': 'middle'
-            }
-        
-        # Also check zone (belt and suspenders)
-        zone = self.get_trade_zone(price, support, resistance)
-        
-        if zone == 'middle':
-            return {
-                'action': 'HOLD',
-                'strength': 0,
-                'reason': f"🚫 HARD BLOCK: Price in middle zone (NO TRADE)",
-                'market_type': market_type,
-                'price': price,
-                'support': support,
-                'resistance': resistance,
-                'rsi': rsi,
-                'adx': adx['adx'],
-                'zone': zone
-            }
-        
         # V2: Strategy switch based on market type
         if market_type == 'RANGE':
             signal = self.get_range_signal(price, rsi, bb, support, resistance)
@@ -1005,6 +1099,16 @@ class SmartTrader:
         # ETH/BTC setup validation
         # ════════════════════════════════════════════════════════════════════
         if signal['action'] == 'BUY':
+            # News safety check (Trading Economics calendar)
+            if not self.is_market_safe():
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '📰 High-impact news in next 30min - entry blocked'}
+
+            # CryptoPanic hot news check
+            if self.is_market_volatile_news():
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '📰 Volatile news detected - entry blocked'}
+
             # BTC correlation check
             if not self.check_btc_trend():
                 return {'action': 'HOLD', 'strength': 0,
@@ -1054,6 +1158,23 @@ class SmartTrader:
         return signal
     
     # ════════════════════════════════════════════════════════════════════
+    # ATR-BASED DYNAMIC STOPS
+    # ════════════════════════════════════════════════════════════════════
+    def get_atr_values(self, symbol, interval='1m'):
+        """Fetches klines and calculates the ATR for dynamic stops."""
+        klines = self.client.get_historical_klines(symbol, interval, "100 minutes ago UTC")
+        df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'vol', 'ct', 'qv', 'nt', 'tb', 'tq', 'i'])
+        df[['high', 'low', 'close']] = df[['high', 'low', 'close']].apply(pd.to_numeric)
+        df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        return df['ATR'].iloc[-1]
+
+    def calculate_dynamic_targets(self, entry_price, atr_value):
+        """Sets SL at 2x ATR and TP at 4x ATR for a 1:2 Risk/Reward."""
+        stop_loss = entry_price - (atr_value * 2)
+        take_profit = entry_price + (atr_value * 4)
+        return round(stop_loss, 2), round(take_profit, 2)
+
+    # ════════════════════════════════════════════════════════════════════
     # POSITION SIZING (Risk-Based)
     # ════════════════════════════════════════════════════════════════════
     def calculate_position_size(self, account_balance, entry_price, stop_loss_price, risk_percent=0.015):
@@ -1073,8 +1194,8 @@ class SmartTrader:
         # 3. Position size
         position_size = risk_amount / risk_per_unit
         
-        # 4. Optional cap (prevents overexposure)
-        max_position_value = account_balance * 0.25  # max 25% of account
+        # 4. Optional cap (prevents overexposure) — capped at portion_size ($100 NZD)
+        max_position_value = min(self.portion_size, account_balance * 0.25)
         max_position_size = max_position_value / entry_price
         
         position_size = min(position_size, max_position_size)
@@ -1135,6 +1256,17 @@ class SmartTrader:
         else:
             print(f"BNB Balance: {free_bnb} - 25% Fee Discount Active.")
 
+    def maintain_bnb_balance(self):
+        """Auto-buys $9 USDT of BNB when balance drops below 0.02 BNB to keep fees discounted."""
+        try:
+            bnb_balance = float(self.client.get_asset_balance(asset='BNB')['free'])
+            if bnb_balance < 0.02:
+                print("🚨 BNB Low. Purchasing $15 NZD (~9 USDT) for fees...")
+                self.client.order_market_buy(symbol='BNBUSDT', quoteOrderQty=9)
+                self.send_telegram("🛡️ BNB Fee Guard: Recharged BNB balance.")
+        except Exception as e:
+            print(f"   ⚠️ maintain_bnb_balance error: {e}")
+
     def execute_buy(self, symbol, signal):
         """Execute a buy order"""
         if self.trade_lock:
@@ -1146,19 +1278,19 @@ class SmartTrader:
             price = signal['price']
             entry_time = datetime.now()
             
-            # Get support for stop loss calculation
-            support = signal.get('support_override', signal.get('support', price * 0.985))
-            structure_sl = support * 0.995  # 0.5% below support (safer buffer)
+            # ATR-based dynamic stop for position sizing
+            atr = self.get_atr_values(symbol)
+            stop_loss_price, _ = self.calculate_dynamic_targets(price, atr)
             max_sl = price * 0.97  # Never risk more than 3%
-            stop_loss_price = max(structure_sl, max_sl)
-            
+            stop_loss_price = max(stop_loss_price, max_sl)
+
             # Adjust risk based on session
             session, _ = self.get_market_session()
             if session == "asia":
                 risk_percent = 0.01  # safer (1%)
             else:
                 risk_percent = 0.015  # normal (1.5%)
-            
+
             # Calculate position size using risk-based method
             quantity = self.calculate_position_size(balance, price, stop_loss_price, risk_percent)
             
@@ -1181,12 +1313,10 @@ class SmartTrader:
             fill_price = float(order['fills'][0]['price'])
             entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
             
-            # Use pre-calculated stop loss (structure-based)
-            stop_loss = stop_loss_price
-            
-            # First take profit at 1R, then manage the runner at breakeven.
+            # ATR-based SL/TP recalculated on actual fill price (2x ATR stop, 4x ATR target)
+            stop_loss, take_profit = self.calculate_dynamic_targets(fill_price, atr)
+            stop_loss = max(stop_loss, fill_price * 0.97)  # Never risk more than 3%
             actual_risk = fill_price - stop_loss
-            take_profit = fill_price + (actual_risk * 1.0)
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
             
             # ════════════════════════════════════════════════════════════════════
@@ -1274,6 +1404,16 @@ class SmartTrader:
             else:
                 self.daily_loss += abs(pnl)  # Track losses as positive number
             self.weekly_pnl += pnl
+
+            # Update daily stats tracker
+            self.daily_total_pnl += pnl
+            if pnl > 0:
+                self.daily_wins += 1
+            elif pnl == 0:
+                self.daily_breakevens += 1
+            else:
+                self.daily_losses_count += 1
+            self.daily_fees_saved += fees * 0.25  # 25% BNB discount on fees
             
             # ════════════════════════════════════════════════════════════════════
             # 🔓 Position closed - open_position = False
@@ -1346,10 +1486,58 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # V2: DAILY LIMITS
     # ════════════════════════════════════════════════════════════════════
+    def bot_master_controller(self):
+        """
+        Master controller called every loop cycle.
+        Handles BNB guard, USDT pivot, and returns (mode, sleep_interval) based on NZT session.
+        - Aggressive (10s): Asia open 10-13h, London open 20-23h NZT
+        - Steady (60s): all other hours
+        """
+        now = datetime.now(self.nz_timezone)
+
+        # 1. BNB fee guard
+        self.maintain_bnb_balance()
+
+        # 2. April 16 USDT → U pivot after 8pm NZT
+        if now.month == 4 and now.day == 16 and now.hour >= 20:
+            try:
+                usdt_bal = float(self.client.get_asset_balance(asset='USDT')['free'])
+                if usdt_bal > 50:
+                    self.client.order_market_buy(symbol='UUSDT', quoteOrderQty=usdt_bal)
+                    self.send_telegram("🔄 Transition: Swapped USDT to 'U' for Zero-Fee Friday.")
+            except Exception as e:
+                print(f"   ⚠️ USDT pivot error: {e}")
+
+        # 3. Session mode: aggressive during Asia/London opens, steady otherwise
+        if (10 <= now.hour <= 13) or (20 <= now.hour <= 23):
+            return "Aggressive", 10
+        else:
+            return "Steady", 60
+
+    def daily_maintenance(self):
+        """Runs once per day: BNB top-up and scheduled USDT transitions."""
+        now = datetime.now()
+
+        # 1. Daily BNB check
+        self.maintain_bnb_balance()
+
+        # 2. April 16 USDT → U transition (after 8pm NZT)
+        if now.month == 4 and now.day == 16 and now.hour >= 20:
+            try:
+                usdt_bal = float(self.client.get_asset_balance(asset='USDT')['free'])
+                if usdt_bal > 50:
+                    self.client.order_market_buy(symbol='UUSDT', quoteOrderQty=usdt_bal)
+                    self.send_telegram("🔄 Transition: Swapped USDT to 'U' for Zero-Fee Friday.")
+            except Exception as e:
+                print(f"   ⚠️ USDT transition error: {e}")
+
     def check_daily_reset(self):
         """Reset daily counters at midnight and weekly counters on new week"""
         today = datetime.now().date()
         current_week_key = self.get_week_key()
+
+        if today != self.last_reset_date:
+            self.daily_maintenance()
 
         if current_week_key != self.last_week_reset_key:
             print(f"\n   🔄 New week - resetting weekly P&L guard")
@@ -1358,11 +1546,18 @@ class SmartTrader:
 
         if today != self.last_reset_date:
             print(f"\n   🔄 New day - resetting counters")
+            print(f"   📊 Yesterday: {self.daily_wins}W / {self.daily_losses_count}L / {self.daily_breakevens}BE | PnL: ${self.daily_total_pnl:.2f} | Fees saved: ${self.daily_fees_saved:.4f}")
             self.daily_trades = 0
             self.daily_profit = 0.0
             self.reset_daily()
-            self.last_trade_time = None  # Reset cooldown too
+            self.last_trade_time = None
             self.last_reset_date = today
+            # Reset daily stats
+            self.daily_wins = 0
+            self.daily_losses_count = 0
+            self.daily_breakevens = 0
+            self.daily_total_pnl = 0.0
+            self.daily_fees_saved = 0.0
     
     def can_trade(self):
         """Check if we can make more trades today - HARD BLOCKS"""
@@ -1420,6 +1615,29 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # POSITION MANAGEMENT
     # ════════════════════════════════════════════════════════════════════
+    def update_breakeven_logic(self, symbol, entry_price, current_sl, take_profit):
+        """
+        Moves Stop-Loss to Entry once price hits 1:1 RR.
+        entry_price: The price you bought at.
+        current_sl: Your current Stop-Loss (initially the ATR-based one).
+        take_profit: Your target price.
+        """
+        current_price = float(self.client.get_symbol_ticker(symbol=symbol)['price'])
+
+        # Risk distance was (Entry - Original SL)
+        # We want to trigger breakeven when Price = Entry + Risk Distance
+        risk_amount = entry_price - current_sl
+        trigger_price = entry_price + risk_amount
+
+        if current_price >= trigger_price and current_sl < entry_price:
+            print(f"Target 1:1 Hit! Moving Stop-Loss to Breakeven: {entry_price}")
+            self.send_telegram(
+                f"🛡️ Position Protected: {symbol} stop-loss moved to BREAKEVEN at {entry_price}. Risk is now $0!"
+            )
+            return entry_price  # New Stop Loss is now the Entry Price
+
+        return current_sl  # Keep existing Stop Loss
+
     def check_positions(self):
         """Check open positions for SL/TP and trailing stop"""
         for position in self.open_positions[:]:
@@ -1430,6 +1648,11 @@ class SmartTrader:
 
             # Calculate current P&L
             pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
+
+            # 1:1 RR breakeven: move stop to entry once price hits entry + risk distance
+            position['stop_loss'] = self.update_breakeven_logic(
+                symbol, position['entry_price'], position['stop_loss'], position['take_profit']
+            )
 
             # ════════════════════════════════════════════════════════════
             # TRAILING STOP LOGIC
@@ -1510,12 +1733,14 @@ class SmartTrader:
         balance = self.get_balance()
         print(f"\n   💰 Balance: ${balance:.2f} USDT")
         self.check_bnb_balance()
+        self.maintain_bnb_balance()
 
         while True:
             try:
-                # Loop heartbeat (for debugging restarts)
-                print(f"\r   ⏱️ Loop running... {int(time.time())}", end='', flush=True)
-                
+                # Master controller: BNB guard + session mode + sleep interval
+                trade_mode, sleep_interval = self.bot_master_controller()
+                print(f"\r   ⏱️ [{trade_mode}] Loop running... {int(time.time())}", end='', flush=True)
+
                 # Reset daily counters if new day
                 self.check_daily_reset()
 
@@ -1529,14 +1754,23 @@ class SmartTrader:
                         f"Balance: ${balance:.2f}\n"
                         f"Session: {session.upper()}\n"
                         f"Trades today: {self.daily_trades}/{self.max_trades_per_day}\n"
-                        f"Daily P&L: ${self.daily_profit:.2f}\n"
+                        f"Daily P&L: ${self.daily_total_pnl:.2f}\n"
+                        f"W/L/BE: {self.daily_wins}/{self.daily_losses_count}/{self.daily_breakevens}\n"
+                        f"Fees saved: ${self.daily_fees_saved:.4f}\n"
                         f"Open positions: {len(self.open_positions)}"
                     )
+                    self.maintain_bnb_balance()
                     self.last_heartbeat = datetime.now()
+
+                # News safety check - pause 5 minutes if market is unstable
+                if self.is_market_safe() is False or self.is_market_volatile_news():
+                    print("   📰 Market is unstable due to news. Waiting 5 minutes...")
+                    time.sleep(300)
+                    continue
 
                 # Check open positions for SL/TP
                 self.check_positions()
-                
+
                 # ════════════════════════════════════════════════════════════════════
                 # 🔒 HARD GUARDS (FIRST) - Must pass ALL before any trading
                 # ════════════════════════════════════════════════════════════════════
@@ -1590,9 +1824,12 @@ class SmartTrader:
                 # ════════════════════════════════════════════════════════════════════
                 # 🔍 THEN check strategy - Scan for valid setups
                 # ════════════════════════════════════════════════════════════════════
-                print(f"\n   📊 Scanning {len(self.trading_pairs)} pairs... [Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
-                
-                for symbol in self.trading_pairs:
+                # Portfolio manager: picks best candidate, respects max positions
+                best = self.manage_portfolio()
+                scan_order = ([best] + [s for s in self.trading_pairs if s != best]) if best else self.trading_pairs
+                print(f"\n   📊 Scanning {len(scan_order)} pairs... [Best: {best or 'none'} | Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
+
+                for symbol in scan_order:
                     # Skip if we already have position in this symbol
                     if any(p['symbol'] == symbol for p in self.open_positions):
                         continue
@@ -1632,8 +1869,8 @@ class SmartTrader:
                     
                     time.sleep(0.5)
                 
-                print(f"   ✅ Cycle complete. Waiting 10s...")
-                time.sleep(10)
+                print(f"   ✅ Cycle complete. [{trade_mode}] Waiting {sleep_interval}s...")
+                time.sleep(sleep_interval)
                 
             except KeyboardInterrupt:
                 print("\n\n   🛑 Stopping bot...")
@@ -1646,8 +1883,8 @@ class SmartTrader:
                     print(f"\n   ❌ Binance API error: {e}")
                     time.sleep(10)
             except Exception as e:
-                print(f"\n   ❌ Error: {e}")
-                time.sleep(10)
+                print(f"\n   ❌ API Error: {e}")
+                time.sleep(30)
         
         # Final summary
         print(f"\n   📊 Session Summary:")
