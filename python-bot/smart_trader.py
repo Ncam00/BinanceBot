@@ -6,7 +6,7 @@ Key Features:
 2. No-trade zone (skip middle 40%)
 3. Market type detection (range vs trend)
 4. Strategy switch per market type
-5. Max 2 trades per day
+5. Max 5 trades per day
 6. Profit lock at $5 daily
 7. Location-based entries only
 
@@ -19,7 +19,6 @@ import json
 from datetime import datetime, timedelta
 from binance.client import Client
 from binance.enums import *
-from binance.exceptions import BinanceAPIException
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
@@ -70,8 +69,8 @@ class SmartTrader:
         self.nz_timezone = pytz.timezone('Pacific/Auckland')
         self.session_settings = {
             'asia': {'mode': 'low_risk', 'max_trades': 1, 'min_strength': 0.85},
-            'london': {'mode': 'normal', 'max_trades': 2, 'min_strength': 0.75},
-            'us': {'mode': 'aggressive', 'max_trades': 2, 'min_strength': 0.70}
+            'london': {'mode': 'normal', 'max_trades': 5, 'min_strength': 0.65},
+            'us': {'mode': 'aggressive', 'max_trades': 5, 'min_strength': 0.60}
         }
         
         # State tracking
@@ -177,7 +176,7 @@ class SmartTrader:
                 
                 self.open_positions.append(position)
                 pnl = (current_price - entry_price) * amount
-                print(f"   ✅ Synced: {amount:.8f} {asset} @ entry ${entry_price:.2f}")
+                print(f"    Synced: {amount:.8f} {asset} @ entry ${entry_price:.2f}")
                 print(f"      Current: ${current_price:.2f} | P&L: ${pnl:.2f}")
                 print(f"      SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
                 
@@ -1024,49 +1023,6 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # ORDER EXECUTION
     # ════════════════════════════════════════════════════════════════════
-    def get_limit_prices(self, symbol):
-        """Fetches the current Bid and Ask to ensure frictionless entry/exit."""
-        order_book = self.client.get_order_book(symbol=symbol, limit=5)
-        best_bid = float(order_book['bids'][0][0])  # Highest price a buyer will pay
-        best_ask = float(order_book['asks'][0][0])  # Lowest price a seller will accept
-        return best_bid, best_ask
-
-    def execute_frictionless_trade(self, symbol, side, quantity):
-        """
-        Executes a LIMIT order at the best possible price to avoid slippage.
-        Side: SIDE_BUY or SIDE_SELL
-        """
-        best_bid, best_ask = self.get_limit_prices(symbol)
-
-        # For a BUY, sit at the Bid to save money;
-        # for a SELL, sit at the Ask. Uses top-of-book price.
-        target_price = best_bid if side == SIDE_BUY else best_ask
-
-        try:
-            order = self.client.create_order(
-                symbol=symbol,
-                side=side,
-                type=ORDER_TYPE_LIMIT,
-                timeInForce=TIME_IN_FORCE_GTC,  # Good 'Til Canceled
-                quantity=quantity,
-                price=str(target_price)
-            )
-            print(f"Limit {side} Order Placed at {target_price}")
-            return order
-        except Exception as e:
-            print(f"Execution Error: {e}")
-            return None
-
-    def check_bnb_balance(self):
-        """Checks BNB balance — ensures 25% fee discount is active."""
-        asset_bal = self.client.get_asset_balance(asset='BNB')
-        free_bnb = float(asset_bal['free'])
-
-        if free_bnb < 0.05:
-            print("Warning: Low BNB balance. You are paying 25% extra in fees!")
-        else:
-            print(f"BNB Balance: {free_bnb} - 25% Fee Discount Active.")
-
     def execute_buy(self, symbol, signal):
         """Execute a buy order"""
         if self.trade_lock:
@@ -1441,8 +1397,7 @@ class SmartTrader:
         
         balance = self.get_balance()
         print(f"\n   💰 Balance: ${balance:.2f} USDT")
-        self.check_bnb_balance()
-
+        
         while True:
             try:
                 # Loop heartbeat (for debugging restarts)
@@ -1570,13 +1525,6 @@ class SmartTrader:
             except KeyboardInterrupt:
                 print("\n\n   🛑 Stopping bot...")
                 break
-            except BinanceAPIException as e:
-                if e.status_code == 429:
-                    print("Rate limit reached! Sleeping for 60 seconds...")
-                    time.sleep(60)
-                else:
-                    print(f"\n   ❌ Binance API error: {e}")
-                    time.sleep(10)
             except Exception as e:
                 print(f"\n   ❌ Error: {e}")
                 time.sleep(10)
