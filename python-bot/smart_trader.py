@@ -1160,6 +1160,15 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # ATR-BASED DYNAMIC STOPS
     # ════════════════════════════════════════════════════════════════════
+    def get_klines_for_atr(self, symbol, interval='1h'):
+        """Fetches 15 candles and drops the current incomplete one, giving 14 closed candles for ATR."""
+        try:
+            klines = self.client.get_klines(symbol=symbol, interval=interval, limit=15)
+            return klines[:-1]  # Remove the current incomplete candle
+        except Exception as e:
+            print(f"   Error fetching klines for {symbol}: {e}")
+            return None
+
     def calculate_atr(self, klines, period=14):
         """
         Pure-Python 14-period ATR from raw klines.
