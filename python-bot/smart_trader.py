@@ -98,7 +98,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         self.trade_cooldown_minutes = 30    # Wait 30min between trades
         self.hard_max_trades = 2             # ABSOLUTE max, no exceptions
-        self.max_daily_loss = 10.0           # Stop if lose $10 (prevents revenge trading)
+        self.max_daily_loss = 16.0           # Stop if lose $16 NZD (prevents revenge trading)
         self.max_daily_loss_ratio = 0.03     # Stop if losses hit 3% of balance
         self.max_consecutive_losses = 2      # Stop after 2 losing trades in a row
         
