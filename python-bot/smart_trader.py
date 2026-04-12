@@ -1624,9 +1624,15 @@ class SmartTrader:
                     )
                     self.last_heartbeat = datetime.now()
 
+                # News safety check - pause 5 minutes if market is unstable
+                if self.is_market_safe() is False or self.is_market_volatile_news():
+                    print("   📰 Market is unstable due to news. Waiting 5 minutes...")
+                    time.sleep(300)
+                    continue
+
                 # Check open positions for SL/TP
                 self.check_positions()
-                
+
                 # ════════════════════════════════════════════════════════════════════
                 # 🔒 HARD GUARDS (FIRST) - Must pass ALL before any trading
                 # ════════════════════════════════════════════════════════════════════
@@ -1736,8 +1742,8 @@ class SmartTrader:
                     print(f"\n   ❌ Binance API error: {e}")
                     time.sleep(10)
             except Exception as e:
-                print(f"\n   ❌ Error: {e}")
-                time.sleep(10)
+                print(f"\n   ❌ API Error: {e}")
+                time.sleep(30)
         
         # Final summary
         print(f"\n   📊 Session Summary:")
