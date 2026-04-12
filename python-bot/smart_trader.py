@@ -1501,6 +1501,9 @@ class SmartTrader:
 
         if current_price >= trigger_price and current_sl < entry_price:
             print(f"Target 1:1 Hit! Moving Stop-Loss to Breakeven: {entry_price}")
+            self.send_telegram(
+                f"🛡️ Position Protected: {symbol} stop-loss moved to BREAKEVEN at {entry_price}. Risk is now $0!"
+            )
             return entry_price  # New Stop Loss is now the Entry Price
 
         return current_sl  # Keep existing Stop Loss
