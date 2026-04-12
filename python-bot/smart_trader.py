@@ -957,8 +957,8 @@ class SmartTrader:
 
         # Visual feedback: position within the S/R range
         sr_range = resistance - support
-        position_pct = ((price - support) / sr_range * 100) if sr_range > 0 else 0
-        print(f"   🔍 {symbol} @ ${price:.2f} | Dist from Support: {position_pct:.1f}%")
+        pos_pct = ((price - support) / sr_range * 100) if sr_range > 0 else 0
+        print(f"   🔍 {symbol}: ${price:.2f} | Location: {pos_pct:.1f}% (Aiming for <30% or >70%)")
         
         # V2: Market type
         market_type = self.get_market_type(adx['adx'])
