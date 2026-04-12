@@ -45,7 +45,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT']
+        self.trading_pairs = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'AVAXUSDT']
         self.max_positions = 2
         
         # ════════════════════════════════════════════════════════════════════
