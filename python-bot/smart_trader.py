@@ -1261,15 +1261,13 @@ class SmartTrader:
             print(f"BNB Balance: {free_bnb} - 25% Fee Discount Active.")
 
     def maintain_bnb_balance(self):
-        """Auto-buys $9 USDT of BNB when balance drops below $6 USDT to keep fees discounted."""
+        """Auto-buys $9 USDT of BNB when balance drops below 0.02 BNB to keep fees discounted."""
         try:
             bnb_balance = float(self.client.get_asset_balance(asset='BNB')['free'])
-            bnb_price = float(self.client.get_symbol_ticker(symbol='BNBUSDT')['price'])
-
-            if (bnb_balance * bnb_price) < 6.0:
+            if bnb_balance < 0.02:
                 print("🚨 BNB Low. Purchasing $15 NZD (~9 USDT) for fees...")
                 self.client.order_market_buy(symbol='BNBUSDT', quoteOrderQty=9)
-                self.send_telegram("🚨 BNB replenished: bought $9 USDT worth to maintain fee discount.")
+                self.send_telegram("🛡️ BNB Fee Guard: Recharged BNB balance.")
         except Exception as e:
             print(f"   ⚠️ maintain_bnb_balance error: {e}")
 
@@ -1482,6 +1480,34 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # V2: DAILY LIMITS
     # ════════════════════════════════════════════════════════════════════
+    def bot_master_controller(self):
+        """
+        Master controller called every loop cycle.
+        Handles BNB guard, USDT pivot, and returns (mode, sleep_interval) based on NZT session.
+        - Aggressive (10s): Asia open 10-13h, London open 20-23h NZT
+        - Steady (60s): all other hours
+        """
+        now = datetime.now(self.nz_timezone)
+
+        # 1. BNB fee guard
+        self.maintain_bnb_balance()
+
+        # 2. April 16 USDT → U pivot after 8pm NZT
+        if now.month == 4 and now.day == 16 and now.hour >= 20:
+            try:
+                usdt_bal = float(self.client.get_asset_balance(asset='USDT')['free'])
+                if usdt_bal > 50:
+                    self.client.order_market_buy(symbol='UUSDT', quoteOrderQty=usdt_bal)
+                    self.send_telegram("🔄 Transition: Swapped USDT to 'U' for Zero-Fee Friday.")
+            except Exception as e:
+                print(f"   ⚠️ USDT pivot error: {e}")
+
+        # 3. Session mode: aggressive during Asia/London opens, steady otherwise
+        if (10 <= now.hour <= 13) or (20 <= now.hour <= 23):
+            return "Aggressive", 10
+        else:
+            return "Steady", 60
+
     def daily_maintenance(self):
         """Runs once per day: BNB top-up and scheduled USDT transitions."""
         now = datetime.now()
@@ -1489,13 +1515,13 @@ class SmartTrader:
         # 1. Daily BNB check
         self.maintain_bnb_balance()
 
-        # 2. April 16 USDT transition
-        if now.month == 4 and now.day == 16:
+        # 2. April 16 USDT → U transition (after 8pm NZT)
+        if now.month == 4 and now.day == 16 and now.hour >= 20:
             try:
                 usdt_bal = float(self.client.get_asset_balance(asset='USDT')['free'])
-                if usdt_bal > 10:
-                    self.client.order_market_sell(symbol='USDTU', quantity=usdt_bal)
-                    self.send_telegram("USDT converted to 'U' automatically. Zero-fee mode ready!")
+                if usdt_bal > 50:
+                    self.client.order_market_buy(symbol='UUSDT', quoteOrderQty=usdt_bal)
+                    self.send_telegram("🔄 Transition: Swapped USDT to 'U' for Zero-Fee Friday.")
             except Exception as e:
                 print(f"   ⚠️ USDT transition error: {e}")
 
@@ -1698,9 +1724,10 @@ class SmartTrader:
 
         while True:
             try:
-                # Loop heartbeat (for debugging restarts)
-                print(f"\r   ⏱️ Loop running... {int(time.time())}", end='', flush=True)
-                
+                # Master controller: BNB guard + session mode + sleep interval
+                trade_mode, sleep_interval = self.bot_master_controller()
+                print(f"\r   ⏱️ [{trade_mode}] Loop running... {int(time.time())}", end='', flush=True)
+
                 # Reset daily counters if new day
                 self.check_daily_reset()
 
@@ -1827,8 +1854,8 @@ class SmartTrader:
                     
                     time.sleep(0.5)
                 
-                print(f"   ✅ Cycle complete. Waiting 10s...")
-                time.sleep(10)
+                print(f"   ✅ Cycle complete. [{trade_mode}] Waiting {sleep_interval}s...")
+                time.sleep(sleep_interval)
                 
             except KeyboardInterrupt:
                 print("\n\n   🛑 Stopping bot...")
