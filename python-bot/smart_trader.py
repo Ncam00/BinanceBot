@@ -611,6 +611,26 @@ class SmartTrader:
         """Step 4: Only trade WITH the trend"""
         return price > ema
 
+    def is_market_volatile_news(self):
+        """
+        Checks CryptoPanic for high-impact news keywords.
+        Returns True if trading should pause, False if safe to trade.
+        """
+        try:
+            token = os.getenv('CRYPTOPANIC_TOKEN')
+            response = requests.get(
+                f"https://cryptopanic.com/api/v1/posts/?auth_token={token}&filter=hot"
+            )
+            news_data = response.json()
+            keywords = ['CPI', 'FOMC', 'FED', 'INFLATION', 'INTEREST RATE']
+            for post in news_data['results']:
+                if any(word in post['title'].upper() for word in keywords):
+                    print(f"   📰 HIGH-IMPACT NEWS: {post['title']} - pausing trading")
+                    return True
+            return False
+        except:
+            return False  # If API fails, default to safe (trading allowed)
+
     def is_market_safe(self):
         """Returns False if a high-impact news event is due in the next 30 minutes."""
         try:
@@ -1025,10 +1045,15 @@ class SmartTrader:
         # ETH/BTC setup validation
         # ════════════════════════════════════════════════════════════════════
         if signal['action'] == 'BUY':
-            # News safety check
+            # News safety check (Trading Economics calendar)
             if not self.is_market_safe():
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': '📰 High-impact news in next 30min - entry blocked'}
+
+            # CryptoPanic hot news check
+            if self.is_market_volatile_news():
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '📰 Volatile news detected - entry blocked'}
 
             # BTC correlation check
             if not self.check_btc_trend():
