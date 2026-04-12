@@ -930,30 +930,34 @@ class SmartTrader:
         V2 Analysis: Location-based trading
         Only generates signals when price is at key levels
         """
+        # 1. Always get price first — visible even if candle fetch fails
+        price = self.get_price(symbol) or 0
+
         df = self.get_candles(symbol, '15m', 100)
         if df is None or len(df) < 50:
+            print(f"   🔍 {symbol}: ${price:.2f} | ⚠️ Insufficient candle data")
             return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
 
         closes = df['close']
-        price = closes.iloc[-1]
+        price = closes.iloc[-1]  # Use candle close for accuracy
 
         # V2: Support/Resistance
         sr = self.calculate_support_resistance(df)
         support = sr['support']
         resistance = sr['resistance']
 
-        # Always print location — visible every loop before any guards
+        # 2. Always print location before any guards fire
         sr_range = resistance - support
         location = ((price - support) / sr_range * 100) if sr_range > 0 else 0
         print(f"   🔍 {symbol}: ${price:.2f} | 📍 Location: {location:.1f}%")
 
-        # BTC health check (prints its own warning internally)
-        if symbol != 'BTCUSDT' and not self.btc_is_healthy():
+        # 3. Safety checks — printed after location so you see WHY it's blocked
+        if not self.btc_is_healthy():
             return {'action': 'HOLD', 'strength': 0, 'reason': '🚫 BTC too volatile - strategy paused'}
 
         # Middle zone block — only trade near support (<30%) or resistance (>70%)
         if 30 < location < 70:
-            print(f"   ⏳ {symbol} in Middle Zone ({location:.1f}%) - No trade.")
+            print(f"   ⏳ {symbol} in 'Middle Zone' - No trade.")
             return {'action': 'HOLD', 'strength': 0, 'reason': f"🚫 Middle zone ({location:.1f}%) - no trade", 'zone': 'middle'}
 
         # Calculate indicators
