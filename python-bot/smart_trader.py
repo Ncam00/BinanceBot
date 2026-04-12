@@ -23,6 +23,7 @@ from binance.exceptions import BinanceAPIException
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
+import tradingeconomics as te
 from dotenv import load_dotenv
 import requests
 import pytz
@@ -37,6 +38,9 @@ class SmartTrader:
             os.getenv('BINANCE_API_KEY'),
             os.getenv('BINANCE_SECRET_KEY')
         )
+
+        # Trading Economics API
+        te.login(os.getenv('TE_API_KEY'))
         
         # ════════════════════════════════════════════════════════════════════
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
@@ -607,6 +611,21 @@ class SmartTrader:
         """Step 4: Only trade WITH the trend"""
         return price > ema
 
+    def is_market_safe(self):
+        """Returns False if a high-impact news event is due in the next 30 minutes."""
+        try:
+            now = datetime.now()
+            buffer_time = now + timedelta(minutes=30)
+            events = te.getCalendarData(importance='High')
+            for event in events:
+                event_time = datetime.strptime(event['Date'], '%Y-%m-%dT%H:%M:%SZ')
+                if now <= event_time <= buffer_time:
+                    print(f"   📰 CRITICAL NEWS: {event['Event']} at {event['Date']} - blocking entry")
+                    return False
+        except Exception as e:
+            print(f"   ⚠️ News check failed: {e} - allowing trade")
+        return True
+
     def check_multi_timeframe(self, symbol):
         """All timeframes should agree before entry"""
         timeframes = ['1m', '5m', '15m']
@@ -1006,6 +1025,11 @@ class SmartTrader:
         # ETH/BTC setup validation
         # ════════════════════════════════════════════════════════════════════
         if signal['action'] == 'BUY':
+            # News safety check
+            if not self.is_market_safe():
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '📰 High-impact news in next 30min - entry blocked'}
+
             # BTC correlation check
             if not self.check_btc_trend():
                 return {'action': 'HOLD', 'strength': 0,
