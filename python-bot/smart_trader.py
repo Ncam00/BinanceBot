@@ -1686,86 +1686,31 @@ class SmartTrader:
 
     def manage_open_positions(self):
         """Phase 2: Active defense for open trades"""
-        for pos in self.open_positions[:]:
+        for pos in self.open_positions:
             symbol = pos['symbol']
             current_price = self.get_price(symbol)
-            if not current_price:
-                continue
+            if not current_price: continue
 
             entry = pos['entry_price']
             current_sl = pos['stop_loss']
-            pnl_percent = ((current_price - entry) / entry) * 100
 
             # A. BREAK-EVEN (Lock the vault at +1%)
             if current_price >= entry * 1.01 and current_sl < entry:
                 pos['stop_loss'] = entry
-                print(f"   🛡️ {symbol} Risk Removed: SL moved to Break-Even.")
-
-            # 1:1 RR breakeven: move stop to entry once price hits entry + risk distance
-            pos['stop_loss'] = self.update_breakeven_logic(
-                symbol, entry, pos['stop_loss'], pos['take_profit']
-            )
+                print(f"🛡️ {symbol} Risk Removed: SL moved to Break-Even.")
 
             # B. TRAILING TAKE PROFIT (Follow the pump)
-            # Activates at 2.5% profit, trails price by 0.5%
+            # If price is up 2.5%, trail it by 0.5%
             trail_activation = entry * 1.025
-            trailing_percent = 0.005  # 0.5% trail distance
-
             if current_price >= trail_activation:
-                # Initialize trailing stop if not already active
-                if not pos.get('trailing_stop_active'):
-                    pos['trailing_stop_active'] = True
-                    pos['highest_price'] = current_price
-                    pos['trailing_stop_price'] = current_price * (1 - trailing_percent)
-                    print(f"   🔒 TRAILING STOP ACTIVATED {symbol} @ ${pos['trailing_stop_price']:.4f}")
-                    self.send_telegram(
-                        f"🔒 Trailing Stop Activated\n"
-                        f"Pair: {symbol}\n"
-                        f"Profit: +{pnl_percent:.2f}%\n"
-                        f"Trail: ${pos['trailing_stop_price']:.4f}"
-                    )
-
-                # Only move the stop loss up, never down
-                if current_price > pos.get('highest_price', 0):
-                    pos['highest_price'] = current_price
-                    new_trail = current_price * (1 - trailing_percent)
-                    if new_trail > pos['trailing_stop_price']:
-                        pos['trailing_stop_price'] = new_trail
-                        print(f"   📈 {symbol} Trailing: New SL at {new_trail:.2f}")
-
-                # Check if trailing stop hit
-                if current_price <= pos['trailing_stop_price']:
-                    print(f"\n   🔒 TRAILING STOP HIT {symbol} @ ${current_price:.4f}")
-                    self.execute_sell(pos, 'TRAILING_STOP')
-                    continue
-
-            # Runner logic: after partial TP, exit remainder at breakeven
-            if pos.get('runner_active') and current_price <= entry:
-                print(f"\n   ⚖️ BREAKEVEN EXIT {symbol}")
-                self.execute_sell(pos, 'BREAKEVEN_RUNNER')
-                continue
-
-            # Partial close at first target: take 70% off, move stop to entry
-            if not pos.get('partial_taken') and current_price >= pos['take_profit']:
-                partial_quantity = pos['original_quantity'] * 0.70
-                result = self.execute_sell(pos, 'PARTIAL_TAKE_PROFIT', quantity=partial_quantity)
-                if result:
-                    pos['partial_taken'] = True
-                    pos['runner_active'] = True
-                    pos['stop_loss'] = entry
-                    print(f"   🏃 Runner active for {symbol} - stop moved to breakeven")
-                continue
+                new_trail = current_price * 0.995  # 0.5% trail
+                if new_trail > current_sl:
+                    pos['stop_loss'] = new_trail
+                    print(f"📈 {symbol} Trailing: New SL at {new_trail:.2f}")
 
             # C. EXIT CHECK
             if current_price <= pos['stop_loss']:
-                print(f"\n   🛑 STOP LOSS HIT {symbol}")
-                self.execute_sell(pos, 'STOP_LOSS')
-                continue
-
-            if current_price >= pos['take_profit']:
-                print(f"\n   🎯 TAKE PROFIT HIT {symbol}")
-                self.execute_sell(pos, 'TAKE_PROFIT')
-                continue
+                self.execute_sell(pos)
     
     # ════════════════════════════════════════════════════════════════════
     # MAIN TRADING LOOP
