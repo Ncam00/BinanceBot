@@ -110,6 +110,23 @@ class SmartTrader:
         self.MAX_LOSS_PERCENT = 0.05        # 5% hard limit
         self.STOP_TRADING_LIMIT = self.STARTING_BALANCE * (1 - self.MAX_LOSS_PERCENT)  # $444.93
         
+        # ════════════════════════════════════════════════════════════════════
+        # 9.5 ELITE SETTINGS
+        # ════════════════════════════════════════════════════════════════════
+        self.INITIAL_DEPOSIT = 468.35
+        self.WEEKLY_SAFETY_NET = 0.05       # 5% Hard Stop ($444.93)
+        self.DAILY_PROFIT_GOAL = 12.00      # Target: $8 - $12
+        self.TRAILING_STOP = 0.005          # 0.5% to lock in wins
+        
+        # --- THE CORE FOUR SNIPER TARGETS ---
+        # These are the "Wick Zones" based on current 4H Support
+        self.SNIPER_ZONES = {
+            "BTCUSDT": 71250, 
+            "ETHUSDT": 2185,
+            "SOLUSDT": 81.25,
+            "AVAXUSDT": 8.75
+        }
+        
         # Telegram notifications
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
@@ -1572,6 +1589,65 @@ class SmartTrader:
         print(f"      Trades today: {self.daily_trades}")
         print(f"      Daily P&L: ${self.daily_profit:.2f}")
         print(f"      Open positions: {len(self.open_positions)}")
+    
+    def run_95_logic(self):
+        """9.5 Elite Sniper Logic"""
+        current_balance = self.get_total_balance()
+        
+        # 1. SHIELD: The Anti-Zero Check
+        if current_balance <= (self.INITIAL_DEPOSIT * (1 - self.WEEKLY_SAFETY_NET)):
+            self.kill_all_trades("5% Weekly Loss Limit Hit. Protecting capital.")
+            return
+
+        # 2. PROFIT GUARD: Take the win and walk away
+        if self.total_daily_profit >= self.DAILY_PROFIT_GOAL:
+            print("   🎯 Daily Goal Achieved. See you tomorrow!")
+            return
+
+        # 3. SPEAR: Place the Sniper Traps
+        for coin, price in self.SNIPER_ZONES.items():
+            if not self.has_open_order(coin):
+                # Calculate position size
+                quantity = self.calculate_position_size(current_balance, price, price * 0.97, 0.02)  # 2% risk
+                if quantity > 0:
+                    # We place LIMIT orders to catch the wicks, not market orders
+                    self.place_sniper_order(coin, price, quantity)
+                    self.send_telegram(f"🎯 9.5 Sniper Trap Set for {coin} at ${price}")
+
+        # 4. TRAILING SHIELD: Lock in the profit
+        self.monitor_trailing_stops(threshold=0.01, lock_in=self.TRAILING_STOP)
+    
+    def has_open_order(self, symbol):
+        """Check if we have an open order for this symbol"""
+        try:
+            orders = self.client.get_open_orders(symbol=symbol)
+            return len(orders) > 0
+        except:
+            return False
+    
+    def kill_all_trades(self, reason):
+        """Close all open positions"""
+        print(f"   🚨 KILLING ALL TRADES: {reason}")
+        for pos in self.open_positions[:]:
+            self.execute_sell(pos, reason)
+        self.send_telegram(f"🚨 All trades closed: {reason}")
+    
+    def monitor_trailing_stops(self, threshold=0.01, lock_in=0.005):
+        """Monitor and adjust trailing stops for open positions"""
+        for pos in self.open_positions:
+            current_price = self.get_price(pos['symbol'])
+            if not current_price:
+                continue
+            
+            entry = pos['entry_price']
+            profit_pct = (current_price - entry) / entry * 100
+            
+            # Only trail if above threshold
+            if profit_pct >= threshold * 100:
+                new_trail = current_price * (1 - lock_in)
+                if new_trail > pos['stop_loss']:
+                    pos['stop_loss'] = new_trail
+                    print(f"   📈 Trailing stop updated for {pos['symbol']}: ${new_trail:.4f}")
 
 
 if __name__ == '__main__':
