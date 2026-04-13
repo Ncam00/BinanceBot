@@ -1311,11 +1311,21 @@ class SmartTrader:
             price = signal['price']
             entry_time = datetime.now()
             
-            # ATR-based dynamic stop for position sizing
-            atr = self.get_atr_values(symbol)
+            # Fetch clean closed candles for ATR calculation
+            kline_data = self.get_klines_for_atr(symbol, interval='1h')
+            if kline_data:
+                atr = self.calculate_atr(kline_data)
+            else:
+                atr = self.get_atr_values(symbol)  # Fallback to pandas_ta version
+
+            print(f"   Phase 2 Entry: {symbol}")
+            print(f"   Current ATR: {atr:.4f}")
+
+            # Dynamic stop: 2x ATR safety buffer
             stop_loss_price, _ = self.calculate_dynamic_targets(price, atr)
             max_sl = price * 0.97  # Never risk more than 3%
             stop_loss_price = max(stop_loss_price, max_sl)
+            print(f"   Dynamic SL: {stop_loss_price:.4f}")
 
             # Adjust risk based on session
             session, _ = self.get_market_session()
