@@ -103,6 +103,13 @@ class SmartTrader:
         self.max_daily_loss_ratio = 0.03     # Stop if losses hit 3% of balance
         self.max_consecutive_losses = 2      # Stop after 2 losing trades in a row
         
+        # ════════════════════════════════════════════════════════════════════
+        # CIRCUIT BREAKER: WEEKLY LOSS PROTECTION
+        # ════════════════════════════════════════════════════════════════════
+        self.STARTING_BALANCE = 468.35      # Your balance as of today
+        self.MAX_LOSS_PERCENT = 0.05        # 5% hard limit
+        self.STOP_TRADING_LIMIT = self.STARTING_BALANCE * (1 - self.MAX_LOSS_PERCENT)  # $444.93
+        
         # Telegram notifications
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
@@ -276,6 +283,36 @@ class SmartTrader:
         except Exception as e:
             print(f"   ❌ Error getting balance: {e}")
             return 0.0
+    
+    def get_total_balance(self):
+        """Get total balance including USDT + value of open positions"""
+        try:
+            usdt_balance = self.get_balance()
+            position_value = 0.0
+            
+            for pos in self.open_positions:
+                symbol = pos['symbol']
+                quantity = pos['quantity']
+                current_price = self.get_price(symbol)
+                if current_price:
+                    position_value += quantity * current_price
+            
+            return usdt_balance + position_value
+        except Exception as e:
+            print(f"   ❌ Error getting total balance: {e}")
+            return self.get_balance()  # Fallback to USDT only
+    
+    def check_circuit_breaker(self, current_balance):
+        """Kills the bot if the weekly loss limit is hit."""
+        if current_balance <= self.STOP_TRADING_LIMIT:
+            message = (f"🚨 CIRCUIT BREAKER TRIGGERED!\n"
+                       f"Current Balance: ${current_balance:.2f}\n"
+                       f"Weekly Limit: ${self.STOP_TRADING_LIMIT:.2f}\n"
+                       f"Trading disabled to protect capital.")
+            print(message)
+            self.send_telegram(message)
+            return False
+        return True
 
     def calculate_order_fee_usdt(self, order, symbol, fallback_price=None):
         """Estimate order fees in USDT from Binance fill commissions."""
@@ -1145,6 +1182,29 @@ class SmartTrader:
         finally:
             self.trade_lock = False
     
+    def place_sniper_order(self, symbol, target_price, quantity):
+        """Place a limit buy order at a specific target price"""
+        try:
+            # Get symbol precision
+            step_size, precision = self.get_symbol_precision(symbol)
+            quantity = round(quantity, precision)
+            
+            # Places a LIMIT order instead of a MARKET order
+            order = self.client.create_order(
+                symbol=symbol,
+                side=SIDE_BUY,
+                type=ORDER_TYPE_LIMIT,
+                timeInForce=TIME_IN_FORCE_GTC,  # Good 'Til Canceled
+                quantity=quantity,
+                price=str(target_price)  # Binance expects string for price
+            )
+            self.send_telegram(f"🎯 Sniper Trap Set: {symbol} Limit Buy at ${target_price}")
+            print(f"   🎯 Sniper order placed: {symbol} @ ${target_price}")
+            return order
+        except Exception as e:
+            print(f"   ❌ Error placing sniper order: {e}")
+            return None
+    
     def execute_sell(self, position, reason='SIGNAL', quantity=None):
         """Execute a sell order"""
         try:
@@ -1453,6 +1513,11 @@ class SmartTrader:
         
         while True:
             try:
+                # Check circuit breaker first
+                current_wallet = self.get_total_balance()
+                if not self.check_circuit_breaker(current_wallet):
+                    break  # This stops the bot completely
+                
                 # 1. Manage current money first (active defense)
                 self.manage_active_trades()
                 
