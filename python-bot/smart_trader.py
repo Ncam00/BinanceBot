@@ -976,6 +976,7 @@ class SmartTrader:
         ema_slow = self.calculate_ema(closes, 18)
         adx = self.calculate_adx(df)
         bb = self.calculate_bollinger(closes)
+        atr = self.calculate_atr(df)
         
         # V2: Market type
         market_type = self.get_market_type(adx['adx'])
@@ -1146,6 +1147,14 @@ class SmartTrader:
         if signal.get('clear_breakout_wait'):
             self.reset_breakout_state(symbol)
         
+        # ATR-based dynamic SL/TP for confirmed BUY signals
+        if signal['action'] == 'BUY':
+            dynamic_sl_price = price - (atr * 2.0)
+            max_sl_price = price * 0.95  # 5% disaster limit — never wider than this
+            signal['stop_loss'] = max(dynamic_sl_price, max_sl_price)
+            signal['take_profit'] = price * (1 + self.take_profit_percent / 100)
+            signal['atr'] = atr
+
         # Add metadata
         signal['market_type'] = market_type
         signal['price'] = price
@@ -1154,7 +1163,7 @@ class SmartTrader:
         signal['rsi'] = rsi
         signal['adx'] = adx['adx']
         signal['zone'] = zone
-        
+
         return signal
     
     # ════════════════════════════════════════════════════════════════════
