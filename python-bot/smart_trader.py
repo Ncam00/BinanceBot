@@ -177,10 +177,10 @@ class SmartTrader:
                     'realized_pnl': 0.0,
                     'runner_active': False,
                     'partial_taken': False,
+                    'be_active': False,
                     'timestamp': datetime.now(),
                     'signal': {}
                 }
-                
                 self.open_positions.append(position)
                 pnl = (current_price - entry_price) * amount
                 print(f"    Synced: {amount:.8f} {asset} @ entry ${entry_price:.2f}")
@@ -778,6 +778,14 @@ class SmartTrader:
         V2 Analysis: Location-based trading
         Only generates signals when price is at key levels
         """
+        # STEP 2: The "Soft Ceiling" check
+        # This stops NEW trades if you've hit the daily profit target,
+        # but keeps the bot alive for active trades to keep trailing.
+        if self.total_daily_profit >= self.daily_profit_target:
+            return {'action': 'HOLD', 'strength': 0, 'reason': 'Daily profit target reached - no new trade scans'}
+
+        # --- Your existing scanning logic below ---
+        print(f"🔍 Scanning {symbol}...")
         df = self.get_candles(symbol, '15m', 100)
         if df is None or len(df) < 50:
             return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
@@ -1106,6 +1114,7 @@ class SmartTrader:
                 'realized_pnl': 0.0,
                 'runner_active': False,
                 'partial_taken': False,
+                'be_active': False,
                 'timestamp': datetime.now(),
                 'signal': signal
             }
@@ -1258,7 +1267,11 @@ class SmartTrader:
             self.reset_daily()
             self.last_trade_time = None  # Reset cooldown too
             self.last_reset_date = today
-    
+
+    @property
+    def total_daily_profit(self):
+        return self.daily_profit
+
     def can_trade(self):
         """Check if we can make more trades today - HARD BLOCKS"""
         # ════════════════════════════════════════════════════════════════════
@@ -1392,38 +1405,32 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     def manage_active_trades(self):
         """Phase 2: Active defense and profit trailing"""
-        for pos in self.open_positions:
+        for pos in self.open_positions[:]:
             symbol = pos['symbol']
             current_price = self.get_price(symbol)
-            if not current_price: 
+            if not current_price:
                 continue
-            
+
             entry = pos['entry_price']
             current_sl = pos['stop_loss']
-            tp_target = pos['take_profit']
-            
-            # A. BREAK-EVEN (Lock the vault at +1%)
-            # If price hits 1% profit, move SL to entry so you can't lose money.
-            if current_price >= entry * (1 + self.break_even_profit_pct / 100):
-                if current_sl < entry:
-                    pos['stop_loss'] = entry
-                    print(f"   🛡️ {symbol} RISK REMOVED: Stop Loss moved to Break-Even @ ${entry:.4f}")
-            
-            # B. TRAILING TAKE PROFIT (The "9/10" move)
-            # If price is ABOVE our initial TP, start trailing it.
-            if current_price >= tp_target:
-                new_trail_sl = current_price * (1 - self.trailing_tp_distance / 100)
-                # Only move the stop UP, never down.
-                if new_trail_sl > current_sl:
-                    pos['stop_loss'] = new_trail_sl
-                    print(f"   📈 {symbol} TRAILING: Target hit, following price to ${new_trail_sl:.4f}")
-            
-            # C. DYNAMIC EXIT
-            # Check if current price has hit our (now moving) Stop Loss
+            profit_pct = (current_price - entry) / entry * 100
+
+            # 1. THE BREAK-EVEN SHIELD (at 1%)
+            if profit_pct >= 1.0 and not pos.get('be_active', False):
+                pos['stop_loss'] = entry
+                pos['be_active'] = True
+                print(f"   🛡️ {symbol} is Risk-Free! SL moved to Break-Even @ ${entry:.4f}")
+
+            # 2. THE TRAILING TAKE PROFIT (Starts at 2.5%)
+            if profit_pct >= 2.5:
+                new_trailing_stop = current_price * 0.995
+                if new_trailing_stop > current_sl:
+                    pos['stop_loss'] = new_trailing_stop
+                    print(f"   💰 {symbol} Trailing Stop moved up to ${new_trailing_stop:.4f}")
+
+            # 3. THE REVERSAL EXIT (Bullish to Bearish)
             if current_price <= pos['stop_loss']:
-                pnl = (current_price - entry) * pos['quantity']
-                print(f"\n   🚀 EXITING {symbol}: Price ${current_price:.4f} hit SL ${pos['stop_loss']:.4f}")
-                print(f"   💰 Realized PnL: ${pnl:.2f}")
+                print(f"\n   🚀 Trade closing {symbol}: price ${current_price:.4f} hit SL ${pos['stop_loss']:.4f}")
                 self.execute_sell(pos, 'ACTIVE_DEFENSE')
     
     # ════════════════════════════════════════════════════════════════════
