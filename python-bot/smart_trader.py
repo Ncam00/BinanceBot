@@ -51,6 +51,13 @@ class SmartTrader:
         self.stop_loss_percent = 1.5         # 1.5% stop loss
         self.take_profit_percent = 2.5       # 2.5% take profit (better R:R)
         
+        # ════════════════════════════════════════════════════════════════════
+        # PHASE 2: ACTIVE REFLEXES
+        # ════════════════════════════════════════════════════════════════════
+        self.trailing_tp_distance = 0.5      # Trail price by 0.5% once TP is hit
+        self.break_even_profit_pct = 1.0     # Move SL to entry at 1% profit
+        self.atr_multiplier = 2.0            # Standard safety buffer
+        
         # Location-based trading settings
         self.sr_lookback = 50                # Candles for S/R detection
         self.no_trade_zone_percent = 40      # Skip middle 40% of range
@@ -1381,6 +1388,45 @@ class SmartTrader:
                 continue
     
     # ════════════════════════════════════════════════════════════════════
+    # PHASE 2: ACTIVE TRADE MANAGEMENT
+    # ════════════════════════════════════════════════════════════════════
+    def manage_active_trades(self):
+        """Phase 2: Active defense and profit trailing"""
+        for pos in self.open_positions:
+            symbol = pos['symbol']
+            current_price = self.get_price(symbol)
+            if not current_price: 
+                continue
+            
+            entry = pos['entry_price']
+            current_sl = pos['stop_loss']
+            tp_target = pos['take_profit']
+            
+            # A. BREAK-EVEN (Lock the vault at +1%)
+            # If price hits 1% profit, move SL to entry so you can't lose money.
+            if current_price >= entry * (1 + self.break_even_profit_pct / 100):
+                if current_sl < entry:
+                    pos['stop_loss'] = entry
+                    print(f"   🛡️ {symbol} RISK REMOVED: Stop Loss moved to Break-Even @ ${entry:.4f}")
+            
+            # B. TRAILING TAKE PROFIT (The "9/10" move)
+            # If price is ABOVE our initial TP, start trailing it.
+            if current_price >= tp_target:
+                new_trail_sl = current_price * (1 - self.trailing_tp_distance / 100)
+                # Only move the stop UP, never down.
+                if new_trail_sl > current_sl:
+                    pos['stop_loss'] = new_trail_sl
+                    print(f"   📈 {symbol} TRAILING: Target hit, following price to ${new_trail_sl:.4f}")
+            
+            # C. DYNAMIC EXIT
+            # Check if current price has hit our (now moving) Stop Loss
+            if current_price <= pos['stop_loss']:
+                pnl = (current_price - entry) * pos['quantity']
+                print(f"\n   🚀 EXITING {symbol}: Price ${current_price:.4f} hit SL ${pos['stop_loss']:.4f}")
+                print(f"   💰 Realized PnL: ${pnl:.2f}")
+                self.execute_sell(pos, 'ACTIVE_DEFENSE')
+    
+    # ════════════════════════════════════════════════════════════════════
     # MAIN TRADING LOOP
     # ════════════════════════════════════════════════════════════════════
     def run(self):
@@ -1400,134 +1446,54 @@ class SmartTrader:
         
         while True:
             try:
-                # Loop heartbeat (for debugging restarts)
-                print(f"\r   ⏱️ Loop running... {int(time.time())}", end='', flush=True)
+                # 1. Manage current money first (active defense)
+                self.manage_active_trades()
                 
-                # Reset daily counters if new day
+                # 2. Check daily resets
                 self.check_daily_reset()
-
-                # Heartbeat every 6 hours
-                if not hasattr(self, 'last_heartbeat') or \
-                        (datetime.now() - self.last_heartbeat).seconds > 21600:
-                    balance = self.get_balance()
-                    session, _ = self.get_market_session()
-                    self.send_telegram(
-                        f"❤️ Bot Heartbeat\n"
-                        f"Balance: ${balance:.2f}\n"
-                        f"Session: {session.upper()}\n"
-                        f"Trades today: {self.daily_trades}/{self.max_trades_per_day}\n"
-                        f"Daily P&L: ${self.daily_profit:.2f}\n"
-                        f"Open positions: {len(self.open_positions)}"
-                    )
-                    self.last_heartbeat = datetime.now()
-
-                # Check open positions for SL/TP
-                self.check_positions()
                 
-                # ════════════════════════════════════════════════════════════════════
-                # 🔒 HARD GUARDS (FIRST) - Must pass ALL before any trading
-                # ════════════════════════════════════════════════════════════════════
-                
-                # GUARD 1: Open position check
-                if len(self.open_positions) >= self.max_positions:
-                    print(f"\r   🔒 Position open - waiting for exit (no new trades)", end='', flush=True)
-                    time.sleep(10)
-                    continue
-                
-                # GUARD 2: Daily trade limit
-                if self.daily_trades >= self.hard_max_trades:
-                    print(f"\n   🛑 GLOBAL LIMIT: {self.daily_trades} trades today - STOPPING")
-                    time.sleep(300)
-                    continue
-                
-                # GUARD 3: Cooldown check (recently traded)
-                if self.last_trade_time:
-                    time_since_trade = (datetime.now() - self.last_trade_time).total_seconds() / 60
-                    if time_since_trade < self.trade_cooldown_minutes:
-                        remaining = self.trade_cooldown_minutes - time_since_trade
-                        print(f"\r   ⏳ COOLDOWN: {remaining:.0f}min remaining", end='', flush=True)
-                        time.sleep(30)
-                        continue
-                
-                # GUARD 4: Profit/Loss limits (can_trade handles full logic)
-                can_trade_result, reason = self.can_trade()
-                
-                if not can_trade_result:
-                    # HARD STOP - These BREAK the loop entirely
-                    if "PROFIT LOCKED" in reason or "MAX LOSS" in reason or "CONSECUTIVE LOSSES" in reason or "WEEKLY LOSS LIMIT" in reason:
-                        print(f"\n\n   🛑 {reason}")
-                        print(f"   💤 TRADING STOPPED FOR TODAY - Bot will sleep until midnight")
-                        self.send_telegram(f"🛑 Trading stopped: {reason}")
-                        
-                        # Sleep until next day (true stop)
-                        while datetime.now().date() == self.last_reset_date:
-                            time.sleep(300)  # Check every 5 minutes
-                        continue  # New day, reset and continue
+                # 3. Look for new opportunities if we have room
+                if self.daily_trades < self.max_trades_per_day:
+                    can_trade_result, reason = self.can_trade()
                     
-                    # Other blocks - just wait
-                    print(f"\r   ⏸️ Trading paused: {reason}", end='', flush=True)
-                    time.sleep(30)
-                    continue
+                    if can_trade_result:
+                        for symbol in self.trading_pairs:
+                            # Skip if we already have position in this symbol
+                            if any(p['symbol'] == symbol for p in self.open_positions):
+                                continue
+                            
+                            # Re-check: One position max
+                            if len(self.open_positions) >= self.max_positions:
+                                break
+                            
+                            # BTC correlation filter for alts
+                            if symbol != 'BTCUSDT' and not self.btc_is_healthy():
+                                continue
+                            
+                            # Analyze for valid trade setup
+                            signal = self.analyze(symbol)
+                            
+                            # Check if valid trade setup
+                            session, settings = self.get_market_session()
+                            min_strength = settings['min_strength']
+                            
+                            if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
+                                # Final position check
+                                if len(self.open_positions) >= self.max_positions:
+                                    break
+                                
+                                # Place trade
+                                self.execute_buy(symbol, signal)
+                                break  # ONE TRADE ONLY
                 
-                # Get current session
-                session, settings = self.get_market_session()
-                min_strength = settings['min_strength']
-                session_max = settings['max_trades']
-                
-                # ════════════════════════════════════════════════════════════════════
-                # 🔍 THEN check strategy - Scan for valid setups
-                # ════════════════════════════════════════════════════════════════════
-                print(f"\n   📊 Scanning {len(self.trading_pairs)} pairs... [Session: {session.upper()} | Mode: {settings['mode']} | Trades: {self.daily_trades}/{session_max}]")
-                
-                for symbol in self.trading_pairs:
-                    # Skip if we already have position in this symbol
-                    if any(p['symbol'] == symbol for p in self.open_positions):
-                        continue
-                    
-                    # 🔒 Re-check: One position max
-                    if len(self.open_positions) >= self.max_positions:
-                        break
-
-                    # BTC correlation filter for alts
-                    if symbol != 'BTCUSDT' and not self.btc_is_healthy():
-                        print(f"   ⚠️ {symbol} skipped - BTC filter active")
-                        continue
-                    
-                    # Analyze for valid trade setup
-                    signal = self.analyze(symbol)
-                    
-                    # Log interesting signals
-                    if signal['action'] != 'HOLD' or any(x in signal.get('reason', '') for x in ['HARD BLOCK', 'WAITING', 'NO-TRADE']):
-                        market_type = signal.get('market_type', 'N/A')
-                        zone = signal.get('zone', '?')
-                        print(f"   {symbol}: {signal['action']} ({market_type}|{zone}) - {signal['reason']}")
-                    
-                    # Check if valid trade setup
-                    if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
-                        # Final position check
-                        if len(self.open_positions) >= self.max_positions:
-                            print(f"   🔒 Already have position - BLOCKED")
-                            break
-                        
-                        # ════════════════════════════════════════════════════════════
-                        # 💰 Place trade
-                        # State update (open_position, last_trade_time, trades_today)
-                        # happens IMMEDIATELY inside execute_buy()
-                        # ════════════════════════════════════════════════════════════
-                        self.execute_buy(symbol, signal)
-                        break  # ONE TRADE ONLY
-                    
-                    time.sleep(0.5)
-                
-                print(f"   ✅ Cycle complete. Waiting 10s...")
-                time.sleep(10)
+                time.sleep(30)  # Check every 30 seconds
                 
             except KeyboardInterrupt:
                 print("\n\n   🛑 Stopping bot...")
                 break
             except Exception as e:
                 print(f"\n   ❌ Error: {e}")
-                time.sleep(10)
+                time.sleep(30)
         
         # Final summary
         print(f"\n   📊 Session Summary:")
