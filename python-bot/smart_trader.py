@@ -1687,34 +1687,46 @@ class SmartTrader:
 
         return current_sl  # Keep existing Stop Loss
 
+    def close_position(self, position):
+        """Alias for execute_sell — closes a position at market."""
+        self.execute_sell(position)
+
+    def manage_active_trade(self, position, current_price):
+        """Per-position active defense: break-even, trailing TP, and exit."""
+        entry = position['entry_price']
+        last_sl = position['stop_loss']
+
+        # 1. BREAK-EVEN PROTECTION
+        # If we are up break_even_trigger%, move SL to entry. Trade becomes risk-free.
+        if current_price >= entry * (1 + self.break_even_trigger / 100):
+            if last_sl < entry:
+                position['stop_loss'] = entry
+                print(f"🛡️ {position['symbol']} at Break-Even. Capital is safe.")
+
+        # 2. TRAILING TAKE PROFIT
+        # If we hit the target, don't sell — trail it instead.
+        if self.use_trailing_tp:
+            target_price = entry * (1 + self.take_profit_percent / 100)
+            if current_price >= target_price:
+                # New SL follows trail_percent% behind current price
+                new_trail_sl = current_price * (1 - self.trail_percent / 100)
+                # Only move SL up, never down
+                if new_trail_sl > position['stop_loss']:
+                    position['stop_loss'] = new_trail_sl
+                    print(f"📈 {position['symbol']} Trailing Stop updated: {new_trail_sl:.4f}")
+
+        # 3. FINAL EXIT
+        if current_price <= position['stop_loss']:
+            print(f"🚀 Closing {position['symbol']} at {current_price}")
+            self.close_position(position)
+
     def manage_open_positions(self):
-        """Phase 2: Active defense for open trades"""
+        """Phase 2: Active defense — iterates all open positions."""
         for pos in self.open_positions:
-            symbol = pos['symbol']
-            current_price = self.get_price(symbol)
-            if not current_price: continue
-
-            entry = pos['entry_price']
-            current_sl = pos['stop_loss']
-
-            # A. BREAK-EVEN (Lock the vault at +break_even_trigger%)
-            if current_price >= entry * (1 + self.break_even_trigger / 100) and current_sl < entry:
-                pos['stop_loss'] = entry
-                print(f"🛡️ {symbol} Risk Removed: SL moved to Break-Even.")
-
-            # B. TRAILING TAKE PROFIT (Follow the pump)
-            # Activates at 2.5%, trails by trail_percent
-            if self.use_trailing_tp:
-                trail_activation = entry * 1.025
-                if current_price >= trail_activation:
-                    new_trail = current_price * (1 - self.trail_percent / 100)
-                    if new_trail > current_sl:
-                        pos['stop_loss'] = new_trail
-                        print(f"📈 {symbol} Trailing: New SL at {new_trail:.2f}")
-
-            # C. EXIT CHECK
-            if current_price <= pos['stop_loss']:
-                self.execute_sell(pos)
+            current_price = self.get_price(pos['symbol'])
+            if not current_price:
+                continue
+            self.manage_active_trade(pos, current_price)
     
     # ════════════════════════════════════════════════════════════════════
     # MAIN TRADING LOOP
