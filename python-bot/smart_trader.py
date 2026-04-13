@@ -1169,28 +1169,19 @@ class SmartTrader:
             print(f"   Error fetching klines for {symbol}: {e}")
             return None
 
-    def calculate_atr(self, klines, period=14):
-        """
-        Pure-Python 14-period ATR from raw klines.
-        klines format: [time, open, high, low, close, volume, ...]
-        Useful as a lightweight fallback that doesn't require pandas_ta.
-        """
-        true_ranges = []
+    def calculate_atr(self, df, period=14):
+        """Calculate Average True Range for dynamic stops using a candle DataFrame."""
+        high = df['high']
+        low = df['low']
+        close = df['close']
 
-        for i in range(1, len(klines)):
-            high = float(klines[i][2])
-            low = float(klines[i][3])
-            prev_close = float(klines[i - 1][4])
+        tr1 = high - low
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
 
-            tr1 = high - low
-            tr2 = abs(high - prev_close)
-            tr3 = abs(low - prev_close)
-
-            true_ranges.append(max(tr1, tr2, tr3))
-
-        if len(true_ranges) >= period:
-            return sum(true_ranges[-period:]) / period
-        return 0
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        return atr.iloc[-1]
 
     def get_atr_values(self, symbol, interval='1m'):
         """Fetches klines and calculates the ATR for dynamic stops."""
@@ -1311,10 +1302,10 @@ class SmartTrader:
             price = signal['price']
             entry_time = datetime.now()
             
-            # Fetch clean closed candles for ATR calculation
-            kline_data = self.get_klines_for_atr(symbol, interval='1h')
-            if kline_data:
-                atr = self.calculate_atr(kline_data)
+            # Fetch candle DataFrame for ATR calculation
+            atr_df = self.get_candles(symbol, '1h', 50)
+            if atr_df is not None and len(atr_df) >= 15:
+                atr = self.calculate_atr(atr_df)
             else:
                 atr = self.get_atr_values(symbol)  # Fallback to pandas_ta version
 
