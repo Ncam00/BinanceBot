@@ -57,7 +57,10 @@ class SmartTrader:
         self.portion_size = 100              # $100 NZD fixed per trade (1/8th of $800)
         self.stop_loss_percent = 1.5         # 1.5% stop loss
         self.take_profit_percent = 2.5       # 2.5% take profit (better R:R)
-        
+        self.use_trailing_tp = True          # Enable trailing take profit
+        self.trail_percent = 0.5             # Distance to follow the price (%)
+        self.break_even_trigger = 1.0        # Move SL to entry at 1% profit
+
         # Location-based trading settings
         self.sr_lookback = 50                # Candles for S/R detection
         self.no_trade_zone_percent = 40      # Skip middle 40% of range
@@ -1694,19 +1697,20 @@ class SmartTrader:
             entry = pos['entry_price']
             current_sl = pos['stop_loss']
 
-            # A. BREAK-EVEN (Lock the vault at +1%)
-            if current_price >= entry * 1.01 and current_sl < entry:
+            # A. BREAK-EVEN (Lock the vault at +break_even_trigger%)
+            if current_price >= entry * (1 + self.break_even_trigger / 100) and current_sl < entry:
                 pos['stop_loss'] = entry
                 print(f"🛡️ {symbol} Risk Removed: SL moved to Break-Even.")
 
             # B. TRAILING TAKE PROFIT (Follow the pump)
-            # If price is up 2.5%, trail it by 0.5%
-            trail_activation = entry * 1.025
-            if current_price >= trail_activation:
-                new_trail = current_price * 0.995  # 0.5% trail
-                if new_trail > current_sl:
-                    pos['stop_loss'] = new_trail
-                    print(f"📈 {symbol} Trailing: New SL at {new_trail:.2f}")
+            # Activates at 2.5%, trails by trail_percent
+            if self.use_trailing_tp:
+                trail_activation = entry * 1.025
+                if current_price >= trail_activation:
+                    new_trail = current_price * (1 - self.trail_percent / 100)
+                    if new_trail > current_sl:
+                        pos['stop_loss'] = new_trail
+                        print(f"📈 {symbol} Trailing: New SL at {new_trail:.2f}")
 
             # C. EXIT CHECK
             if current_price <= pos['stop_loss']:
