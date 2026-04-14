@@ -40,7 +40,7 @@ class SmartTrader:
         # 🔒 STRICT CONTROL: LIMITED COIN LIST
         # ════════════════════════════════════════════════════════════════════
         self.trading_pairs = ['ETHUSDT' , 'BTCUSDT', 'SOLUSDT', 'AVAXUSDT']
-        self.max_positions = 3
+        self.max_positions = 1  # Quality over quantity
         
         # ════════════════════════════════════════════════════════════════════
         # V2 CORE SETTINGS
@@ -129,6 +129,11 @@ class SmartTrader:
         # Telegram notifications
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        
+        # SETTINGS
+        self.DAILY_GOAL = 12.00  # Hard stop at $12 USD
+        self.current_daily_profit = 0.0
+        self.last_reset_date = datetime.now().date()
         
         print("🚀 Smart Trader V2 Initialized")
         print(f"   Max trades/day: {self.max_trades_per_day}")
@@ -1228,21 +1233,23 @@ class SmartTrader:
             return None
     
     def update_dynamic_zones(self):
-        """Update sniper zones based on recent market data"""
-        print("   📊 Updating dynamic sniper zones...")
-        zone_mapping = {
-            'BTCUSDT': 'BTC',
-            'ETHUSDT': 'ETH',
-            'SOLUSDT': 'SOL',
-            'AVAXUSDT': 'AVAX'
-        }
-        
-        for symbol, key in zone_mapping.items():
-            if symbol in self.trading_pairs:
-                dynamic_price = self.calculate_dynamic_sniper(symbol)
-                if dynamic_price:
-                    self.SNIPER_ZONES[symbol] = dynamic_price
-                    print(f"   🎯 {symbol} zone updated: ${dynamic_price}")
+        """PHASE 9.5: Automatically recalculates entry traps based on 24h volatility"""
+        for symbol in self.trading_pairs:
+            try:
+                # Get the last 24 hours of 1-hour candles
+                df = self.get_candles(symbol, interval='1h', limit=24)
+                if df is not None:
+                    low_24h = df['low'].min()
+                    # 9.5 Strategy: Entry is 1.2% below the 24h support floor
+                    self.SNIPER_ZONES[symbol] = round(low_24h * 0.988, 2)
+
+                    # Optional: Update Resistance for the TP target
+                    high_24h = df['high'].max()
+                    if symbol not in self.symbol_state:
+                        self.symbol_state[symbol] = {}
+                    self.symbol_state[symbol]['resistance'] = high_24h
+            except Exception as e:
+                print(f"⚠️ Sniper Update Failed for {symbol}: {e}")
     
     def place_sniper_order(self, symbol, target_price, quantity):
         """Place a limit buy order at a specific target price"""
@@ -1395,58 +1402,34 @@ class SmartTrader:
         return self.daily_profit
 
     def can_trade(self):
-        """Check if we can make more trades today - HARD BLOCKS"""
-        # ════════════════════════════════════════════════════════════════════
-        # HARD BLOCK 0: Weekly loss guard
-        # ════════════════════════════════════════════════════════════════════
-        if self.weekly_pnl <= -20:
-            return False, f"🛑 WEEKLY LOSS LIMIT HIT: ${self.weekly_pnl:.2f} - resuming next week"
+        """The 9.5 Permission Gate: Checks goals and limits before any trade."""
+        today = datetime.now().date()
 
-        # ════════════════════════════════════════════════════════════════════
-        # HARD BLOCK 1: Absolute trade limit (CANNOT BE BYPASSED)
-        # ════════════════════════════════════════════════════════════════════
-        if self.daily_trades >= self.hard_max_trades:
-            return False, f"🛑 HARD LIMIT: {self.daily_trades}/{self.hard_max_trades} trades (BLOCKED)"
-        
-        # ════════════════════════════════════════════════════════════════════
-        # HARD BLOCK 2: Max daily LOSS protection (prevents revenge trading)
-        # ════════════════════════════════════════════════════════════════════
-        if self.daily_loss >= self.max_daily_loss or self.daily_loss_ratio >= self.max_daily_loss_ratio:
-            return False, f"🔴 MAX LOSS HIT: -${self.daily_loss:.2f} ({self.daily_loss_ratio * 100:.2f}% daily loss)"
+        # 1. Midnight Reset
+        if today > self.last_reset_date:
+            print(f"🌅 New Day: {today}. Resetting profit/loss trackers.")
+            self.current_daily_profit = 0.0
+            self.daily_trades = 0
+            self.last_reset_date = today
 
-        # ════════════════════════════════════════════════════════════════════
-        # HARD BLOCK 2B: Consecutive loss protection
-        # ════════════════════════════════════════════════════════════════════
-        if self.consecutive_losses >= self.max_consecutive_losses:
-            return False, f"🛑 CONSECUTIVE LOSSES HIT: {self.consecutive_losses}/{self.max_consecutive_losses}"
-        
-        # ════════════════════════════════════════════════════════════════════
-        # HARD BLOCK 3: Cooldown between trades (30 min)
-        # ════════════════════════════════════════════════════════════════════
-        if self.last_trade_time:
-            time_since_trade = (datetime.now() - self.last_trade_time).total_seconds() / 60
-            if time_since_trade < self.trade_cooldown_minutes:
-                remaining = self.trade_cooldown_minutes - time_since_trade
-                return False, f"⏳ COOLDOWN: {remaining:.0f}min remaining"
-        
-        # ════════════════════════════════════════════════════════════════════
-        # HARD BLOCK 4: Daily profit target reached (session-aware)
-        # ════════════════════════════════════════════════════════════════════
-        session, settings = self.get_market_session()
-        
-        # Session-aware profit lock: Lower target during low-volatility Asia
-        session_target = 3.0 if session == 'asia' else self.daily_profit_target
-        
-        if self.daily_profit >= session_target:
-            return False, f"🎯 PROFIT LOCKED: ${self.daily_profit:.2f} >= ${session_target} ({session.upper()} target hit)"
-        
-        # Session-specific trade limit
-        session_max = settings['max_trades']
-        if self.daily_trades >= session_max:
-            return False, f"Session limit ({self.daily_trades}/{session_max} for {session.upper()})"
-        
-        return True, "OK"
+        # 2. Check Daily Profit Goal ($12)
+        if self.current_daily_profit >= self.DAILY_GOAL:
+            print(f"✅ GOAL MET: Daily Profit is ${self.current_daily_profit:.2f}. Standing down.")
+            return False
+
+        # 3. Check Hard Loss Limit ($10)
+        if self.daily_loss >= self.max_daily_loss:
+            print(f"🚨 STOP LOSS HIT: Daily Loss is ${self.daily_loss:.2f}. Protecting capital.")
+            return False
+
+        # 4. Check Trade Count (Max 5)
+        if self.daily_trades >= self.max_trades_per_day:
+            print(f"🛑 MAX TRADES: Hit {self.max_trades_per_day} trades today. Stopping.")
+            return False
+
+        return True
     
+
     # ════════════════════════════════════════════════════════════════════
     # POSITION MANAGEMENT
     # ════════════════════════════════════════════════════════════════════
