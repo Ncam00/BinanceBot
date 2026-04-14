@@ -1414,20 +1414,17 @@ class SmartTrader:
 
         # 2. Check Daily Profit Goal ($12)
         if self.current_daily_profit >= self.DAILY_GOAL:
-            print(f"✅ GOAL MET: Daily Profit is ${self.current_daily_profit:.2f}. Standing down.")
-            return False
+            return False, "Goal Met"  # Returns TWO things
 
         # 3. Check Hard Loss Limit ($10)
         if self.daily_loss >= self.max_daily_loss:
-            print(f"🚨 STOP LOSS HIT: Daily Loss is ${self.daily_loss:.2f}. Protecting capital.")
-            return False
+            return False, "Daily Loss Limit Hit"
 
         # 4. Check Trade Count (Max 5)
         if self.daily_trades >= self.max_trades_per_day:
-            print(f"🛑 MAX TRADES: Hit {self.max_trades_per_day} trades today. Stopping.")
-            return False
+            return False, "Max Trades Hit"
 
-        return True
+        return True, "Ready"  # Returns TWO things
     
 
     # ════════════════════════════════════════════════════════════════════
