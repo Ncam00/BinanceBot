@@ -141,6 +141,9 @@ class SmartTrader:
 
         # Sync existing holdings into bot state on startup
         self.sync_existing_positions()
+        
+        # Update dynamic sniper zones based on current market data
+        self.update_dynamic_zones()
     
     def sync_existing_positions(self):
         """Import existing holdings into bot management on startup"""
@@ -1199,6 +1202,49 @@ class SmartTrader:
         finally:
             self.trade_lock = False
     
+    def calculate_dynamic_sniper(self, symbol):
+        """Calculate dynamic entry point based on 24h market lows"""
+        try:
+            # 1. Fetch the last 24 hours of 1H candles
+            bars = self.get_candles(symbol, '1h', 24)
+            if bars is None or len(bars) < 24:
+                return None
+            
+            lows = bars['low'].values
+            current_price = bars['close'].iloc[-1]
+            
+            # 2. Find the 'Floor' (The lowest wick in 24 hours)
+            market_floor = min(lows)
+            
+            # 3. Set the 'Trap' (1.2% below the floor to catch the shakeout)
+            dynamic_entry = market_floor * 0.988
+            
+            # 4. Safety Guard: If market is pumping, move entry to 2% below current price
+            if dynamic_entry < (current_price * 0.95):
+                dynamic_entry = current_price * 0.98
+            
+            return round(dynamic_entry, 8)  # Round to avoid precision issues
+        except Exception as e:
+            print(f"   ❌ Error calculating dynamic sniper for {symbol}: {e}")
+            return None
+    
+    def update_dynamic_zones(self):
+        """Update sniper zones based on recent market data"""
+        print("   📊 Updating dynamic sniper zones...")
+        zone_mapping = {
+            'BTCUSDT': 'BTC',
+            'ETHUSDT': 'ETH',
+            'SOLUSDT': 'SOL',
+            'AVAXUSDT': 'AVAX'
+        }
+        
+        for symbol, key in zone_mapping.items():
+            if symbol in self.trading_pairs:
+                dynamic_price = self.calculate_dynamic_sniper(symbol)
+                if dynamic_price:
+                    self.SNIPER_ZONES[symbol] = dynamic_price
+                    print(f"   🎯 {symbol} zone updated: ${dynamic_price}")
+    
     def place_sniper_order(self, symbol, target_price, quantity):
         """Place a limit buy order at a specific target price"""
         try:
@@ -1594,6 +1640,12 @@ class SmartTrader:
         """9.5 Elite Sniper Logic"""
         current_balance = self.get_total_balance()
         
+        # Periodically update dynamic zones (every 6 hours)
+        if not hasattr(self, 'last_zone_update') or \
+           (datetime.now() - self.last_zone_update).total_seconds() > 21600:
+            self.update_dynamic_zones()
+            self.last_zone_update = datetime.now()
+        
         # 1. SHIELD: The Anti-Zero Check
         if current_balance <= (self.INITIAL_DEPOSIT * (1 - self.WEEKLY_SAFETY_NET)):
             self.kill_all_trades("5% Weekly Loss Limit Hit. Protecting capital.")
@@ -1604,7 +1656,7 @@ class SmartTrader:
             print("   🎯 Daily Goal Achieved. See you tomorrow!")
             return
 
-        # 3. SPEAR: Place the Sniper Traps
+        # 3. SPEAR: Place the Sniper Traps at dynamic zones
         for coin, price in self.SNIPER_ZONES.items():
             if not self.has_open_order(coin):
                 # Calculate position size
