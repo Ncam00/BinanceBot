@@ -46,7 +46,7 @@ class SmartTrader:
         # V2 CORE SETTINGS
         # ════════════════════════════════════════════════════════════════════
         self.max_trades_per_day = 5         # Only 5 trades max
-        self.daily_profit_target = 6.0       # Stop at $5 profit
+        self.daily_profit_target = 12.00     # The "Stop Trading" Goal
         self.position_size_percent = 12      # 12% per trade
         self.stop_loss_percent = 1.5         # 1.5% stop loss
         self.take_profit_percent = 2.5       # 2.5% take profit (better R:R)
@@ -54,7 +54,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # PHASE 2: ACTIVE REFLEXES
         # ════════════════════════════════════════════════════════════════════
-        self.trailing_tp_distance = 0.5      # Trail price by 0.5% once TP is hit
+        self.trailing_tp_distance = 0.005    # 0.5% Trail to catch the "Even More" profit
         self.break_even_profit_pct = 1.0     # Move SL to entry at 1% profit
         self.atr_multiplier = 2.0            # Standard safety buffer
         
@@ -111,12 +111,11 @@ class SmartTrader:
         self.STOP_TRADING_LIMIT = self.STARTING_BALANCE * (1 - self.MAX_LOSS_PERCENT)  # $444.93
         
         # ════════════════════════════════════════════════════════════════════
-        # 9.5 ELITE SETTINGS
+        # 9.5 ELITE EXECUTION SETTINGS
         # ════════════════════════════════════════════════════════════════════
-        self.INITIAL_DEPOSIT = 468.35
-        self.WEEKLY_SAFETY_NET = 0.05       # 5% Hard Stop ($444.93)
-        self.DAILY_PROFIT_GOAL = 12.00      # Target: $8 - $12
-        self.TRAILING_STOP = 0.005          # 0.5% to lock in wins
+        self.daily_profit_target = 12.00     # The "Stop Trading" Goal
+        self.max_trades_per_day = 5          # Quality over Quantity
+        self.trailing_tp_distance = 0.005    # 0.5% Trail to catch the "Even More" profit
         
         # --- THE CORE FOUR SNIPER TARGETS ---
         # These are the "Wick Zones" based on current 4H Support
