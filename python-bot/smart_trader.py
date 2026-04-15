@@ -1296,6 +1296,31 @@ class SmartTrader:
             # Fallback to a standard market sell if trailing fails
             return self.client.order_market_sell(symbol=symbol, quantity=quantity)
 
+    def place_trailing_sniper_exit(self, symbol, quantity, delta_bips=100):
+        """
+        Trailing sniper exit: follows price up and sells on a configurable drop.
+        delta_bips: 100 = 1% trailing drop. Protects breakout profits.
+        """
+        try:
+            step_size, precision = self.get_symbol_precision(symbol)
+            quantity = round(quantity, precision)
+
+            order = self.client.create_order(
+                symbol=symbol,
+                side='SELL',
+                type='STOP_LOSS_LIMIT',
+                quantity=quantity,
+                trailingDelta=delta_bips,
+                price='0',
+                timeInForce='GTC'
+            )
+            print(f"   ✅ Trailing Sniper Exit set for {symbol} at {delta_bips} BIPS")
+            self.send_telegram(f"🎯 Trailing Sniper Exit: {symbol} at {delta_bips} BIPS (1%)")
+            return order
+        except Exception as e:
+            print(f"   ❌ Trailing Sniper Exit failed: {e}")
+            return None
+
     def execute_95_dynamic_entry(self, symbol, side, quantity):
         """
         9.5 ELITE EXECUTION: Enters the trade and immediately
