@@ -45,9 +45,9 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # V2 CORE SETTINGS
         # ════════════════════════════════════════════════════════════════════
-        self.max_trades_per_day = 5         # Only 5 trades max
+        self.max_trades_per_day = 8         # Increased from 5 for more scalp opportunities
         self.daily_profit_target = 12.00     # The "Stop Trading" Goal
-        self.position_size_percent = 12      # 12% per trade
+        self.position_size_percent = 18      # Boosted from 12% to reach $15 goal faster
         self.stop_loss_percent = 1.5         # 1.5% stop loss
         self.take_profit_percent = 2.5       # 2.5% take profit (better R:R)
         
@@ -130,8 +130,9 @@ class SmartTrader:
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         
-        # SETTINGS
-        self.DAILY_GOAL = 12.00  # Hard stop at $12 USD
+        # 9.5 DYNAMIC GOAL SYNC
+        self.DAILY_GOAL = 15.00              # The high-end target
+        self.DAILY_MIN_TARGET = 12.00        # The "Satisfaction" floor
         self.current_daily_profit = 0.0
         self.last_reset_date = datetime.now().date()
         
@@ -899,7 +900,7 @@ class SmartTrader:
                 'zone': 'breakout_wait'
             }
 
-        if state['waiting_for_retest']:
+        if state.get('waiting_for_retest', False):
             state['retest_candles'] += 1
             if state['retest_candles'] > 1:
                 pass  # Only alert on first retest candle
@@ -1233,23 +1234,16 @@ class SmartTrader:
             return None
     
     def update_dynamic_zones(self):
-        """PHASE 9.5: Automatically recalculates entry traps based on 24h volatility"""
+        """Automatically updates Sniper Zones to current 4H Support"""
         for symbol in self.trading_pairs:
             try:
-                # Get the last 24 hours of 1-hour candles
-                df = self.get_candles(symbol, interval='1h', limit=24)
+                df = self.get_candles(symbol, '4h', 20)
                 if df is not None:
-                    low_24h = df['low'].min()
-                    # 9.5 Strategy: Entry is 1.2% below the 24h support floor
-                    self.SNIPER_ZONES[symbol] = round(low_24h * 0.988, 2)
-
-                    # Optional: Update Resistance for the TP target
-                    high_24h = df['high'].max()
-                    if symbol not in self.symbol_state:
-                        self.symbol_state[symbol] = {}
-                    self.symbol_state[symbol]['resistance'] = high_24h
+                    # Set sniper entry at the lowest wick of the last 20 4H candles
+                    self.SNIPER_ZONES[symbol] = df['low'].min()
+                    print(f"   🎯 Dynamic Sniper Set: {symbol} @ {self.SNIPER_ZONES[symbol]}")
             except Exception as e:
-                print(f"⚠️ Sniper Update Failed for {symbol}: {e}")
+                print(f"   ⚠️ Sniper Update Failed for {symbol}: {e}")
     
     def place_sniper_order(self, symbol, target_price, quantity):
         """Place a limit buy order at a specific target price"""
@@ -1274,6 +1268,70 @@ class SmartTrader:
             print(f"   ❌ Error placing sniper order: {e}")
             return None
     
+    def place_trailing_take_profit(self, symbol, quantity, side='SELL'):
+        """
+        The "Secret Sauce" for the $18 goal.
+        Follows the price up and only sells if it drops 0.5% from the peak.
+        """
+        try:
+            step_size, precision = self.get_symbol_precision(symbol)
+            quantity = round(quantity, precision)
+
+            # 50 BIPS = 0.5% (Your trailing_tp_distance)
+            delta_bips = int(self.trailing_tp_distance * 10000)
+
+            # Use STOP_LOSS (Market) for Spot Trailing to ensure execution
+            order = self.client.create_order(
+                symbol=symbol,
+                side=side,
+                type='STOP_LOSS',
+                quantity=quantity,
+                trailingDelta=delta_bips
+            )
+            print(f"   ✅ Trailing Profit Lock active for {symbol} at {delta_bips} BIPS")
+            self.send_telegram(f"🔒 Trailing TP set for {symbol} at {delta_bips} BIPS")
+            return order
+        except Exception as e:
+            print(f"   ❌ Trailing Order failed: {e}")
+            # Fallback to a standard market sell if trailing fails
+            return self.client.order_market_sell(symbol=symbol, quantity=quantity)
+
+    def execute_95_dynamic_entry(self, symbol, side, quantity):
+        """
+        9.5 ELITE EXECUTION: Enters the trade and immediately
+        sets a Trailing Stop to capture the $12-$18 range.
+        """
+        try:
+            step_size, precision = self.get_symbol_precision(symbol)
+            quantity = round(quantity, precision)
+
+            # 1. Market Buy Entry
+            order = self.client.create_order(
+                symbol=symbol,
+                side=side,
+                type=ORDER_TYPE_MARKET,
+                quantity=quantity
+            )
+
+            # 2. Calculate the Trailing Delta (0.5% = 50 BIPS)
+            delta_bips = int(self.trailing_tp_distance * 10000)
+
+            # 3. Immediate Trailing Stop Activation
+            self.client.create_order(
+                symbol=symbol,
+                side=SIDE_SELL if side == SIDE_BUY else SIDE_BUY,
+                type='STOP_LOSS',
+                quantity=quantity,
+                trailingDelta=delta_bips
+            )
+
+            self.send_telegram(f"🎯 <b>9.5 Sniper Active:</b> {symbol}\n"
+                               f"Trailing Profit Lock: {self.trailing_tp_distance*100}%")
+            return order
+        except Exception as e:
+            print(f"   ❌ Execution Error: {e}")
+            return None
+
     def execute_sell(self, position, reason='SIGNAL', quantity=None):
         """Execute a sell order"""
         try:
@@ -1506,7 +1564,7 @@ class SmartTrader:
     # PHASE 2: ACTIVE TRADE MANAGEMENT
     # ════════════════════════════════════════════════════════════════════
     def manage_active_trades(self):
-        """Phase 2: Active defense and profit trailing"""
+        """Phase 2: Active defense and profit trailing (9.5 Protocol)"""
         for pos in self.open_positions[:]:
             symbol = pos['symbol']
             current_price = self.get_price(symbol)
@@ -1514,7 +1572,6 @@ class SmartTrader:
                 continue
 
             entry = pos['entry_price']
-            current_sl = pos['stop_loss']
             profit_pct = (current_price - entry) / entry * 100
 
             # 1. THE BREAK-EVEN SHIELD (at 1%)
@@ -1523,18 +1580,84 @@ class SmartTrader:
                 pos['be_active'] = True
                 print(f"   🛡️ {symbol} is Risk-Free! SL moved to Break-Even @ ${entry:.4f}")
 
-            # 2. THE TRAILING TAKE PROFIT (Starts at 2.5%)
-            if profit_pct >= 2.5:
-                new_trailing_stop = current_price * 0.995
-                if new_trailing_stop > current_sl:
-                    pos['stop_loss'] = new_trailing_stop
-                    print(f"   💰 {symbol} Trailing Stop moved up to ${new_trailing_stop:.4f}")
+            # 2. Track the high water mark
+            if 'highest_price' not in pos:
+                pos['highest_price'] = entry
+            if current_price > pos['highest_price']:
+                pos['highest_price'] = current_price
 
-            # 3. THE REVERSAL EXIT (Bullish to Bearish)
+            # 3. 9.5 TRAILING TAKE PROFIT (Trigger: 2.5% | Callback: 0.5%)
+            should_sell, new_high = self.apply_trailing_stop(
+                current_price,
+                entry,
+                pos['highest_price']
+            )
+            pos['highest_price'] = new_high
+
+            if should_sell:
+                print(f"   🎯 TTP Triggered for {symbol}! Closing for profit.")
+                self.execute_sell(pos, 'TRAILING_TP')
+                continue
+
+            # 4. THE REVERSAL EXIT (price hit stop loss)
             if current_price <= pos['stop_loss']:
                 print(f"\n   🚀 Trade closing {symbol}: price ${current_price:.4f} hit SL ${pos['stop_loss']:.4f}")
                 self.execute_sell(pos, 'ACTIVE_DEFENSE')
-    
+
+    def manage_open_trades(self):
+        """9.5 Protocol: Manage open positions with break-even, trailing TP, and hard stop."""
+        for pos in self.open_positions[:]:
+            symbol = pos['symbol']
+            current_price = self.get_price(symbol)
+            if not current_price:
+                continue
+
+            # Calculate current profit %
+            profit_pct = (current_price - pos['entry_price']) / pos['entry_price'] * 100
+
+            # 1. BREAK-EVEN SHIELD
+            # Move SL to entry at 1.0% profit (per your settings)
+            if profit_pct >= self.break_even_profit_pct and not pos.get('be_active', False):
+                pos['stop_loss'] = pos['entry_price']
+                pos['be_active'] = True
+                print(f"   🛡️ {symbol} is now RISK-FREE (SL moved to Entry)")
+
+            # 2. UPDATE HIGH WATER MARK (For Trailing)
+            if current_price > pos.get('highest_price', 0):
+                pos['highest_price'] = current_price
+
+            # 3. TRAILING TAKE-PROFIT (The 2% Weekly Growth Engine)
+            if profit_pct >= self.take_profit_percent:
+                # If price drops 0.5% from its peak, SELL
+                callback_price = pos['highest_price'] * (1 - self.trailing_tp_distance)
+                if current_price <= callback_price:
+                    print(f"   🎯 TTP TRIGGERED: Closing {symbol} at {profit_pct:.2f}%")
+                    self.execute_sell(pos, 'TRAILING_TP')
+                    continue
+
+            # 4. HARD STOP LOSS
+            elif current_price <= pos['stop_loss']:
+                print(f"   🚨 STOP LOSS: Closing {symbol} at ${current_price:.4f}")
+                self.execute_sell(pos, 'STOP_LOSS')
+
+    def manage_exit_logic(self, position, current_price):
+        """9.5 Exit Strategy: Break-even shield, partial sell, and trailing runner."""
+        entry = position['entry_price']
+        profit_pct = (current_price - entry) / entry * 100
+
+        # STEP 1: At 1% profit, move Stop Loss to Break Even (Safe Trade)
+        if profit_pct >= 1.0 and not position.get('be_active', False):
+            position['stop_loss'] = entry
+            position['be_active'] = True
+
+        # STEP 2: At 2.5% profit, sell HALF (Locks in the first $5-$7)
+        if profit_pct >= 2.5 and not position.get('partial_taken', False):
+            partial_qty = position['original_quantity'] * 0.5
+            self.execute_sell(position, 'PARTIAL_TAKE_PROFIT', quantity=partial_qty)
+            position['partial_taken'] = True
+            # STEP 3: Let the rest trail for the $15 goal
+            position['stop_loss'] = entry * 1.015
+
     # ════════════════════════════════════════════════════════════════════
     # MAIN TRADING LOOP
     # ════════════════════════════════════════════════════════════════════
@@ -1656,6 +1779,42 @@ class SmartTrader:
         except:
             return False
     
+    def is_trade_allowed_by_location(self, symbol):
+        """Check if symbol is in a tradeable zone (not in the 40% chop middle)."""
+        price = self.get_price(symbol)
+        df = self.get_candles(symbol, '1h', 50)
+        if not price or df is None or len(df) < 10:
+            return False
+        sr = self.calculate_support_resistance(df)
+        zone = self.get_trade_zone(price, sr['support'], sr['resistance'])
+        if zone == 'middle':
+            print(f"   🛑 {symbol} in No-Trade Zone (40% Chop). Skipping.")
+            return False
+        return True
+
+    def check_breakout_velocity(self, symbol, interval='4h', limit=20, threshold=2.0):
+        """Check if current price movement exceeds historical volatility (z-score)."""
+        df = self.get_candles(symbol, interval, limit)
+        if df is None or len(df) < 5:
+            return None, 0.0
+
+        prices = df['close'].values
+        mean = np.mean(prices)
+        std_dev = np.std(prices)
+        if std_dev == 0:
+            return None, 0.0
+
+        current_price = prices[-1]
+        z_score = (current_price - mean) / std_dev
+
+        if z_score > threshold:
+            print(f"   🚀 {symbol} High-Velocity Breakout (+{z_score:.2f} SD)")
+            return 'BREAKOUT', z_score
+        elif z_score < -threshold:
+            print(f"   📉 {symbol} High-Velocity Breakdown ({z_score:.2f} SD)")
+            return 'BREAKDOWN', z_score
+        return 'CONSOLIDATION', z_score
+
     def kill_all_trades(self, reason):
         """Close all open positions"""
         print(f"   🚨 KILLING ALL TRADES: {reason}")
@@ -1679,6 +1838,27 @@ class SmartTrader:
                 if new_trail > pos['stop_loss']:
                     pos['stop_loss'] = new_trail
                     print(f"   📈 Trailing stop updated for {pos['symbol']}: ${new_trail:.4f}")
+
+    def apply_trailing_stop(self, current_price, entry_price, highest_price):
+        """
+        9.5 Protocol: Trailing Take-Profit Logic
+        Trigger: 2.5% | Callback: 0.5%
+        """
+        profit_pct = (current_price - entry_price) / entry_price * 100
+
+        # 1. Activation: Has it hit our minimum 2.5%?
+        if profit_pct >= 2.5:
+            # 2. Update the "High Water Mark"
+            if current_price > highest_price:
+                highest_price = current_price
+                return False, highest_price  # Keep holding, price is rising
+
+            # 3. Callback Check: Has it dropped 0.5% from the peak?
+            drop_from_peak = (highest_price - current_price) / highest_price * 100
+            if drop_from_peak >= 0.5:
+                return True, highest_price  # SELL NOW - Trend is reversing
+
+        return False, highest_price  # Still below trigger, keep holding
 
 
 if __name__ == '__main__':
