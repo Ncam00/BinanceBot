@@ -385,6 +385,12 @@ class SmartTrader:
             return 'TREND'
         return 'MIXED'
 
+    def is_uptrend(self, price, ma):
+        return price > ma
+
+    def is_downtrend(self, price, ma):
+        return price < ma
+
     # ════════════════════════════════════════════════════════════════════
     # STRATEGY SIGNALS
     # ════════════════════════════════════════════════════════════════════
@@ -642,7 +648,7 @@ class SmartTrader:
 
         # ── Extra filters for BUY ─────────────────────────────────────
         if signal['action'] == 'BUY':
-            if price < ema_trend:
+            if not self.is_uptrend(price, ema_trend):
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': f'📉 Price below EMA50 ({ema_trend:.4f}) - no longs'}
             if not self.btc_is_healthy():
