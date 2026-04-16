@@ -1298,8 +1298,8 @@ class SmartTrader:
             return False, f"🔴 DAILY LOSS LIMIT: -${self.daily_loss:.2f}"
 
         # Daily loss ratio
-        if self.daily_loss_ratio >= 0.03:
-            return False, f"🔴 DAILY LOSS RATIO: {self.daily_loss_ratio*100:.1f}%"
+        if self.daily_loss_ratio >= 0.05:
+            return False, f"🔴 DAILY LOSS RATIO: -{self.daily_loss_ratio*100:.1f}% (limit 5%)"
 
         # Consecutive losses
         if self.consecutive_losses >= self.max_consecutive_losses:
