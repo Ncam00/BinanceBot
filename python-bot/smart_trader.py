@@ -480,6 +480,28 @@ class SmartTrader:
         return body > 0 and (body / candle_range) > 0.3
 
     # ════════════════════════════════════════════════════════════════════
+    def get_market_data(self):
+        market_data = {}
+        for symbol in self.trading_pairs:
+            df = self.get_candles(symbol, '15m', 100)
+            if df is None or len(df) < 20:
+                continue
+            sr = self.calculate_support_resistance(df)
+            volumes = df['volume'].tolist()
+            market_data[symbol] = {
+                'price':      df['close'].iloc[-1],
+                'open':       df['open'].iloc[-1],
+                'high':       df['high'].iloc[-1],
+                'low':        df['low'].iloc[-1],
+                'close':      df['close'].iloc[-1],
+                'volume':     volumes[-1],
+                'avg_volume': sum(volumes[-20:-1]) / 19,
+                'resistance': sr['resistance'],
+                'support':    sr['support'],
+            }
+        return market_data
+
+    # ════════════════════════════════════════════════════════════════════
     # MARKET TYPE
     # ════════════════════════════════════════════════════════════════════
     def get_market_type(self, adx_value):
@@ -1383,4 +1405,17 @@ if __name__ == '__main__':
         f"Target: ${trader.daily_profit_target}/day\n"
         f"Pairs: {', '.join(trader.trading_pairs)}"
     )
-    trader.run()
+
+    engine = trader.entry_engine
+
+    while True:
+        try:
+            market_data = trader.get_market_data()
+            engine.scan_market(market_data)
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n\n   🛑 Bot stopped by user")
+            break
+        except Exception as e:
+            print(f"\n   ❌ Loop error: {e}")
+            time.sleep(10)
