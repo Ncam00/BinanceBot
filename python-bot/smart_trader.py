@@ -556,11 +556,6 @@ class SmartTrader:
         support = sr['support']
         resistance = sr['resistance']
 
-        # ATR filter: skip low-volatility environments
-        if adx['atr'] < price * self.min_atr_percent:
-            return {'action': 'HOLD', 'strength': 0,
-                    'reason': f'📉 Low volatility - ATR {adx["atr"]:.4f} below threshold'}
-
         market_type = self.get_market_type(adx['adx'])
         state = self.get_symbol_state(symbol)
         tolerance = 0.002
@@ -664,20 +659,27 @@ class SmartTrader:
                 signal = {'action': 'HOLD', 'strength': 0,
                           'reason': '⏳ Buy signal - waiting for confirmation candle'}
 
-        # ── Extra filters for BUY ─────────────────────────────────────
+        # ===== FILTERS =====
         if signal['action'] == 'BUY':
+            # Trend filter
             if not self.is_uptrend(price, ema_trend):
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': f'📉 Price below EMA50 ({ema_trend:.4f}) - no longs'}
-            if not self.btc_is_healthy():
-                return {'action': 'HOLD', 'strength': 0,
-                        'reason': '🛡️ BTC dumping - entry blocked'}
-            if not self.check_spread(symbol):
-                return {'action': 'HOLD', 'strength': 0,
-                        'reason': '📊 Wide spread - entry blocked'}
+            # Volume filter
             if not self.check_volume(df):
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': '📉 Low volume - entry blocked'}
+            # Volatility filter (ATR)
+            if adx['atr'] < price * self.min_atr_percent:
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': f'📉 Low volatility - ATR {adx["atr"]:.4f} below threshold'}
+            # Spread check
+            if not self.check_spread(symbol):
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '📊 Wide spread - entry blocked'}
+            if not self.btc_is_healthy():
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '🛡️ BTC dumping - entry blocked'}
             if not self.check_multi_timeframe(symbol):
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': '⏱️ Timeframes not aligned - entry blocked'}
