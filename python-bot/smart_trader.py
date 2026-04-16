@@ -1174,6 +1174,11 @@ class SmartTrader:
     # CAN TRADE (single unified gate)
     # ════════════════════════════════════════════════════════════════════
     def can_trade(self):
+        # UTC trading window: EU session (07-16) and US session (18-23) only
+        hour = datetime.utcnow().hour
+        if not (7 <= hour <= 16 or 18 <= hour <= 23):
+            return False, f"🕐 OUTSIDE TRADING HOURS (UTC {hour:02d}:00)"
+
         # Weekly loss guard
         if self.weekly_pnl <= -self.max_weekly_loss:
             return False, f"🛑 WEEKLY LOSS LIMIT: ${self.weekly_pnl:.2f}"
