@@ -269,6 +269,7 @@ class SmartTrader:
         self.last_trade_time = None
         self.last_reset_date = datetime.now().date()
         self.last_week_reset_key = self._get_week_key()
+        self.daily_start_balance = None       # Set on first balance fetch of the day
 
         # Telegram
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -1308,15 +1309,26 @@ class SmartTrader:
             self.consecutive_losses = 0
             self.last_trade_time = None
             self.last_reset_date = today
+            self.daily_start_balance = self.get_balance()
             self.send_telegram(
                 f"🌅 New trading day\n"
+                f"Start balance: ${self.daily_start_balance:.2f}\n"
                 f"Target: ${self.daily_profit_target}\n"
-                f"Loss limit: ${self.max_daily_loss}"
+                f"Loss limit: 5%"
             )
 
     # ════════════════════════════════════════════════════════════════════
     # CAN TRADE (single unified gate)
     # ════════════════════════════════════════════════════════════════════
+    def check_daily_loss(self):
+        if not self.daily_start_balance:
+            self.daily_start_balance = self.get_balance()
+        balance = self.get_balance()
+        daily_loss = (balance - self.daily_start_balance) / self.daily_start_balance
+        if daily_loss <= -0.05:
+            return False, daily_loss
+        return True, daily_loss
+
     def can_trade(self):
         # UTC trading window: EU session (07-16) and US session (18-23) only
         hour = datetime.utcnow().hour
@@ -1335,9 +1347,10 @@ class SmartTrader:
         if self.daily_loss >= self.max_daily_loss:
             return False, f"🔴 DAILY LOSS LIMIT: -${self.daily_loss:.2f}"
 
-        # Daily loss ratio
-        if self.daily_loss_ratio >= 0.05:
-            return False, f"🔴 DAILY LOSS RATIO: -{self.daily_loss_ratio*100:.1f}% (limit 5%)"
+        # Balance-based daily loss check (-5% of start balance)
+        loss_ok, daily_loss_pct = self.check_daily_loss()
+        if not loss_ok:
+            return False, f"🔴 DAILY LOSS -5%: {daily_loss_pct*100:.1f}% drawdown — stop trading"
 
         # Consecutive losses
         if self.pause_until:
