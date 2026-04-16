@@ -971,6 +971,24 @@ class SmartTrader:
         return position_size
 
     # ════════════════════════════════════════════════════════════════════
+    # EXECUTE TRADE (limit order primitive)
+    # ════════════════════════════════════════════════════════════════════
+    def execute_trade(self, symbol, side, quantity, price):
+        try:
+            order = self.client.create_order(
+                symbol=symbol,
+                side=side,
+                type='LIMIT',
+                timeInForce='GTC',
+                quantity=quantity,
+                price=str(price),
+            )
+            return order
+        except Exception as e:
+            print(f"   ❌ Execution error ({symbol} {side}): {e}")
+            return None
+
+    # ════════════════════════════════════════════════════════════════════
     # EXECUTE BUY
     # ════════════════════════════════════════════════════════════════════
     def execute_buy(self, symbol, signal):
