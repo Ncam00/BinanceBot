@@ -101,6 +101,10 @@ class EntryEngine:
                 price <= sig['level'] * (1 + self.TOLERANCE)
             )
             if retest_hit and close > open_price:
+                candle_strength = (close - open_price) / open_price
+                if candle_strength < 0.001:
+                    return {'action': 'HOLD', 'pair': pair,
+                            'reason': f'Weak confirmation candle ({candle_strength:.3%})'}
                 retest_strength = abs(price - sig['level']) / sig['level']
                 if retest_strength > 0.005:
                     return {'action': 'HOLD', 'pair': pair,
