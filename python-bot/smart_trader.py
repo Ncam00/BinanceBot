@@ -101,6 +101,10 @@ class EntryEngine:
                 price <= sig['level'] * (1 + self.TOLERANCE)
             )
             if retest_hit and close > open_price:
+                retest_strength = abs(price - sig['level']) / sig['level']
+                if retest_strength > 0.005:
+                    return {'action': 'HOLD', 'pair': pair,
+                            'reason': f'Retest too far from level ({retest_strength:.3%})'}
                 sig['active'] = False
                 self.execute_trade(pair, price)
                 return {'action': 'BUY', 'pair': pair, 'level': sig['level']}
