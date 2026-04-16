@@ -61,6 +61,7 @@ class SmartTrader:
         self.take_profit_percent = 2.5        # 2.5% take profit
         self.position_size_percent = 15       # 15% of balance per trade (~$70)
         self.max_position_cap = 0.25          # Hard cap at 25% of balance
+        self.strong_setup_threshold = 0.85    # strength >= 0.85 → full size; below → half size
 
         # ════════════════════════════════════════════════════════════════════
         # DAILY / WEEKLY LIMITS
@@ -762,9 +763,13 @@ class SmartTrader:
             max_sl = price * 0.97
             stop_loss_price = max(structure_sl, max_sl)
 
-            # Risk % by session
+            # Risk % by session and setup quality
             session, _ = self.get_market_session()
-            risk_percent = 0.01 if session == 'asia' else 0.015
+            base_risk = 0.01 if session == 'asia' else 0.015
+            strong_setup = signal.get('strength', 0) >= self.strong_setup_threshold
+            risk_percent = base_risk if strong_setup else base_risk * 0.5
+            print(f"   📐 {'STRONG' if strong_setup else 'DECENT'} setup "
+                  f"(strength={signal.get('strength', 0):.2f}) → risk {risk_percent*100:.2f}%")
 
             quantity = self.calculate_position_size(balance, price, stop_loss_price, risk_percent)
             if quantity == 0:
