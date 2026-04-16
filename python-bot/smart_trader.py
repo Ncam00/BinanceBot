@@ -768,6 +768,25 @@ class SmartTrader:
 
         # ── Breakout state machine ────────────────────────────────────
         if market_type == 'TREND' and price > resistance and not state['active']:
+            volumes = df['volume'].tolist()
+            avg_volume = sum(volumes[-20:-1]) / 19
+            breakout_volume_ok = volumes[-1] >= avg_volume * 1.5
+
+            candle_open = df['open'].iloc[-1]
+            candle_high = df['high'].iloc[-1]
+            candle_range = candle_high - candle_open if candle_high > candle_open else 1e-9
+            strong_close = price > candle_open and (price - candle_open) / candle_range >= 0.6
+
+            if not breakout_volume_ok or not strong_close:
+                return {
+                    'action': 'HOLD', 'strength': 0,
+                    'reason': '🚫 Breakout rejected: '
+                              + ('low volume' if not breakout_volume_ok else 'weak close'),
+                    'market_type': market_type, 'price': price,
+                    'support': support, 'resistance': resistance,
+                    'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_weak'
+                }
+
             self.entry_engine.activate(symbol, resistance, direction='LONG')
             self.send_telegram(
                 f"📈 {symbol} Breakout detected\n"
