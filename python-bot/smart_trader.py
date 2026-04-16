@@ -1337,9 +1337,18 @@ class SmartTrader:
             return current_price * 0.995         # lock profit at 0.5% below current
         return None
 
+    def adapt_strategy(self):
+        wr = self.win_rate()
+        if wr < 0.5:
+            return {'tp': 1.5, 'sl': 0.8}   # tighten — protect capital
+        elif wr > 0.6:
+            return {'tp': 2.5, 'sl': 1.2}   # scale aggression
+        return {'tp': 2.0, 'sl': 1.0}       # neutral
+
     def set_tp_sl(self, entry_price):
-        tp = entry_price * 1.02   # +2%
-        sl = entry_price * 0.99   # -1%
+        params = self.adapt_strategy()
+        tp = entry_price * (1 + params['tp'] / 100)
+        sl = entry_price * (1 - params['sl'] / 100)
         return tp, sl
 
     def adjust_risk(self, base_risk):
