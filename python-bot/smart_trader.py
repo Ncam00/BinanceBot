@@ -523,6 +523,7 @@ class SmartTrader:
         macd = self.calculate_macd(closes)
         ema_fast = self.calculate_ema(closes, 7)
         ema_slow = self.calculate_ema(closes, 18)
+        ema_trend = self.calculate_ema(closes, 50)
         adx = self.calculate_adx(df)
         bb = self.calculate_bollinger(closes)
 
@@ -641,6 +642,9 @@ class SmartTrader:
 
         # ── Extra filters for BUY ─────────────────────────────────────
         if signal['action'] == 'BUY':
+            if price < ema_trend:
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': f'📉 Price below EMA50 ({ema_trend:.4f}) - no longs'}
             if not self.btc_is_healthy():
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': '🛡️ BTC dumping - entry blocked'}
