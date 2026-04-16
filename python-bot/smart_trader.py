@@ -103,19 +103,18 @@ class EntryEngine:
                 self.reset(pair)
                 return {'action': 'EXPIRED', 'pair': pair}
 
-            retest_hit = (
+            breakout = sig['active']
+            retest = (
                 sig['direction'] == 'LONG' and
-                price <= sig['level'] * (1 + self.TOLERANCE)
+                price <= sig['level'] * (1 + self.TOLERANCE) and
+                abs(price - sig['level']) / sig['level'] <= 0.005
             )
-            if retest_hit and close > open_price:
-                candle_strength = (close - open_price) / open_price
-                if candle_strength < 0.001:
-                    return {'action': 'HOLD', 'pair': pair,
-                            'reason': f'Weak confirmation candle ({candle_strength:.3%})'}
-                retest_strength = abs(price - sig['level']) / sig['level']
-                if retest_strength > 0.005:
-                    return {'action': 'HOLD', 'pair': pair,
-                            'reason': f'Retest too far from level ({retest_strength:.3%})'}
+            bullish_candle = (
+                close > open_price and
+                (close - open_price) / open_price >= 0.001
+            )
+
+            if breakout and retest and bullish_candle:
                 sig['active'] = False
                 if not self.is_A_plus_setup(price, resistance, volume, avg_volume, close, open_price, ma):
                     return {'action': 'HOLD', 'pair': pair, 'reason': 'Not an A+ setup'}
