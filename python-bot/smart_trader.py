@@ -557,6 +557,20 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # STRATEGY SIGNALS
     # ════════════════════════════════════════════════════════════════════
+    def get_ema_pullback_signal(self, price, ema20, ema_trend, rsi, volume, avg_volume):
+        trend_ok = ema20 > ema_trend                         # EMA20 > EMA50
+        pullback = abs(price - ema20) / ema20 <= 0.005      # price within 0.5% of EMA20
+        rsi_bounce = 45 <= rsi <= 55                         # RSI in bounce zone
+        volume_spike = volume >= avg_volume
+
+        if trend_ok and pullback and rsi_bounce and volume_spike:
+            return {
+                'action': 'BUY', 'strength': 0.85,
+                'reason': f'EMA20 PULLBACK: price={price:.4f} ema20={ema20:.4f} rsi={rsi:.1f}',
+                'entry_type': 'EMA_PULLBACK',
+            }
+        return {'action': 'HOLD', 'strength': 0, 'reason': 'EMA pullback: conditions not met'}
+
     def get_range_signal(self, price, rsi, bb, support, resistance):
         near_support = self.is_near_level(price, support)
         near_resistance = self.is_near_level(price, resistance)
@@ -710,6 +724,7 @@ class SmartTrader:
         macd = self.calculate_macd(closes)
         ema_fast = self.calculate_ema(closes, 7)
         ema_slow = self.calculate_ema(closes, 18)
+        ema20 = self.calculate_ema(closes, 20)
         ema_trend = self.calculate_ema(closes, 50)
         ma50 = self.get_ma(closes.tolist(), 50)
         adx = self.calculate_adx(df)
@@ -807,7 +822,15 @@ class SmartTrader:
             }
 
         # ── Strategy signal ───────────────────────────────────────────
-        if market_type == 'RANGE':
+        volumes = df['volume'].tolist()
+        avg_volume = sum(volumes[-20:-1]) / 19
+
+        pullback_signal = self.get_ema_pullback_signal(
+            price, ema20, ema_trend, rsi, volumes[-1], avg_volume
+        )
+        if pullback_signal['action'] == 'BUY':
+            signal = pullback_signal
+        elif market_type == 'RANGE':
             signal = self.get_range_signal(price, rsi, bb, support, resistance)
         elif market_type == 'TREND':
             signal = self.get_trend_signal(
