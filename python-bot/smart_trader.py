@@ -181,7 +181,7 @@ class SmartTrader:
         self.max_weekly_loss = 20.00          # Stop trading at $20 loss this week
         self.max_trades_per_day = 3           # Absolute max trades per day
         self.hard_max_trades = 3              # Cannot be bypassed
-        self.trade_cooldown_minutes = 5       # 5 min between trades
+        self.trade_cooldown_seconds = 300     # 5 min between trades
         self.max_consecutive_losses = 2       # Stop after 2 losses in a row
 
         # ════════════════════════════════════════════════════════════════════
@@ -937,7 +937,7 @@ class SmartTrader:
             }
 
             self.open_positions.append(position)
-            self.last_trade_time = datetime.now()
+            self.last_trade_time = time.time()
             self.daily_trades += 1
 
             if signal.get('clear_breakout_wait'):
@@ -1212,11 +1212,9 @@ class SmartTrader:
             return False, f"🛑 MAX TRADES: {self.daily_trades}/{self.hard_max_trades}"
 
         # Cooldown
-        if self.last_trade_time:
-            elapsed = (datetime.now() - self.last_trade_time).total_seconds() / 60
-            if elapsed < self.trade_cooldown_minutes:
-                remaining = self.trade_cooldown_minutes - elapsed
-                return False, f"⏳ COOLDOWN: {remaining:.0f}min remaining"
+        if self.last_trade_time and time.time() - self.last_trade_time < 300:
+            remaining = 300 - (time.time() - self.last_trade_time)
+            return False, f"⏳ COOLDOWN: {remaining:.0f}s remaining"
 
         # Session trade limit
         session, settings = self.get_market_session()
