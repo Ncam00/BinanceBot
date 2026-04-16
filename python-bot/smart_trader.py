@@ -1234,6 +1234,9 @@ class SmartTrader:
                 if current_price > position.get('highest_price', 0):
                     position['highest_price'] = current_price
                     new_trail = current_price * (1 - self.trailing_stop_distance / 100)
+                    locked = self.trailing_stop(current_price, position['entry_price'])
+                    if locked:
+                        new_trail = max(new_trail, locked)
                     if new_trail > position.get('trailing_stop_price', 0):
                         position['trailing_stop_price'] = new_trail
                         print(f"   📈 TRAILING STOP RAISED {symbol} @ ${new_trail:.4f}")
@@ -1318,6 +1321,11 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # CAN TRADE (single unified gate)
     # ════════════════════════════════════════════════════════════════════
+    def trailing_stop(self, current_price, entry_price):
+        if current_price > entry_price * 1.01:   # price up > 1%
+            return current_price * 0.995         # lock profit at 0.5% below current
+        return None
+
     def set_tp_sl(self, entry_price):
         tp = entry_price * 1.02   # +2%
         sl = entry_price * 0.99   # -1%
