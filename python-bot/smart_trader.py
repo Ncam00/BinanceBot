@@ -102,6 +102,7 @@ class SmartTrader:
         self.adx_range_threshold = 20         # ADX < 20 = ranging market
         self.adx_trend_threshold = 25         # ADX > 25 = trending market
         self.min_atr_percent = 0.003          # Skip trades when ATR < 0.3% of price
+        self.max_spread_percent = 0.001       # Skip trades when spread > 0.1% of price
 
         # ════════════════════════════════════════════════════════════════════
         # SESSION SETTINGS (NZ TIME)
@@ -459,6 +460,23 @@ class SmartTrader:
             print(f"   ⚠️ BTC filter error: {e}")
             return True
 
+    def check_spread(self, symbol):
+        try:
+            book = self.client.get_order_book(symbol=symbol, limit=5)
+            bid = float(book['bids'][0][0])
+            ask = float(book['asks'][0][0])
+            mid = (bid + ask) / 2
+            if mid == 0:
+                return True
+            spread_pct = (ask - bid) / mid
+            if spread_pct > self.max_spread_percent:
+                print(f"   📊 WIDE SPREAD: {spread_pct*100:.3f}% - skipping")
+                return False
+            return True
+        except Exception as e:
+            print(f"   ⚠️ Spread check error: {e}")
+            return True
+
     def check_volume(self, df):
         volumes = df['volume'].tolist()
         if len(volumes) < 20:
@@ -654,6 +672,9 @@ class SmartTrader:
             if not self.btc_is_healthy():
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': '🛡️ BTC dumping - entry blocked'}
+            if not self.check_spread(symbol):
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '📊 Wide spread - entry blocked'}
             if not self.check_volume(df):
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': '📉 Low volume - entry blocked'}
