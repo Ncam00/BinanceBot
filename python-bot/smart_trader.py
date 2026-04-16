@@ -489,6 +489,19 @@ class SmartTrader:
             return False
         return True
 
+    def get_trend(self, symbol, timeframe):
+        df = self.get_candles(symbol, timeframe, 50)
+        if df is None:
+            return 'NEUTRAL'
+        closes = df['close']
+        ema7 = closes.ewm(span=7).mean().iloc[-1]
+        ema18 = closes.ewm(span=18).mean().iloc[-1]
+        if closes.iloc[-1] > ema7 and ema7 > ema18:
+            return 'BULL'
+        if closes.iloc[-1] < ema7 and ema7 < ema18:
+            return 'BEAR'
+        return 'NEUTRAL'
+
     def check_multi_timeframe(self, symbol):
         bullish_count = 0
         for tf in ['1m', '5m', '15m']:
@@ -690,6 +703,11 @@ class SmartTrader:
             if not self.btc_is_healthy():
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': '🛡️ BTC dumping - entry blocked'}
+            trend_15m = self.get_trend(symbol, '15m')
+            trend_5m = self.get_trend(symbol, '5m')
+            if trend_5m != trend_15m:
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': f'⏱️ Trend mismatch: 5m={trend_5m} 15m={trend_15m} - entry blocked'}
             if not self.check_multi_timeframe(symbol):
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': '⏱️ Timeframes not aligned - entry blocked'}
