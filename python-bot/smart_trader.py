@@ -264,6 +264,7 @@ class SmartTrader:
         self.consecutive_losses = 0
         self.pause_until = None               # time.time() timestamp when pause expires
         self.open_positions = []
+        self.trade_history = []
         self.entry_engine = EntryEngine(self.trading_pairs, execute_fn=self.execute_buy)
         self.trade_lock = False
         self.last_trade_time = None
@@ -1148,6 +1149,7 @@ class SmartTrader:
                 if pnl < 0:
                     self.daily_loss_ratio += abs(pnl) / safe_balance
                 result = 'LOSS' if pnl < 0 else 'WIN'
+                self.log_trade(result)
                 self.update_streak(result)
 
             # Log trade
@@ -1184,6 +1186,15 @@ class SmartTrader:
         except Exception as e:
             print(f"   ❌ Sell failed: {e}")
             return None
+
+    def log_trade(self, result):
+        self.trade_history.append(result)
+
+    def win_rate(self):
+        if not self.trade_history:
+            return 0
+        wins = self.trade_history.count('WIN')
+        return wins / len(self.trade_history)
 
     def _log_trade(self, trade_data):
         log_path = os.path.join(os.path.dirname(__file__), 'trade_log.jsonl')
