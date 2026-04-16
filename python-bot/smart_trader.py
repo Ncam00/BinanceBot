@@ -559,6 +559,24 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # STRATEGY SIGNALS
     # ════════════════════════════════════════════════════════════════════
+    def generate_signal(self, data):
+        ema20       = data['ema20']
+        ema50       = data['ema50']
+        rsi         = data['rsi']
+        volume      = data['volume']
+        avg_volume  = data['avg_volume']
+
+        trend_up    = ema20 > ema50
+        trend_down  = ema20 < ema50
+        rsi_bullish = 45 < rsi < 60
+        volume_spike = volume > avg_volume * 1.5
+
+        if trend_up and rsi_bullish and volume_spike:
+            return 'LONG'
+        if trend_down and rsi < 45 and volume_spike:
+            return 'SHORT'
+        return 'NONE'
+
     def get_ema_pullback_signal(self, price, ema20, ema_trend, rsi, volume, avg_volume):
         trend_ok = ema20 > ema_trend                         # EMA20 > EMA50
         pullback = abs(price - ema20) / ema20 <= 0.005      # price within 0.5% of EMA20
