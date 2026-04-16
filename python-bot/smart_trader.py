@@ -1018,6 +1018,7 @@ class SmartTrader:
             # Risk % by session and setup quality
             session, _ = self.get_market_session()
             base_risk = 0.01 if session == 'asia' else 0.015
+            base_risk = self.adjust_risk(base_risk)
             risk_percent = base_risk if strong_setup else base_risk * 0.5
             print(f"   📐 {'STRONG' if strong_setup else 'DECENT'} setup "
                   f"(strength={signal.get('strength', 0):.2f}) → risk {risk_percent*100:.2f}%")
@@ -1319,6 +1320,11 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # CAN TRADE (single unified gate)
     # ════════════════════════════════════════════════════════════════════
+    def adjust_risk(self, base_risk):
+        if self.consecutive_losses >= 2:
+            return 0.01   # reduce to 1% after 2 losses in a row
+        return base_risk  # normal risk
+
     def update_streak(self, result):
         if result == 'LOSS':
             self.consecutive_losses += 1
