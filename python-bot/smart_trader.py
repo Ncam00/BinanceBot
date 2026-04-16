@@ -515,6 +515,8 @@ class SmartTrader:
                 'breakout_level': None,
                 'breakout_direction': None,
                 'retest_candles': 0,
+                'signal_active': False,
+                'signal_level': None,
             }
         return self.symbol_state[symbol]
 
@@ -523,7 +525,9 @@ class SmartTrader:
             'waiting_for_retest': False,
             'breakout_level': None,
             'breakout_direction': None,
-            'retest_candles': 0
+            'retest_candles': 0,
+            'signal_active': False,
+            'signal_level': None,
         }
 
     # ════════════════════════════════════════════════════════════════════
@@ -566,6 +570,8 @@ class SmartTrader:
             state['breakout_level'] = resistance
             state['breakout_direction'] = 'LONG'
             state['retest_candles'] = 0
+            state['signal_active'] = True
+            state['signal_level'] = resistance
             self.send_telegram(
                 f"📈 {symbol} Breakout detected\n"
                 f"Level: ${resistance:.4f}\nWaiting for retest..."
