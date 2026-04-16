@@ -40,8 +40,9 @@ class EntryEngine:
     MAX_RETEST_CANDLES = 25
     TOLERANCE = 0.003  # 0.3%
 
-    def __init__(self, pairs):
+    def __init__(self, pairs, execute_fn=None):
         self.pairs = pairs
+        self.execute_fn = execute_fn
         self.signals = {
             pair: {
                 'active': False,
@@ -101,6 +102,7 @@ class EntryEngine:
             )
             if retest_hit and close > open_price:
                 sig['active'] = False
+                self.execute_trade(pair, price)
                 return {'action': 'BUY', 'pair': pair, 'level': sig['level']}
 
         return None
@@ -121,6 +123,19 @@ class EntryEngine:
             if result:
                 signals.append(result)
         return signals
+
+    def execute_trade(self, pair, price):
+        if not self.execute_fn:
+            print(f"EXECUTING TRADE: {pair} at {price}")
+            return
+        signal = {
+            'action': 'BUY',
+            'price': price,
+            'strength': 0.85,
+            'entry_type': 'BREAKOUT',
+            'support_override': self.signals[pair]['level'],
+        }
+        self.execute_fn(pair, signal)
 
 
 class SmartTrader:
@@ -215,7 +230,7 @@ class SmartTrader:
         self.daily_trades = 0
         self.consecutive_losses = 0
         self.open_positions = []
-        self.entry_engine = EntryEngine(self.trading_pairs)
+        self.entry_engine = EntryEngine(self.trading_pairs, execute_fn=self.execute_buy)
         self.trade_lock = False
         self.last_trade_time = None
         self.last_reset_date = datetime.now().date()
