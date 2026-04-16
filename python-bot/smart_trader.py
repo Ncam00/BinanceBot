@@ -460,8 +460,8 @@ class SmartTrader:
         current_volume = volumes[-1]
         avg_volume = sum(volumes[-20:-1]) / 19
         ratio = current_volume / avg_volume if avg_volume > 0 else 1
-        if ratio < 0.8:
-            print(f"   📉 LOW VOLUME: {ratio:.2f}x avg - skipping")
+        if ratio < 1.0:
+            print(f"   📉 VOLUME BELOW AVG: {ratio:.2f}x - skipping")
             return False
         return True
 
