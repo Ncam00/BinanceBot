@@ -36,6 +36,47 @@ import pytz
 load_dotenv()
 
 
+class EntryEngine:
+    MAX_RETEST_CANDLES = 25
+    TOLERANCE = 0.003  # 0.3%
+
+    def __init__(self, pairs):
+        self.pairs = pairs
+        self.signals = {
+            pair: {
+                'active': False,
+                'level': None,
+                'direction': None,
+                'retest_candles': 0,
+            } for pair in self.pairs
+        }
+
+    def get(self, symbol):
+        if symbol not in self.signals:
+            self.signals[symbol] = {
+                'active': False,
+                'level': None,
+                'direction': None,
+                'retest_candles': 0,
+            }
+        return self.signals[symbol]
+
+    def activate(self, symbol, level, direction='LONG'):
+        sig = self.get(symbol)
+        sig['active'] = True
+        sig['level'] = level
+        sig['direction'] = direction
+        sig['retest_candles'] = 0
+
+    def reset(self, symbol):
+        self.signals[symbol] = {
+            'active': False,
+            'level': None,
+            'direction': None,
+            'retest_candles': 0,
+        }
+
+
 class SmartTrader:
     def __init__(self):
         # ════════════════════════════════════════════════════════════════════
@@ -128,7 +169,7 @@ class SmartTrader:
         self.daily_trades = 0
         self.consecutive_losses = 0
         self.open_positions = []
-        self.symbol_state = {}
+        self.entry_engine = EntryEngine(self.trading_pairs)
         self.trade_lock = False
         self.last_trade_time = None
         self.last_reset_date = datetime.now().date()
@@ -523,26 +564,10 @@ class SmartTrader:
     # BREAKOUT STATE MACHINE
     # ════════════════════════════════════════════════════════════════════
     def get_symbol_state(self, symbol):
-        if symbol not in self.symbol_state:
-            self.symbol_state[symbol] = {
-                'waiting_for_retest': False,
-                'breakout_level': None,
-                'breakout_direction': None,
-                'retest_candles': 0,
-                'signal_active': False,
-                'signal_level': None,
-            }
-        return self.symbol_state[symbol]
+        return self.entry_engine.get(symbol)
 
     def reset_breakout_state(self, symbol):
-        self.symbol_state[symbol] = {
-            'waiting_for_retest': False,
-            'breakout_level': None,
-            'breakout_direction': None,
-            'retest_candles': 0,
-            'signal_active': False,
-            'signal_level': None,
-        }
+        self.entry_engine.reset(symbol)
 
     # ════════════════════════════════════════════════════════════════════
     # MAIN ANALYSIS (LOCATION-BASED)
@@ -575,17 +600,11 @@ class SmartTrader:
         resistance = sr['resistance']
 
         market_type = self.get_market_type(adx['adx'])
-        state = self.get_symbol_state(symbol)
-        tolerance = 0.002
+        state = self.entry_engine.get(symbol)
 
         # ── Breakout state machine ────────────────────────────────────
-        if market_type == 'TREND' and price > resistance and not state['waiting_for_retest']:
-            state['waiting_for_retest'] = True
-            state['breakout_level'] = resistance
-            state['breakout_direction'] = 'LONG'
-            state['retest_candles'] = 0
-            state['signal_active'] = True
-            state['signal_level'] = resistance
+        if market_type == 'TREND' and price > resistance and not state['active']:
+            self.entry_engine.activate(symbol, resistance, direction='LONG')
             self.send_telegram(
                 f"📈 {symbol} Breakout detected\n"
                 f"Level: ${resistance:.4f}\nWaiting for retest..."
@@ -598,32 +617,32 @@ class SmartTrader:
                 'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_wait'
             }
 
-        if state.get('signal_active'):
+        if state['active']:
             state['retest_candles'] += 1
-            if state['retest_candles'] > 10:
+            if state['retest_candles'] > EntryEngine.MAX_RETEST_CANDLES:
                 self.reset_breakout_state(symbol)
                 return {
                     'action': 'HOLD', 'strength': 0,
-                    'reason': '⏳ Breakout retest expired (10 candles)',
+                    'reason': f'⏳ Breakout retest expired ({EntryEngine.MAX_RETEST_CANDLES} candles)',
                     'market_type': market_type, 'price': price,
                     'support': support, 'resistance': resistance,
                     'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_timeout'
                 }
 
             retest_hit = (
-                state['breakout_direction'] == 'LONG' and
-                price <= state['signal_level'] * (1 + tolerance)
+                state['direction'] == 'LONG' and
+                price <= state['level'] * (1 + EntryEngine.TOLERANCE)
             )
             if retest_hit:
                 current_open = df['open'].iloc[-1]
                 current_close = df['close'].iloc[-1]
                 if current_close > current_open and rsi > 50:
-                    state['signal_active'] = False
+                    state['active'] = False
                     signal = {
                         'action': 'BUY', 'strength': 0.80,
-                        'reason': f"BREAKOUT BUY: Retest confirmed @ ${state['signal_level']:.4f}",
+                        'reason': f"BREAKOUT BUY: Retest confirmed @ ${state['level']:.4f}",
                         'entry_type': 'BREAKOUT',
-                        'support_override': state['signal_level'],
+                        'support_override': state['level'],
                         'clear_breakout_wait': True
                     }
                 else:
@@ -637,7 +656,7 @@ class SmartTrader:
             else:
                 return {
                     'action': 'HOLD', 'strength': 0,
-                    'reason': f"⏳ Watching retest at ${state['signal_level']:.4f}",
+                    'reason': f"⏳ Watching retest at ${state['level']:.4f}",
                     'market_type': market_type, 'price': price,
                     'support': support, 'resistance': resistance,
                     'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_wait'
