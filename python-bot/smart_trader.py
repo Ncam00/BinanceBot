@@ -101,6 +101,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         self.adx_range_threshold = 20         # ADX < 20 = ranging market
         self.adx_trend_threshold = 25         # ADX > 25 = trending market
+        self.min_atr_percent = 0.003          # Skip trades when ATR < 0.3% of price
 
         # ════════════════════════════════════════════════════════════════════
         # SESSION SETTINGS (NZ TIME)
@@ -305,7 +306,8 @@ class SmartTrader:
         return {
             'adx': adx.iloc[-1] if not np.isnan(adx.iloc[-1]) else 0,
             'plus_di': plus_di.iloc[-1] if not np.isnan(plus_di.iloc[-1]) else 0,
-            'minus_di': minus_di.iloc[-1] if not np.isnan(minus_di.iloc[-1]) else 0
+            'minus_di': minus_di.iloc[-1] if not np.isnan(minus_di.iloc[-1]) else 0,
+            'atr': atr.iloc[-1] if not np.isnan(atr.iloc[-1]) else 0
         }
 
     def calculate_bollinger(self, closes, period=20, std_dev=2):
@@ -528,6 +530,11 @@ class SmartTrader:
         sr = self.calculate_support_resistance(df)
         support = sr['support']
         resistance = sr['resistance']
+
+        # ATR filter: skip low-volatility environments
+        if adx['atr'] < price * self.min_atr_percent:
+            return {'action': 'HOLD', 'strength': 0,
+                    'reason': f'📉 Low volatility - ATR {adx["atr"]:.4f} below threshold'}
 
         market_type = self.get_market_type(adx['adx'])
         state = self.get_symbol_state(symbol)
