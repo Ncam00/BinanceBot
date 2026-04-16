@@ -77,7 +77,14 @@ class EntryEngine:
             'retest_candles': 0,
         }
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance):
+    def is_A_plus_setup(self, price, resistance, volume, avg_volume, close, open_price, ma):
+        breakout = price > resistance
+        volume_ok = volume >= avg_volume
+        bullish_candle = close > open_price
+        trend_ok = price > ma
+        return breakout and volume_ok and bullish_candle and trend_ok
+
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma):
         sig = self.get(pair)
 
         # Volume filter
@@ -110,6 +117,8 @@ class EntryEngine:
                     return {'action': 'HOLD', 'pair': pair,
                             'reason': f'Retest too far from level ({retest_strength:.3%})'}
                 sig['active'] = False
+                if not self.is_A_plus_setup(price, resistance, volume, avg_volume, close, open_price, ma):
+                    return {'action': 'HOLD', 'pair': pair, 'reason': 'Not an A+ setup'}
                 self.execute_trade(pair, price)
                 return {'action': 'BUY', 'pair': pair, 'level': sig['level']}
 
@@ -127,6 +136,7 @@ class EntryEngine:
                 volume=data['volume'],
                 avg_volume=data['avg_volume'],
                 resistance=data['resistance'],
+                ma=data['ma50'],
             )
             if result:
                 signals.append(result)
@@ -495,9 +505,10 @@ class SmartTrader:
         market_data = {}
         for symbol in self.trading_pairs:
             df = self.get_candles(symbol, '15m', 100)
-            if df is None or len(df) < 20:
+            if df is None or len(df) < 50:
                 continue
             sr = self.calculate_support_resistance(df)
+            closes = df['close'].tolist()
             volumes = df['volume'].tolist()
             market_data[symbol] = {
                 'price':      df['close'].iloc[-1],
@@ -509,6 +520,7 @@ class SmartTrader:
                 'avg_volume': sum(volumes[-20:-1]) / 19,
                 'resistance': sr['resistance'],
                 'support':    sr['support'],
+                'ma50':       self.get_ma(closes, 50),
             }
         return market_data
 
