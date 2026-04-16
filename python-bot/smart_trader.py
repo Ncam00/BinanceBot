@@ -390,6 +390,9 @@ class SmartTrader:
     def calculate_ema(self, closes, period):
         return closes.ewm(span=period, adjust=False).mean().iloc[-1]
 
+    def get_ma(self, prices, period=50):
+        return sum(prices[-period:]) / period
+
     def calculate_adx(self, df, period=14):
         high, low, close = df['high'], df['low'], df['close']
         plus_dm = high.diff()
@@ -674,6 +677,7 @@ class SmartTrader:
         ema_fast = self.calculate_ema(closes, 7)
         ema_slow = self.calculate_ema(closes, 18)
         ema_trend = self.calculate_ema(closes, 50)
+        ma50 = self.get_ma(closes.tolist(), 50)
         adx = self.calculate_adx(df)
         bb = self.calculate_bollinger(closes)
 
@@ -788,9 +792,9 @@ class SmartTrader:
         # ===== FILTERS =====
         if signal['action'] == 'BUY':
             # Trend filter
-            if not self.is_uptrend(price, ema_trend):
+            if not self.is_uptrend(price, ma50):
                 return {'action': 'HOLD', 'strength': 0,
-                        'reason': f'📉 Price below EMA50 ({ema_trend:.4f}) - no longs'}
+                        'reason': f'📉 Price below MA50 ({ma50:.4f}) - no longs'}
             # Volume filter
             if not self.check_volume(df):
                 return {'action': 'HOLD', 'strength': 0,
