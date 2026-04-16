@@ -879,6 +879,13 @@ class SmartTrader:
             return None
         self.trade_lock = True
         try:
+            strong_setup = signal.get('strength', 0) >= self.strong_setup_threshold
+
+            # Trade frequency gate: free rein for first 2 trades; 3rd only on A+
+            if self.daily_trades >= 2 and not strong_setup:
+                print(f"   🛑 Trade #{self.daily_trades + 1} blocked - A+ setup required")
+                return None
+
             balance = self.get_balance()
             price = signal['price']
             entry_time = datetime.now()
@@ -892,7 +899,6 @@ class SmartTrader:
             # Risk % by session and setup quality
             session, _ = self.get_market_session()
             base_risk = 0.01 if session == 'asia' else 0.015
-            strong_setup = signal.get('strength', 0) >= self.strong_setup_threshold
             risk_percent = base_risk if strong_setup else base_risk * 0.5
             print(f"   📐 {'STRONG' if strong_setup else 'DECENT'} setup "
                   f"(strength={signal.get('strength', 0):.2f}) → risk {risk_percent*100:.2f}%")
