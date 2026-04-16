@@ -808,7 +808,7 @@ class SmartTrader:
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': '📉 Low volume - entry blocked'}
             # Volatility filter (ATR)
-            if adx['atr'] < price * self.min_atr_percent:
+            if adx['atr'] < price * self.min_atr_percent * 0.8:
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': f'📉 Low volatility - ATR {adx["atr"]:.4f} below threshold'}
             # Spread check
