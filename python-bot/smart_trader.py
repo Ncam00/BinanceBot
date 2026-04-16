@@ -636,6 +636,33 @@ class SmartTrader:
             print(f"   ⚠️ BTC filter error: {e}")
             return True
 
+    def check_signal_layers(self, price, ema20, ema_trend, ema200, rsi, macd,
+                             closes, df, adx):
+        volumes = df['volume'].tolist()
+        avg_volume = sum(volumes[-20:-1]) / 19
+
+        # Trend layer: EMA20 > EMA50 > EMA200
+        trend = ema20 > ema_trend > ema200 and price > ema200
+
+        # Momentum layer: RSI above midpoint, MACD histogram positive, price accelerating
+        velocity = closes.iloc[-1] - closes.iloc[-4]   # 3-candle price change
+        momentum = rsi > 50 and macd['histogram'] > 0 and velocity > 0
+
+        # Volume layer: current candle above 20-period average
+        volume = volumes[-1] >= avg_volume
+
+        # Volatility layer: ATR above 80% of threshold (avoid chop)
+        volatility = adx['atr'] >= price * self.min_atr_percent * 0.8
+
+        all_aligned = trend and momentum and volume and volatility
+        return {
+            'trend':      trend,
+            'momentum':   momentum,
+            'volume':     volume,
+            'volatility': volatility,
+            'all_aligned': all_aligned,
+        }
+
     def check_spread(self, symbol):
         try:
             book = self.client.get_order_book(symbol=symbol, limit=5)
@@ -712,8 +739,8 @@ class SmartTrader:
             return {'action': 'HOLD', 'strength': 0,
                     'reason': f'Daily target ${self.daily_profit_target} hit - no new trades'}
 
-        df = self.get_candles(symbol, '15m', 100)
-        if df is None or len(df) < 50:
+        df = self.get_candles(symbol, '15m', 250)
+        if df is None or len(df) < 200:
             return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
 
         closes = df['close']
@@ -726,6 +753,7 @@ class SmartTrader:
         ema_slow = self.calculate_ema(closes, 18)
         ema20 = self.calculate_ema(closes, 20)
         ema_trend = self.calculate_ema(closes, 50)
+        ema200 = self.calculate_ema(closes, 200)
         ma50 = self.get_ma(closes.tolist(), 50)
         adx = self.calculate_adx(df)
         bb = self.calculate_bollinger(closes)
@@ -849,17 +877,13 @@ class SmartTrader:
         # ===== FILTERS =====
         if signal['action'] == 'BUY':
             # Trend filter
-            if not self.is_uptrend(price, ma50):
+            layers = self.check_signal_layers(
+                price, ema20, ema_trend, ema200, rsi, macd, closes, df, adx
+            )
+            if not layers['all_aligned']:
+                failed = [k for k, v in layers.items() if k != 'all_aligned' and not v]
                 return {'action': 'HOLD', 'strength': 0,
-                        'reason': f'📉 Price below MA50 ({ma50:.4f}) - no longs'}
-            # Volume filter
-            if not self.check_volume(df):
-                return {'action': 'HOLD', 'strength': 0,
-                        'reason': '📉 Low volume - entry blocked'}
-            # Volatility filter (ATR)
-            if adx['atr'] < price * self.min_atr_percent * 0.8:
-                return {'action': 'HOLD', 'strength': 0,
-                        'reason': f'📉 Low volatility - ATR {adx["atr"]:.4f} below threshold'}
+                        'reason': f'🔲 Layers not aligned: {", ".join(failed)}'}
             # Spread check
             if not self.check_spread(symbol):
                 return {'action': 'HOLD', 'strength': 0,
