@@ -76,6 +76,52 @@ class EntryEngine:
             'retest_candles': 0,
         }
 
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance):
+        sig = self.get(pair)
+
+        # Volume filter
+        if volume < avg_volume:
+            return None
+
+        # New breakout detected
+        if not sig['active'] and price > resistance:
+            self.activate(pair, resistance, direction='LONG')
+            return {'action': 'BREAKOUT_WAIT', 'pair': pair, 'level': resistance}
+
+        # Watching for retest
+        if sig['active']:
+            sig['retest_candles'] += 1
+            if sig['retest_candles'] > self.MAX_RETEST_CANDLES:
+                self.reset(pair)
+                return {'action': 'EXPIRED', 'pair': pair}
+
+            retest_hit = (
+                sig['direction'] == 'LONG' and
+                price <= sig['level'] * (1 + self.TOLERANCE)
+            )
+            if retest_hit and close > open_price:
+                sig['active'] = False
+                return {'action': 'BUY', 'pair': pair, 'level': sig['level']}
+
+        return None
+
+    def scan_market(self, market_data):
+        signals = []
+        for pair in self.pairs:
+            data = market_data[pair]
+            result = self.process_pair(
+                pair,
+                price=data['price'],
+                open_price=data['open'],
+                close=data['close'],
+                volume=data['volume'],
+                avg_volume=data['avg_volume'],
+                resistance=data['resistance'],
+            )
+            if result:
+                signals.append(result)
+        return signals
+
 
 class SmartTrader:
     def __init__(self):
