@@ -1148,9 +1148,8 @@ class SmartTrader:
                 safe_balance = max(balance, 1e-9)
                 if pnl < 0:
                     self.daily_loss_ratio += abs(pnl) / safe_balance
-                    self.consecutive_losses += 1
-                else:
-                    self.consecutive_losses = 0
+                result = 'LOSS' if pnl < 0 else 'WIN'
+                self.update_streak(result)
 
             # Log trade
             self._log_trade({
@@ -1320,6 +1319,19 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # CAN TRADE (single unified gate)
     # ════════════════════════════════════════════════════════════════════
+    def update_streak(self, result):
+        if result == 'LOSS':
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            self.pause_until = time.time() + self.loss_streak_pause_hours * 3600
+            self.send_telegram(
+                f"⏸️ Loss streak ({self.consecutive_losses}) — pausing {self.loss_streak_pause_hours}h"
+            )
+            return False
+        return True
+
     def check_daily_loss(self):
         if not self.daily_start_balance:
             self.daily_start_balance = self.get_balance()
