@@ -528,6 +528,8 @@ class SmartTrader:
             sr = self.calculate_support_resistance(df)
             closes = df['close'].tolist()
             volumes = df['volume'].tolist()
+            adx = self.calculate_adx(df)
+            atr_series = df['high'] - df['low']   # simplified ATR proxy for avg
             market_data[symbol] = {
                 'price':      df['close'].iloc[-1],
                 'open':       df['open'].iloc[-1],
@@ -539,8 +541,17 @@ class SmartTrader:
                 'resistance': sr['resistance'],
                 'support':    sr['support'],
                 'ma50':       self.get_ma(closes, 50),
+                'atr':        adx['atr'],
+                'atr_avg':    atr_series.rolling(14).mean().iloc[-1],
             }
         return market_data
+
+    def market_is_valid(self, data):
+        if data['atr'] < data['atr_avg']:
+            return False   # low volatility — chop
+        if data['volume'] < data['avg_volume']:
+            return False
+        return True
 
     # ════════════════════════════════════════════════════════════════════
     # MARKET TYPE
@@ -917,6 +928,18 @@ class SmartTrader:
 
         # ===== FILTERS =====
         if signal['action'] == 'BUY':
+            # Market validity gate
+            volumes = df['volume'].tolist()
+            atr_series = df['high'] - df['low']
+            market_snapshot = {
+                'atr':        adx['atr'],
+                'atr_avg':    atr_series.rolling(14).mean().iloc[-1],
+                'volume':     volumes[-1],
+                'avg_volume': sum(volumes[-20:-1]) / 19,
+            }
+            if not self.market_is_valid(market_snapshot):
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': '🚫 Market invalid: low volatility or volume'}
             # Trend filter
             layers = self.check_signal_layers(
                 price, ema20, ema_trend, ema200, rsi, macd, closes, df, adx
