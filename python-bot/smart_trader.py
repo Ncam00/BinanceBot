@@ -584,7 +584,7 @@ class SmartTrader:
                 'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_wait'
             }
 
-        if state.get('waiting_for_retest'):
+        if state.get('signal_active'):
             state['retest_candles'] += 1
             if state['retest_candles'] > 10:
                 self.reset_breakout_state(symbol)
@@ -596,16 +596,20 @@ class SmartTrader:
                     'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_timeout'
                 }
 
-            if state['breakout_direction'] == 'LONG' and \
-               price <= state['breakout_level'] * (1 + tolerance):
+            retest_hit = (
+                state['breakout_direction'] == 'LONG' and
+                price <= state['signal_level'] * (1 + tolerance)
+            )
+            if retest_hit:
                 current_open = df['open'].iloc[-1]
                 current_close = df['close'].iloc[-1]
                 if current_close > current_open and rsi > 50:
+                    state['signal_active'] = False
                     signal = {
                         'action': 'BUY', 'strength': 0.80,
-                        'reason': f"BREAKOUT BUY: Retest confirmed @ ${state['breakout_level']:.4f}",
+                        'reason': f"BREAKOUT BUY: Retest confirmed @ ${state['signal_level']:.4f}",
                         'entry_type': 'BREAKOUT',
-                        'support_override': state['breakout_level'],
+                        'support_override': state['signal_level'],
                         'clear_breakout_wait': True
                     }
                 else:
@@ -619,7 +623,7 @@ class SmartTrader:
             else:
                 return {
                     'action': 'HOLD', 'strength': 0,
-                    'reason': f"⏳ Watching retest at ${state['breakout_level']:.4f}",
+                    'reason': f"⏳ Watching retest at ${state['signal_level']:.4f}",
                     'market_type': market_type, 'price': price,
                     'support': support, 'resistance': resistance,
                     'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_wait'
