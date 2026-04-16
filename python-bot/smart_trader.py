@@ -880,7 +880,13 @@ class SmartTrader:
 
             pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
 
-            # 1. BREAK-EVEN SHIELD: move SL to entry at 1% profit
+            # 1. STOP LOSS
+            if current_price <= position['stop_loss']:
+                print(f"\n   🛑 STOP LOSS {symbol} @ ${current_price:.4f}")
+                self.execute_sell(position, 'STOP_LOSS')
+                continue
+
+            # 2. BREAK-EVEN SHIELD: move SL to entry at 1% profit
             if pnl_percent >= self.break_even_trigger and not position.get('be_active'):
                 position['stop_loss'] = position['entry_price']
                 position['be_active'] = True
@@ -889,7 +895,7 @@ class SmartTrader:
                     f"🛡️ Break-Even Active\n{symbol}\nSL moved to entry"
                 )
 
-            # 2. TRAILING STOP: activates at 1.5% profit, trails 0.8%
+            # 3. TRAILING STOP: activates at 1.5% profit, trails 0.8%
             if pnl_percent >= self.trailing_stop_activation:
                 if not position.get('trailing_stop_active'):
                     position['trailing_stop_active'] = True
@@ -916,13 +922,13 @@ class SmartTrader:
                     self.execute_sell(position, 'TRAILING_STOP')
                     continue
 
-            # 3. RUNNER: after partial TP, exit if price returns to entry
+            # 4. RUNNER: after partial TP, exit if price returns to entry
             if position.get('runner_active') and current_price <= position['entry_price']:
                 print(f"\n   ⚖️ BREAKEVEN RUNNER EXIT {symbol}")
                 self.execute_sell(position, 'BREAKEVEN_RUNNER')
                 continue
 
-            # 4. PARTIAL TP at 2.5%: sell 70%, let 30% run
+            # 5. PARTIAL TP at 2.5%: sell 70%, let 30% run
             if not position.get('partial_taken') and current_price >= position['take_profit']:
                 partial_qty = position['original_quantity'] * self.partial_tp_percent
                 result = self.execute_sell(position, 'PARTIAL_TAKE_PROFIT', quantity=partial_qty)
@@ -931,12 +937,6 @@ class SmartTrader:
                     position['runner_active'] = True
                     position['stop_loss'] = position['entry_price']
                     print(f"   🏃 Runner active {symbol} - SL at entry")
-                continue
-
-            # 5. STOP LOSS
-            if current_price <= position['stop_loss']:
-                print(f"\n   🛑 STOP LOSS {symbol} @ ${current_price:.4f}")
-                self.execute_sell(position, 'STOP_LOSS')
                 continue
 
             # 6. TAKE PROFIT (full, if partial not triggered)
