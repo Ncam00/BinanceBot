@@ -71,7 +71,7 @@ class SmartTrader:
         self.max_weekly_loss = 20.00          # Stop trading at $20 loss this week
         self.max_trades_per_day = 3           # Absolute max trades per day
         self.hard_max_trades = 3              # Cannot be bypassed
-        self.trade_cooldown_minutes = 30      # 30 min between trades
+        self.trade_cooldown_minutes = 5       # 5 min between trades
         self.max_consecutive_losses = 2       # Stop after 2 losses in a row
 
         # ════════════════════════════════════════════════════════════════════
