@@ -1041,9 +1041,7 @@ class SmartTrader:
             fill_price = float(order['fills'][0]['price'])
             entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
-            # Take profit at 2.5% from fill price (fixed, not 1:1)
-            stop_loss = stop_loss_price
-            take_profit = fill_price * (1 + self.take_profit_percent / 100)
+            take_profit, stop_loss = self.set_tp_sl(fill_price)
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
 
@@ -1320,6 +1318,11 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # CAN TRADE (single unified gate)
     # ════════════════════════════════════════════════════════════════════
+    def set_tp_sl(self, entry_price):
+        tp = entry_price * 1.02   # +2%
+        sl = entry_price * 0.99   # -1%
+        return tp, sl
+
     def adjust_risk(self, base_risk):
         if self.consecutive_losses >= 2:
             return 0.01   # reduce to 1% after 2 losses in a row
