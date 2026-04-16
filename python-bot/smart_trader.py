@@ -84,6 +84,18 @@ class EntryEngine:
         trend_ok = price > ma
         return breakout and volume_ok and bullish_candle and trend_ok
 
+    def get_confidence(self, price, resistance, volume, avg_volume, close, open_price, ma):
+        confidence = 0
+        if volume >= avg_volume:
+            confidence += 1
+        if price > ma:          # trend_ok
+            confidence += 1
+        if close > open_price:  # bullish_candle
+            confidence += 1
+        if price > resistance:  # breakout
+            confidence += 1
+        return confidence
+
     def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma):
         sig = self.get(pair)
 
@@ -115,11 +127,14 @@ class EntryEngine:
             )
 
             if breakout and retest and bullish_candle:
+                confidence = self.get_confidence(price, resistance, volume, avg_volume, close, open_price, ma)
+                if confidence < 3:
+                    return {'action': 'HOLD', 'pair': pair,
+                            'reason': f'Low confidence ({confidence}/4)'}
                 sig['active'] = False
-                if not self.is_A_plus_setup(price, resistance, volume, avg_volume, close, open_price, ma):
-                    return {'action': 'HOLD', 'pair': pair, 'reason': 'Not an A+ setup'}
                 self.execute_trade(pair, price)
-                return {'action': 'BUY', 'pair': pair, 'level': sig['level']}
+                return {'action': 'BUY', 'pair': pair, 'level': sig['level'],
+                        'confidence': confidence}
 
         return None
 
