@@ -1244,8 +1244,8 @@ class SmartTrader:
 
                     time.sleep(0.5)
 
-                print(f"   ✅ Cycle complete. Next scan in 10s...")
-                time.sleep(10)
+                print(f"   ✅ Cycle complete. Next scan in 5s...")
+                time.sleep(5)
 
             except KeyboardInterrupt:
                 print("\n\n   🛑 Bot stopped by user")
