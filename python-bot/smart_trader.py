@@ -206,7 +206,8 @@ class SmartTrader:
         self.max_trades_per_day = 3           # Absolute max trades per day
         self.hard_max_trades = 3              # Cannot be bypassed
         self.trade_cooldown_seconds = 300     # 5 min between trades
-        self.max_consecutive_losses = 2       # Stop after 2 losses in a row
+        self.max_consecutive_losses = 4       # Pause trading after 4 losses in a row
+        self.loss_streak_pause_hours = 2      # Hours to pause after hitting streak limit
 
         # ════════════════════════════════════════════════════════════════════
         # CIRCUIT BREAKER
@@ -261,6 +262,7 @@ class SmartTrader:
         self.weekly_pnl = 0.0
         self.daily_trades = 0
         self.consecutive_losses = 0
+        self.pause_until = None               # time.time() timestamp when pause expires
         self.open_positions = []
         self.entry_engine = EntryEngine(self.trading_pairs, execute_fn=self.execute_buy)
         self.trade_lock = False
@@ -1302,8 +1304,19 @@ class SmartTrader:
             return False, f"🔴 DAILY LOSS RATIO: -{self.daily_loss_ratio*100:.1f}% (limit 5%)"
 
         # Consecutive losses
+        if self.pause_until:
+            if time.time() < self.pause_until:
+                remaining = (self.pause_until - time.time()) / 60
+                return False, f"⏸️ LOSS STREAK PAUSE: {remaining:.0f}min remaining"
+            self.pause_until = None
+            self.consecutive_losses = 0
+
         if self.consecutive_losses >= self.max_consecutive_losses:
-            return False, f"🛑 CONSECUTIVE LOSSES: {self.consecutive_losses}"
+            self.pause_until = time.time() + self.loss_streak_pause_hours * 3600
+            self.send_telegram(
+                f"⏸️ Loss streak ({self.consecutive_losses}) — pausing {self.loss_streak_pause_hours}h"
+            )
+            return False, f"⏸️ LOSS STREAK: pausing {self.loss_streak_pause_hours}h"
 
         # Hard trade cap
         if self.daily_trades >= self.hard_max_trades:
