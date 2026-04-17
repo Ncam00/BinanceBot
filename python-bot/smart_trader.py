@@ -114,6 +114,7 @@ class SmartTrader:
         self.consecutive_losses = 0
         self.last_trade_win = False
         self.fallback_trade_taken = False
+        self.engagement_trade_taken = False
         self.open_positions = []
         self.symbol_state = {}
         self.trade_lock = False
@@ -601,6 +602,15 @@ class SmartTrader:
         """Choose early / confirmed / continuation profile from score and signal context."""
         signal_type = signal.get('entry_type', 'PULLBACK').upper()
 
+        if signal.get('engagement_trade'):
+            return {
+                'entry_type': 'engagement',
+                'balance_fraction': 0.05,
+                'tp1_percent': 1.0,
+                'tp2_percent': 1.0,
+                'sl_percent': 0.8,
+            }
+
         if signal.get('fallback_trade'):
             return {
                 'entry_type': 'fallback',
@@ -662,6 +672,12 @@ class SmartTrader:
         volume_ok = snapshot['volume_ratio'] > 0.9
         atr_ok = snapshot['atr_avg'] > 0 and snapshot['atr'] > snapshot['atr_avg'] * 0.9
         return score == 3 and trend_aligned and not context['near_resistance'] and volume_ok and atr_ok
+
+    def is_engagement_candidate(self, score, snapshot):
+        market_active = snapshot['atr_avg'] > 0 and snapshot['atr'] > snapshot['atr_avg'] * 0.8
+        volume_ok = snapshot['volume_ratio'] > 0.8
+        trend_exists = snapshot['ema20'] != snapshot['ema50']
+        return score >= 3 and market_active and volume_ok and trend_exists
 
     def avoid_chop(self, df):
         """Return True if market is choppy (ATR below average = bad)."""
@@ -1423,6 +1439,7 @@ class SmartTrader:
             self.daily_loss_ratio = 0.0
             self.consecutive_losses = 0
             self.fallback_trade_taken = False
+            self.engagement_trade_taken = False
             self.last_trade_time = None
             self.last_reset_date = today
             self.send_telegram(
@@ -1690,6 +1707,31 @@ class SmartTrader:
 
                         if self.execute_buy(symbol, fallback_signal):
                             self.fallback_trade_taken = True
+                            a_trade_taken = True
+                        break
+
+                if not a_trade_taken and not self.fallback_trade_taken and not self.engagement_trade_taken and len(self.open_positions) < self.max_positions:
+                    for symbol, _ in ranked_pairs:
+                        snapshot = pair_snapshots[symbol]
+                        signal = self.analyze(symbol)
+                        if signal.get('action') != 'BUY':
+                            continue
+                        if btc_bias == 'BEARISH':
+                            continue
+
+                        score = signal.get('score', 0)
+                        if not self.is_engagement_candidate(score, snapshot):
+                            continue
+
+                        engagement_signal = dict(signal)
+                        engagement_signal['engagement_trade'] = True
+                        engagement_signal['strength'] = max(engagement_signal.get('strength', 0), min_strength)
+
+                        print(f"\n[ENGAGEMENT TRADE - {symbol}]")
+                        print("   Active market accepted: ATR > 0.8x avg, volume > 0.8x avg, trend exists")
+
+                        if self.execute_buy(symbol, engagement_signal):
+                            self.engagement_trade_taken = True
                             a_trade_taken = True
                         break
 
