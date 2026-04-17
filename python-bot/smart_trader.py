@@ -113,6 +113,7 @@ class SmartTrader:
         self.daily_trades = 0
         self.consecutive_losses = 0
         self.last_trade_win = False
+        self.fallback_trade_taken = False
         self.open_positions = []
         self.symbol_state = {}
         self.trade_lock = False
@@ -600,6 +601,15 @@ class SmartTrader:
         """Choose early / confirmed / continuation profile from score and signal context."""
         signal_type = signal.get('entry_type', 'PULLBACK').upper()
 
+        if signal.get('fallback_trade'):
+            return {
+                'entry_type': 'fallback',
+                'balance_fraction': 0.08,
+                'tp1_percent': 1.2,
+                'tp2_percent': 1.2,
+                'sl_percent': 1.0,
+            }
+
         if signal_type == 'BREAKOUT' and score == 3:
             return {
                 'entry_type': 'early',
@@ -642,10 +652,16 @@ class SmartTrader:
     def dynamic_tp_sl(self, entry_price, score, signal):
         """Return TP1, TP2 and SL using the entry profile model."""
         profile = self.get_entry_profile(signal, score)
-        tp1 = entry_price * (1 + profile['tp1_percent'] / 100)
+        tp1 = None if profile['entry_type'] == 'fallback' else entry_price * (1 + profile['tp1_percent'] / 100)
         tp2 = entry_price * (1 + profile['tp2_percent'] / 100)
         sl = entry_price * (1 - profile['sl_percent'] / 100)
         return tp1, tp2, sl, profile
+
+    def is_fallback_candidate(self, score, context, snapshot):
+        trend_aligned = snapshot['ema20'] > snapshot['ema50']
+        volume_ok = snapshot['volume_ratio'] > 0.9
+        atr_ok = snapshot['atr_avg'] > 0 and snapshot['atr'] > snapshot['atr_avg'] * 0.9
+        return score == 3 and trend_aligned and not context['near_resistance'] and volume_ok and atr_ok
 
     def avoid_chop(self, df):
         """Return True if market is choppy (ATR below average = bad)."""
@@ -1135,7 +1151,7 @@ class SmartTrader:
             entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
             stop_loss = stop_loss_price
-            tp1_price = fill_price * (tp1_price / price)
+            tp1_price = None if tp1_price is None else fill_price * (tp1_price / price)
             take_profit = fill_price * (tp2_price / price)
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
@@ -1152,6 +1168,7 @@ class SmartTrader:
                 'risk_percent': profile['balance_fraction'],
                 'rr_target': rr_target,
                 'entry_type': profile['entry_type'],
+                'fallback_trade': signal.get('fallback_trade', False),
                 'entry_reason': signal.get('reason', ''),
                 'market_condition': signal.get('market_type', '').lower(),
                 'entry_time': entry_time,
@@ -1175,15 +1192,16 @@ class SmartTrader:
             if signal.get('clear_breakout_wait'):
                 self.reset_breakout_state(symbol)
 
-            msg = (f"TRADE OPENED\n"
-                   f"Pair: {symbol}\n"
-                     f"Type: {profile['entry_type']}\n"
-                   f"Score: {score}/5\n"
-                   f"Entry: ${fill_price:.4f}\n"
-                   f"SL: ${stop_loss:.4f}\n"
-                     f"TP1: ${tp1_price:.4f}\n"
-                     f"TP2: ${take_profit:.4f}\n"
-                   f"R:R target: {rr_target}")
+                        tp1_line = f"TP1: ${tp1_price:.4f}\n" if tp1_price is not None else ""
+                        msg = (f"TRADE OPENED\n"
+                                     f"Pair: {symbol}\n"
+                                     f"Type: {profile['entry_type']}\n"
+                                     f"Score: {score}/5\n"
+                                     f"Entry: ${fill_price:.4f}\n"
+                                     f"SL: ${stop_loss:.4f}\n"
+                                     f"{tp1_line}"
+                                     f"TP2: ${take_profit:.4f}\n"
+                                     f"R:R target: {rr_target}")
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
 
@@ -1346,8 +1364,15 @@ class SmartTrader:
                 self.execute_sell(position, 'BREAKEVEN_RUNNER')
                 continue
 
-            # 5. TP1: take 50% off, let the rest run to TP2
-            if not position.get('partial_taken') and current_price >= position.get('tp1_price', position['take_profit']):
+            # 5. Fallback trades use a single TP instead of TP1/TP2 scaling.
+            if position.get('fallback_trade') and current_price >= position['take_profit']:
+                print(f"\n   FALLBACK TAKE PROFIT {symbol} @ ${current_price:.4f}")
+                self.execute_sell(position, 'FALLBACK_TAKE_PROFIT')
+                continue
+
+            # 6. TP1: take 50% off, let the rest run to TP2
+            tp1_target = position.get('tp1_price') or position['take_profit']
+            if not position.get('partial_taken') and current_price >= tp1_target:
                 partial_qty = position['original_quantity'] * self.partial_tp_percent
                 result = self.execute_sell(position, 'PARTIAL_TP1', quantity=partial_qty)
                 if result:
@@ -1357,7 +1382,7 @@ class SmartTrader:
                     print(f"   RUNNER ACTIVE {symbol} - 50% riding to TP2, SL at entry")
                 continue
 
-            # 6. TP2 runner exit
+            # 7. TP2 runner exit
             if position.get('partial_taken') and current_price >= position['take_profit']:
                 print(f"\n   TP2 HIT {symbol} @ ${current_price:.4f}")
                 self.execute_sell(position, 'TAKE_PROFIT_TP2')
@@ -1397,6 +1422,7 @@ class SmartTrader:
             self.daily_loss = 0.0
             self.daily_loss_ratio = 0.0
             self.consecutive_losses = 0
+            self.fallback_trade_taken = False
             self.last_trade_time = None
             self.last_reset_date = today
             self.send_telegram(
@@ -1509,6 +1535,8 @@ class SmartTrader:
 
         while True:
             try:
+                a_trade_taken = False
+
                 if not self.check_circuit_breaker():
                     break
 
@@ -1628,10 +1656,42 @@ class SmartTrader:
                     if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
                         if len(self.open_positions) >= self.max_positions:
                             break
-                        self.execute_buy(symbol, signal)
+                        if self.execute_buy(symbol, signal):
+                            a_trade_taken = True
                         break
 
                     time.sleep(0.5)
+
+                if not a_trade_taken and not self.fallback_trade_taken and len(self.open_positions) < self.max_positions:
+                    for symbol, _ in ranked_pairs:
+                        snapshot = pair_snapshots[symbol]
+                        resistance, support = self.calculate_levels(snapshot['df'])
+                        context = self.level_context(snapshot['price'], resistance, support)
+
+                        if self.dead_zone_filter(snapshot['price'], resistance, support):
+                            continue
+
+                        signal = self.analyze(symbol)
+                        if signal.get('action') != 'BUY':
+                            continue
+                        if btc_bias == 'BEARISH':
+                            continue
+
+                        score = signal.get('score', 0)
+                        if not self.is_fallback_candidate(score, context, snapshot):
+                            continue
+
+                        fallback_signal = dict(signal)
+                        fallback_signal['fallback_trade'] = True
+                        fallback_signal['strength'] = max(fallback_signal.get('strength', 0), min_strength)
+
+                        print(f"\n[FALLBACK TRADE - {symbol}]")
+                        print("   Score 3 setup accepted: trend aligned, not near resistance, volume/ATR acceptable")
+
+                        if self.execute_buy(symbol, fallback_signal):
+                            self.fallback_trade_taken = True
+                            a_trade_taken = True
+                        break
 
                 print(f"   Cycle complete. Next scan in 10s...")
                 time.sleep(10)
