@@ -735,8 +735,15 @@ class SmartTrader:
             status = "OK" if value else "X"
             print(f"- {key}: {status}")
 
+    def get_dynamic_min_score(self, snapshot, context):
+        """Raise the minimum score in weaker conditions; keep it lower in stronger ones."""
+        if context['breakout'] and snapshot['volume_ratio'] > 1.3 and snapshot['atr'] > snapshot['atr_avg']:
+            return 3
+        return 4
+
     def elite_filter(self, score, context, snapshot):
-        if score < 3:
+        min_score = self.get_dynamic_min_score(snapshot, context)
+        if score < min_score:
             return False
         if snapshot['volume_ratio'] < 1.0:
             return False
@@ -1580,6 +1587,7 @@ class SmartTrader:
                     if signal['action'] == 'BUY':
                         score = signal.get('score', 0)
                         if not self.elite_filter(score, context, snapshot):
+                            min_score = self.get_dynamic_min_score(snapshot, context)
                             checks = {
                                 'Trend': snapshot['ema20'] > snapshot['ema50'],
                                 'RSI': 50 < snapshot['rsi'] < 65,
@@ -1587,7 +1595,7 @@ class SmartTrader:
                                 'ATR': snapshot['atr'] > snapshot['atr_avg'],
                                 'Breakout': context['breakout'],
                             }
-                            self.explain_skip(symbol, score, 3, checks)
+                            self.explain_skip(symbol, score, min_score, checks)
                             continue
 
                     if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
