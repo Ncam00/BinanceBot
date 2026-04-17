@@ -77,7 +77,7 @@ class SmartTrader:
         self.break_even_trigger = 1.0
         self.trailing_stop_activation = 1.5
         self.trailing_stop_distance = 0.8
-        self.partial_tp_percent = 0.70
+        self.partial_tp_percent = 0.50
 
         # ════════════════════════════════════════════════════════════════════
         # LOCATION-BASED SETTINGS
@@ -112,6 +112,7 @@ class SmartTrader:
         self.weekly_pnl = 0.0
         self.daily_trades = 0
         self.consecutive_losses = 0
+        self.last_trade_win = False
         self.open_positions = []
         self.symbol_state = {}
         self.trade_lock = False
@@ -595,30 +596,56 @@ class SmartTrader:
 
         return score
 
-    def get_score_position_size(self, balance, score):
-        """Risk % of balance based on trade score. Returns 0 to skip."""
-        if score <= 2:
-            return 0          # no trade
-        elif score == 3:
-            return balance * 0.01   # 1%
-        elif score == 4:
-            return balance * 0.02   # 2%
-        elif score >= 5:
-            return balance * 0.03   # 3%
-        return 0
+    def get_entry_profile(self, signal, score):
+        """Choose early / confirmed / continuation profile from score and signal context."""
+        signal_type = signal.get('entry_type', 'PULLBACK').upper()
 
-    def dynamic_tp_sl(self, entry_price, score):
-        """Dynamic TP/SL based on trade score."""
-        if score >= 5:
-            tp = entry_price * 1.03    # 3% TP
-            sl = entry_price * 0.99    # 1% SL
-        elif score == 4:
-            tp = entry_price * 1.025   # 2.5% TP
-            sl = entry_price * 0.99    # 1% SL
-        else:
-            tp = entry_price * 1.02    # 2% TP
-            sl = entry_price * 0.995   # 0.5% SL
-        return tp, sl
+        if signal_type == 'BREAKOUT' and score == 3:
+            return {
+                'entry_type': 'early',
+                'balance_fraction': 0.08,
+                'tp1_percent': 1.5,
+                'tp2_percent': 1.5,
+                'sl_percent': 1.0,
+            }
+
+        if signal_type == 'BREAKOUT' and score >= 4:
+            return {
+                'entry_type': 'confirmed',
+                'balance_fraction': 0.18 if score >= 5 else 0.15,
+                'tp1_percent': 1.5,
+                'tp2_percent': 2.5,
+                'sl_percent': 1.2,
+            }
+
+        return {
+            'entry_type': 'continuation',
+            'balance_fraction': 0.10,
+            'tp1_percent': 1.5,
+            'tp2_percent': 2.0,
+            'sl_percent': 1.0,
+        }
+
+    def get_score_position_size(self, balance, score, signal):
+        """Position notional based on entry profile, with a 10% boost after a win."""
+        if score <= 2:
+            return 0
+
+        profile = self.get_entry_profile(signal, score)
+        balance_fraction = profile['balance_fraction']
+        if self.last_trade_win:
+            balance_fraction *= 1.1
+
+        balance_fraction = min(balance_fraction, self.max_position_cap)
+        return balance * balance_fraction
+
+    def dynamic_tp_sl(self, entry_price, score, signal):
+        """Return TP1, TP2 and SL using the entry profile model."""
+        profile = self.get_entry_profile(signal, score)
+        tp1 = entry_price * (1 + profile['tp1_percent'] / 100)
+        tp2 = entry_price * (1 + profile['tp2_percent'] / 100)
+        sl = entry_price * (1 - profile['sl_percent'] / 100)
+        return tp1, tp2, sl, profile
 
     def avoid_chop(self, df):
         """Return True if market is choppy (ATR below average = bad)."""
@@ -1073,8 +1100,8 @@ class SmartTrader:
             entry_time = datetime.now()
             score = signal.get('score', 3)
 
-            # Dynamic TP/SL based on score
-            dynamic_tp, dynamic_sl = self.dynamic_tp_sl(price, score)
+            # Dynamic TP/SL and entry classification based on score/profile
+            tp1_price, tp2_price, dynamic_sl, profile = self.dynamic_tp_sl(price, score, signal)
 
             # Structure-based SL as fallback
             support = signal.get('support_override', signal.get('support', price * 0.985))
@@ -1082,19 +1109,14 @@ class SmartTrader:
             # Use the tighter of dynamic SL and structure SL (but never more than 3%)
             stop_loss_price = max(dynamic_sl, structure_sl, price * 0.97)
 
-            # Dynamic position sizing by score
-            score_risk_amount = self.get_score_position_size(balance, score)
-            if score_risk_amount == 0:
+            # Dynamic position sizing by entry profile / score
+            position_notional = self.get_score_position_size(balance, score, signal)
+            if position_notional == 0:
                 print(f"   Score {score}/5 too low for position - skipping")
                 return None
 
-            # Convert risk amount to quantity
-            risk_per_unit = abs(price - stop_loss_price)
-            if risk_per_unit == 0:
-                return None
-            quantity = score_risk_amount / risk_per_unit
-            max_size = (balance * self.max_position_cap) / price
-            quantity = min(quantity, max_size)
+            # Convert target notional to quantity
+            quantity = position_notional / price
             if quantity * price < 10:
                 print(f"   Position size too small - skipping")
                 return None
@@ -1113,7 +1135,8 @@ class SmartTrader:
             entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
             stop_loss = stop_loss_price
-            take_profit = dynamic_tp  # Score-based TP
+            tp1_price = fill_price * (tp1_price / price)
+            take_profit = fill_price * (tp2_price / price)
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
 
@@ -1124,10 +1147,11 @@ class SmartTrader:
                 'original_quantity': quantity,
                 'entry_price': fill_price,
                 'stop_loss': stop_loss,
+                'tp1_price': tp1_price,
                 'take_profit': take_profit,
-                'risk_percent': risk_percent,
+                'risk_percent': profile['balance_fraction'],
                 'rr_target': rr_target,
-                'entry_type': signal.get('entry_type', 'PULLBACK').lower(),
+                'entry_type': profile['entry_type'],
                 'entry_reason': signal.get('reason', ''),
                 'market_condition': signal.get('market_type', '').lower(),
                 'entry_time': entry_time,
@@ -1153,11 +1177,12 @@ class SmartTrader:
 
             msg = (f"TRADE OPENED\n"
                    f"Pair: {symbol}\n"
-                   f"Type: {signal.get('entry_type', 'PULLBACK')}\n"
+                     f"Type: {profile['entry_type']}\n"
                    f"Score: {score}/5\n"
                    f"Entry: ${fill_price:.4f}\n"
                    f"SL: ${stop_loss:.4f}\n"
-                   f"TP: ${take_profit:.4f}\n"
+                     f"TP1: ${tp1_price:.4f}\n"
+                     f"TP2: ${take_profit:.4f}\n"
                    f"R:R target: {rr_target}")
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
@@ -1217,8 +1242,10 @@ class SmartTrader:
                 if pnl < 0:
                     self.daily_loss_ratio += abs(pnl) / safe_balance
                     self.consecutive_losses += 1
+                    self.last_trade_win = False
                 else:
                     self.consecutive_losses = 0
+                    self.last_trade_win = True
 
             self._log_trade({
                 'id': position.get('trade_id'),
@@ -1319,21 +1346,21 @@ class SmartTrader:
                 self.execute_sell(position, 'BREAKEVEN_RUNNER')
                 continue
 
-            # 5. PARTIAL TP at 2.5%: sell 70%, let 30% run
-            if not position.get('partial_taken') and current_price >= position['take_profit']:
+            # 5. TP1: take 50% off, let the rest run to TP2
+            if not position.get('partial_taken') and current_price >= position.get('tp1_price', position['take_profit']):
                 partial_qty = position['original_quantity'] * self.partial_tp_percent
-                result = self.execute_sell(position, 'PARTIAL_TAKE_PROFIT', quantity=partial_qty)
+                result = self.execute_sell(position, 'PARTIAL_TP1', quantity=partial_qty)
                 if result:
                     position['partial_taken'] = True
                     position['runner_active'] = True
                     position['stop_loss'] = position['entry_price']
-                    print(f"   RUNNER ACTIVE {symbol} - 30% riding, SL at entry")
+                    print(f"   RUNNER ACTIVE {symbol} - 50% riding to TP2, SL at entry")
                 continue
 
-            # 6. FULL TP (if partial not triggered)
-            if not position.get('partial_taken') and current_price >= position['take_profit']:
-                print(f"\n   TAKE PROFIT {symbol} @ ${current_price:.4f}")
-                self.execute_sell(position, 'TAKE_PROFIT')
+            # 6. TP2 runner exit
+            if position.get('partial_taken') and current_price >= position['take_profit']:
+                print(f"\n   TP2 HIT {symbol} @ ${current_price:.4f}")
+                self.execute_sell(position, 'TAKE_PROFIT_TP2')
                 continue
 
     # ════════════════════════════════════════════════════════════════════
