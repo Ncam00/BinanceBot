@@ -705,6 +705,36 @@ class SmartTrader:
         ranked.sort(key=lambda item: item[1], reverse=True)
         return ranked
 
+    def get_dynamic_trade_cap(self, pair_snapshots):
+        """Adjust today's trade cap based on current volatility and volume."""
+        if not pair_snapshots:
+            return min(2, self.hard_max_trades)
+
+        hot_market = any(
+            data['atr'] > data['atr_avg'] * 1.2 and data['volume_ratio'] > 1.3
+            for data in pair_snapshots.values()
+            if data['atr_avg'] > 0
+        )
+        normal_market = any(
+            data['atr'] > data['atr_avg']
+            for data in pair_snapshots.values()
+            if data['atr_avg'] > 0
+        )
+
+        if hot_market:
+            return min(6, self.hard_max_trades)
+        if normal_market:
+            return min(4, self.hard_max_trades)
+        return min(2, self.hard_max_trades)
+
+    def explain_skip(self, symbol, score, min_score, checks):
+        print(f"\n[SKIPPED - {symbol}]")
+        print(f"Score: {score} (min required: {min_score})")
+        print("Reasons:")
+        for key, value in checks.items():
+            status = "OK" if value else "X"
+            print(f"- {key}: {status}")
+
     def elite_filter(self, score, context, snapshot):
         if score < 3:
             return False
@@ -1509,8 +1539,16 @@ class SmartTrader:
                     if snapshot:
                         pair_snapshots[symbol] = snapshot
 
+                dynamic_trade_cap = self.get_dynamic_trade_cap(pair_snapshots)
+                if self.daily_trades >= dynamic_trade_cap:
+                    print(f"\r   Dynamic trade cap reached ({self.daily_trades}/{dynamic_trade_cap})", end='', flush=True)
+                    time.sleep(30)
+                    continue
+
                 ranked_pairs = self.rank_pairs(pair_snapshots)
                 top_symbols = [item[0] for item in ranked_pairs[:2]]
+
+                print(f"   Ranked top pairs: {', '.join(top_symbols) if top_symbols else 'none'}")
 
                 for symbol in top_symbols:
                     if len(self.open_positions) >= self.max_positions:
@@ -1542,7 +1580,14 @@ class SmartTrader:
                     if signal['action'] == 'BUY':
                         score = signal.get('score', 0)
                         if not self.elite_filter(score, context, snapshot):
-                            print(f"   {symbol}: HOLD (elite_filter) - setup not elite")
+                            checks = {
+                                'Trend': snapshot['ema20'] > snapshot['ema50'],
+                                'RSI': 50 < snapshot['rsi'] < 65,
+                                'Volume': snapshot['volume_ratio'] > 1.0,
+                                'ATR': snapshot['atr'] > snapshot['atr_avg'],
+                                'Breakout': context['breakout'],
+                            }
+                            self.explain_skip(symbol, score, 3, checks)
                             continue
 
                     if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
