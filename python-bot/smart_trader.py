@@ -444,6 +444,33 @@ class SmartTrader:
             }
         return {'action': 'HOLD', 'strength': 0, 'reason': 'Range: Not at key level'}
 
+    def ranging_trade(self, price, rsi, support, resistance, volume_ratio):
+        """Small mean-reversion trade model for active ranging markets."""
+        if volume_ratio < 0.8:
+            return {
+                'action': 'HOLD',
+                'strength': 0,
+                'reason': f'Ranging trade blocked: volume {volume_ratio:.2f}x < 0.80x'
+            }
+
+        if price <= support * 1.01 and rsi < 35:
+            return {
+                'action': 'BUY',
+                'strength': 0.65,
+                'reason': f'RANGING BUY: Near support (RSI={rsi:.1f})',
+                'entry_type': 'RANGING'
+            }
+
+        if price >= resistance * 0.99 and rsi > 65:
+            return {
+                'action': 'SELL',
+                'strength': 0.65,
+                'reason': f'RANGING SELL: Near resistance (RSI={rsi:.1f})',
+                'entry_type': 'RANGING'
+            }
+
+        return {'action': 'HOLD', 'strength': 0, 'reason': 'Ranging: No edge at extremes'}
+
     def get_trend_signal(self, price, rsi, macd, ema_fast, ema_slow, adx, support, resistance):
         near_support = self.is_near_level(price, support)
         macd_bullish = macd['macd'] > macd['signal'] and macd['histogram'] > macd['prev_histogram']
@@ -602,6 +629,15 @@ class SmartTrader:
         """Choose early / confirmed / continuation profile from score and signal context."""
         signal_type = signal.get('entry_type', 'PULLBACK').upper()
 
+        if signal.get('market_mode') == 'RANGING':
+            return {
+                'entry_type': 'ranging',
+                'balance_fraction': 0.06,
+                'tp1_percent': 1.2,
+                'tp2_percent': 1.2,
+                'sl_percent': 1.0,
+            }
+
         if signal.get('engagement_trade'):
             return {
                 'entry_type': 'engagement',
@@ -662,7 +698,8 @@ class SmartTrader:
     def dynamic_tp_sl(self, entry_price, score, signal):
         """Return TP1, TP2 and SL using the entry profile model."""
         profile = self.get_entry_profile(signal, score)
-        tp1 = None if profile['entry_type'] == 'fallback' else entry_price * (1 + profile['tp1_percent'] / 100)
+        single_target_profiles = {'fallback', 'engagement', 'ranging'}
+        tp1 = None if profile['entry_type'] in single_target_profiles else entry_price * (1 + profile['tp1_percent'] / 100)
         tp2 = entry_price * (1 + profile['tp2_percent'] / 100)
         sl = entry_price * (1 - profile['sl_percent'] / 100)
         return tp1, tp2, sl, profile
@@ -678,6 +715,18 @@ class SmartTrader:
         volume_ok = snapshot['volume_ratio'] > 0.8
         trend_exists = snapshot['ema20'] != snapshot['ema50']
         return score >= 3 and market_active and volume_ok and trend_exists
+
+    def detect_market_mode(self, snapshot):
+        if snapshot['atr_avg'] <= 0:
+            return 'DEAD'
+        if snapshot['atr'] > snapshot['atr_avg'] * 1.3:
+            return 'TRENDING'
+        if snapshot['atr'] > snapshot['atr_avg'] * 0.9:
+            return 'RANGING'
+        return 'DEAD'
+
+    def is_session_active(self, session_name):
+        return session_name in ('london', 'us')
 
     def avoid_chop(self, df):
         """Return True if market is choppy (ATR below average = bad)."""
@@ -731,9 +780,11 @@ class SmartTrader:
             (df['high'] - df['close'].shift()).abs(),
             (df['low'] - df['close'].shift()).abs()
         ], axis=1).max(axis=1)
-        atr_avg = tr.rolling(window=14).mean().iloc[-20:-1].mean()
+        atr_series = tr.rolling(window=14).mean()
+        atr_avg = atr_series.iloc[-20:-1].mean()
+        atr_prev = atr_series.iloc[-2] if not np.isnan(atr_series.iloc[-2]) else 0
 
-        return {
+        snapshot = {
             'symbol': symbol,
             'price': closes.iloc[-1],
             'rsi': self.calculate_rsi(closes),
@@ -742,8 +793,11 @@ class SmartTrader:
             'volume_ratio': self.get_volume_ratio(df),
             'atr': atr_current,
             'atr_avg': 0 if np.isnan(atr_avg) else atr_avg,
+            'atr_rising': atr_current > atr_prev,
             'df': df,
         }
+        snapshot['market_mode'] = self.detect_market_mode(snapshot)
+        return snapshot
 
     def rank_pairs(self, pair_snapshots):
         ranked = []
@@ -764,7 +818,7 @@ class SmartTrader:
         ranked.sort(key=lambda item: item[1], reverse=True)
         return ranked
 
-    def get_dynamic_trade_cap(self, pair_snapshots):
+    def get_dynamic_trade_cap(self, pair_snapshots, session_name):
         """Adjust today's trade cap based on current volatility and volume."""
         if not pair_snapshots:
             return min(2, self.hard_max_trades)
@@ -779,9 +833,12 @@ class SmartTrader:
             for data in pair_snapshots.values()
             if data['atr_avg'] > 0
         )
+        atr_rising = any(data.get('atr_rising') for data in pair_snapshots.values())
 
         if hot_market:
             return min(6, self.hard_max_trades)
+        if session_name in ('london', 'us') and atr_rising:
+            return min(5, self.hard_max_trades)
         if normal_market:
             return min(4, self.hard_max_trades)
         return min(2, self.hard_max_trades)
@@ -903,8 +960,22 @@ class SmartTrader:
         macd = self.calculate_macd(closes)
         ema_fast = self.calculate_ema(closes, 7)
         ema_slow = self.calculate_ema(closes, 18)
+        atr_current = self.calculate_atr(df, period=14)
+        tr = pd.concat([
+            df['high'] - df['low'],
+            (df['high'] - df['close'].shift()).abs(),
+            (df['low'] - df['close'].shift()).abs()
+        ], axis=1).max(axis=1)
+        atr_avg = tr.rolling(window=14).mean().iloc[-20:-1].mean()
         adx = self.calculate_adx(df)
         bb = self.calculate_bollinger(closes)
+        volume_ratio = self.get_volume_ratio(df)
+
+        mode_snapshot = {
+            'atr': atr_current,
+            'atr_avg': 0 if np.isnan(atr_avg) else atr_avg,
+        }
+        market_mode = self.detect_market_mode(mode_snapshot)
 
         # Session filter: only trade during EU/US hours
         if not self.session_filter():
@@ -920,6 +991,16 @@ class SmartTrader:
         support = sr['support']
         resistance = sr['resistance']
         recent_resistance, recent_support = self.calculate_levels(df)
+
+        if market_mode == 'DEAD':
+            return {
+                'action': 'HOLD', 'strength': 0,
+                'reason': 'Dead market: ATR below active threshold',
+                'market_type': 'DEAD', 'price': price,
+                'support': recent_support, 'resistance': recent_resistance,
+                'rsi': rsi, 'adx': adx['adx'], 'zone': 'dead_market',
+                'market_mode': market_mode,
+            }
 
         if self.dead_zone_filter(price, recent_resistance, recent_support):
             return {
@@ -1028,12 +1109,12 @@ class SmartTrader:
                 'rsi': rsi, 'adx': adx['adx'], 'zone': zone
             }
 
-        # ── Strategy signal: pullback first, then breakout ─────────
-        volume_ratio = self.get_volume_ratio(df)
-
-        if market_type == 'RANGE':
+        # ── Strategy signal: market mode first, then specific strategy ─
+        if market_mode == 'RANGING':
+            signal = self.ranging_trade(price, rsi, support, resistance, volume_ratio)
+        elif market_mode == 'TRENDING' and market_type == 'RANGE':
             signal = self.get_range_signal(price, rsi, bb, support, resistance)
-        elif market_type == 'TREND':
+        elif market_mode == 'TRENDING' and market_type == 'TREND':
             signal = self.get_trend_signal(
                 price, rsi, macd, ema_fast, ema_slow, adx, support, resistance
             )
@@ -1041,8 +1122,7 @@ class SmartTrader:
             if signal['action'] == 'HOLD':
                 signal = self.breakout_entry(df, price, resistance, rsi, adx, volume_ratio)
         else:
-            # MIXED: also try breakout if momentum is there
-            signal = self.breakout_entry(df, price, resistance, rsi, adx, volume_ratio)
+            signal = {'action': 'HOLD', 'strength': 0, 'reason': 'No valid market-mode setup'}
 
         # ── Confirmation candle ───────────────────────────────────────
         if signal['action'] == 'BUY' and signal.get('entry_type') != 'BREAKOUT':
@@ -1090,6 +1170,7 @@ class SmartTrader:
         signal['rsi'] = rsi
         signal['adx'] = adx['adx']
         signal['zone'] = zone
+        signal['market_mode'] = market_mode
 
         # Attach trade score for dynamic sizing
         if signal['action'] == 'BUY':
@@ -1599,6 +1680,7 @@ class SmartTrader:
                 session, settings = self.get_market_session()
                 min_strength = settings['min_strength']
                 btc_bias = self.get_btc_bias()
+                    session_active = self.is_session_active(session)
 
                 print(f"\n   Scanning {len(self.trading_pairs)} pairs... "
                       f"[{session.upper()} | {settings['mode']} | "
@@ -1618,7 +1700,7 @@ class SmartTrader:
                     if snapshot:
                         pair_snapshots[symbol] = snapshot
 
-                dynamic_trade_cap = self.get_dynamic_trade_cap(pair_snapshots)
+                dynamic_trade_cap = self.get_dynamic_trade_cap(pair_snapshots, session)
                 if self.daily_trades >= dynamic_trade_cap:
                     print(f"\r   Dynamic trade cap reached ({self.daily_trades}/{dynamic_trade_cap})", end='', flush=True)
                     time.sleep(30)
@@ -1627,7 +1709,14 @@ class SmartTrader:
                 ranked_pairs = self.rank_pairs(pair_snapshots)
                 top_symbols = [item[0] for item in ranked_pairs[:2]]
 
-                print(f"   Ranked top pairs: {', '.join(top_symbols) if top_symbols else 'none'}")
+                if top_symbols:
+                    top_summary = ', '.join(
+                        f"{symbol}:{pair_snapshots[symbol]['market_mode']}"
+                        for symbol in top_symbols
+                    )
+                else:
+                    top_summary = 'none'
+                print(f"   Ranked top pairs: {top_summary}")
 
                 for symbol in top_symbols:
                     if len(self.open_positions) >= self.max_positions:
@@ -1679,7 +1768,7 @@ class SmartTrader:
 
                     time.sleep(0.5)
 
-                if not a_trade_taken and not self.fallback_trade_taken and len(self.open_positions) < self.max_positions:
+                if session_active and self.daily_trades == 0 and not a_trade_taken and not self.fallback_trade_taken and len(self.open_positions) < self.max_positions:
                     for symbol, _ in ranked_pairs:
                         snapshot = pair_snapshots[symbol]
                         resistance, support = self.calculate_levels(snapshot['df'])
