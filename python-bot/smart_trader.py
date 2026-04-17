@@ -2,23 +2,14 @@
 SMART TRADER V2 - Location-Based Trading Bot
 =============================================
 Fixed & Cleaned: April 2026
-Target: $5/day | Protect capital first
+Target: $5/day | 60%+ win rate | Protect capital first
 
-Key Features:
-1. Support/Resistance detection - location-based entries only
-2. No-trade zone (skip middle 40% of range)
-3. Market type detection (range vs trend)
-4. Strategy switch per market type
-5. Max 3 trades per day
-6. Daily profit lock at $5
-7. Daily loss limit at $7
-8. Weekly loss limit at $20
-9. Circuit breaker at 5% account drawdown
-10. Break-even shield at 1% profit
-11. Partial TP (70%) then trailing runner
-12. Trailing stop: activates at 1.5%, trails 0.8%
+Changes from previous version:
++ ADX filter added: skips choppy markets below ADX 22
++ Final setup validation gate (valid_setup / valid_breakout_setup)
++ Stop loss moved to position 1 in check_positions (safety first)
 
-Pairs: BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, BNBUSDT
+Pairs: BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, BNBUSDT, XRPUSDT
 """
 
 import os
@@ -50,32 +41,31 @@ class SmartTrader:
         # TRADING PAIRS
         # ════════════════════════════════════════════════════════════════════
         self.trading_pairs = [
-            'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT', 'BNBUSDT'
+            'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT', 'BNBUSDT', 'XRPUSDT'
         ]
-        self.max_positions = 1  # One position at a time - quality over quantity
+        self.max_positions = 1
 
         # ════════════════════════════════════════════════════════════════════
         # CORE RISK SETTINGS
         # ════════════════════════════════════════════════════════════════════
-        self.stop_loss_percent = 1.5          # 1.5% stop loss
-        self.take_profit_percent = 2.5        # 2.5% take profit
-        self.position_size_percent = 15       # 15% of balance per trade (~$70)
-        self.max_position_cap = 0.25          # Hard cap at 25% of balance
+        self.stop_loss_percent = 1.5
+        self.take_profit_percent = 2.5
+        self.position_size_percent = 15
+        self.max_position_cap = 0.25
 
         # ════════════════════════════════════════════════════════════════════
         # DAILY / WEEKLY LIMITS
         # ════════════════════════════════════════════════════════════════════
-        self.daily_profit_target = 5.00       # Stop new trades at $5 profit
-        self.max_daily_loss = 7.00            # Stop trading at $7 loss
-        self.max_weekly_loss = 20.00          # Stop trading at $20 loss this week
-        self.max_trades_per_day = 3           # Absolute max trades per day
-        self.hard_max_trades = 3              # Cannot be bypassed
-        self.trade_cooldown_minutes = 30      # 30 min between trades
-        self.max_consecutive_losses = 2       # Stop after 2 losses in a row
+        self.daily_profit_target = 5.00
+        self.max_daily_loss = 7.00
+        self.max_weekly_loss = 20.00
+        self.max_trades_per_day = 3
+        self.hard_max_trades = 3
+        self.trade_cooldown_minutes = 30
+        self.max_consecutive_losses = 2
 
         # ════════════════════════════════════════════════════════════════════
         # CIRCUIT BREAKER
-        # 5% drawdown from starting balance kills the bot
         # ════════════════════════════════════════════════════════════════════
         self.starting_balance = 468.35
         self.circuit_breaker_percent = 0.05
@@ -84,29 +74,27 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # EXIT MANAGEMENT
         # ════════════════════════════════════════════════════════════════════
-        self.break_even_trigger = 1.0         # Move SL to entry at 1% profit
-        self.trailing_stop_activation = 1.5   # Activate trailing stop at 1.5% profit
-        self.trailing_stop_distance = 0.8     # Trail 0.8% below peak
-        self.partial_tp_percent = 0.70        # Sell 70% at first TP, let 30% run
+        self.break_even_trigger = 1.0
+        self.trailing_stop_activation = 1.5
+        self.trailing_stop_distance = 0.8
+        self.partial_tp_percent = 0.70
 
         # ════════════════════════════════════════════════════════════════════
-        # LOCATION-BASED TRADING SETTINGS
+        # LOCATION-BASED SETTINGS
         # ════════════════════════════════════════════════════════════════════
-        self.sr_lookback = 50                 # Candles for S/R detection
-        self.no_trade_zone_percent = 40       # Skip middle 40% of range
-        self.near_level_percent = 1.5         # Within 1.5% of S/R level
+        self.sr_lookback = 50
+        self.no_trade_zone_percent = 40
+        self.near_level_percent = 1.5
 
         # ════════════════════════════════════════════════════════════════════
         # ADX THRESHOLDS
         # ════════════════════════════════════════════════════════════════════
-        self.adx_range_threshold = 20         # ADX < 20 = ranging market
-        self.adx_trend_threshold = 25         # ADX > 25 = trending market
+        self.adx_range_threshold = 20
+        self.adx_trend_threshold = 25
+        self.min_adx_for_entry = 22           # ADDED: skip choppy markets
 
         # ════════════════════════════════════════════════════════════════════
         # SESSION SETTINGS (NZ TIME)
-        # Asia:   11:00-19:00 NZT - slow, max 1 trade
-        # London: 19:00-03:00 NZT - normal, max 3 trades
-        # US:     03:00-11:00 NZT - best volatility, max 3 trades
         # ════════════════════════════════════════════════════════════════════
         self.nz_timezone = pytz.timezone('Pacific/Auckland')
         self.session_settings = {
@@ -116,10 +104,10 @@ class SmartTrader:
         }
 
         # ════════════════════════════════════════════════════════════════════
-        # STATE TRACKING (single source of truth)
+        # STATE TRACKING
         # ════════════════════════════════════════════════════════════════════
-        self.daily_profit = 0.0               # SINGLE profit tracker
-        self.daily_loss = 0.0                 # SINGLE loss tracker
+        self.daily_profit = 0.0
+        self.daily_loss = 0.0
         self.daily_loss_ratio = 0.0
         self.weekly_pnl = 0.0
         self.daily_trades = 0
@@ -131,23 +119,23 @@ class SmartTrader:
         self.last_reset_date = datetime.now().date()
         self.last_week_reset_key = self._get_week_key()
 
-        # Telegram
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
 
         print("=" * 60)
-        print("   🚀 SMART TRADER V2 - INITIALIZING")
+        print("   SMART TRADER V2 - INITIALIZING")
         print("=" * 60)
-        print(f"   Pairs:          {', '.join(self.trading_pairs)}")
-        print(f"   Max trades/day: {self.max_trades_per_day}")
-        print(f"   Daily target:   ${self.daily_profit_target}")
-        print(f"   Daily loss cap: ${self.max_daily_loss}")
-        print(f"   Weekly loss cap:${self.max_weekly_loss}")
-        print(f"   Circuit breaker:${self.circuit_breaker_limit:.2f}")
-        print(f"   Position size:  {self.position_size_percent}%")
+        print(f"   Pairs:           {', '.join(self.trading_pairs)}")
+        print(f"   Max trades/day:  {self.max_trades_per_day}")
+        print(f"   Daily target:    ${self.daily_profit_target}")
+        print(f"   Daily loss cap:  ${self.max_daily_loss}")
+        print(f"   Weekly loss cap: ${self.max_weekly_loss}")
+        print(f"   Circuit breaker: ${self.circuit_breaker_limit:.2f}")
+        print(f"   Position size:   {self.position_size_percent}%")
         print(f"   SL: {self.stop_loss_percent}% | TP: {self.take_profit_percent}%")
+        print(f"   Min ADX:         {self.min_adx_for_entry} (choppy market filter)")
         session, settings = self.get_market_session()
-        print(f"   Session:        {session.upper()} ({settings['mode']})")
+        print(f"   Session:         {session.upper()} ({settings['mode']})")
         print("=" * 60)
 
         self.sync_existing_positions()
@@ -166,6 +154,10 @@ class SmartTrader:
             return 'london', self.session_settings['london']
         else:
             return 'us', self.session_settings['us']
+
+    def _get_week_key(self):
+        iso = datetime.now().date().isocalendar()
+        return (iso[0], iso[1])
 
     # ════════════════════════════════════════════════════════════════════
     # TELEGRAM
@@ -198,7 +190,7 @@ class SmartTrader:
                 df[col] = df[col].astype(float)
             return df
         except Exception as e:
-            print(f"   ❌ Candle fetch error {symbol}: {e}")
+            print(f"   Candle fetch error {symbol}: {e}")
             return None
 
     def get_price(self, symbol):
@@ -215,7 +207,7 @@ class SmartTrader:
                     return float(asset['free'])
             return 0.0
         except Exception as e:
-            print(f"   ❌ Balance error: {e}")
+            print(f"   Balance error: {e}")
             return 0.0
 
     def get_total_balance(self):
@@ -284,6 +276,17 @@ class SmartTrader:
 
     def calculate_ema(self, closes, period):
         return closes.ewm(span=period, adjust=False).mean().iloc[-1]
+
+    def calculate_atr(self, df, period=14):
+        """Calculate Average True Range."""
+        high, low, close = df['high'], df['low'], df['close']
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs()
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        return atr.iloc[-1] if not np.isnan(atr.iloc[-1]) else 0
 
     def calculate_adx(self, df, period=14):
         high, low, close = df['high'], df['low'], df['close']
@@ -410,19 +413,12 @@ class SmartTrader:
         ema_bullish = ema_fast > ema_slow
         trend_up = adx['plus_di'] > adx['minus_di']
 
-        if near_support and trend_up and macd_bullish and ema_bullish and rsi < 50:
+        if near_support and trend_up and macd_bullish and ema_bullish and rsi < 60:
             return {
                 'action': 'BUY',
                 'strength': 0.85,
-                'reason': f"TREND BUY: Pullback to support (ADX={adx['adx']:.1f})",
+                'reason': f"TREND BUY: Pullback to support (ADX={adx['adx']:.1f}, RSI={rsi:.1f})",
                 'entry_type': 'PULLBACK'
-            }
-        if price > resistance and trend_up and macd_bullish and ema_bullish:
-            return {
-                'action': 'BUY',
-                'strength': 0.75,
-                'reason': "TREND BUY: Breakout above resistance",
-                'entry_type': 'BREAKOUT'
             }
         if price < support and not trend_up and macd_bearish:
             return {
@@ -431,6 +427,178 @@ class SmartTrader:
                 'reason': "TREND SELL: Breakdown below support"
             }
         return {'action': 'HOLD', 'strength': 0, 'reason': 'Trend: No clear setup'}
+
+    # ════════════════════════════════════════════════════════════════════
+    # ADDED: FINAL SETUP VALIDATION GATE
+    # All conditions must pass - this is the last gate before a trade fires
+    # ════════════════════════════════════════════════════════════════════
+    def valid_setup(self, price, prices, rsi, macd_val, signal_val, prev_macd, ema):
+        """
+        Final gate for pullback entries. All four must pass:
+        1. Price within 0.5% of recent support
+        2. RSI below 65 (relaxed from 55)
+        3. MACD rising and above signal line
+        4. Price above slow EMA (trading with trend)
+        """
+        support = min(prices[-20:])
+        if abs(price - support) / price > 0.005:
+            return False
+        if rsi >= 65:
+            return False
+        if not (macd_val > signal_val and macd_val > prev_macd):
+            return False
+        if price < ema:
+            return False
+        return True
+
+    def valid_breakout_setup(self, price, rsi, macd_val, signal_val, prev_macd, ema):
+        """
+        Final gate for breakout entries:
+        1. RSI between 45-75 (relaxed: catch momentum, block tops)
+        2. MACD rising and above signal
+        3. Price above slow EMA
+        """
+        if rsi <= 45 or rsi >= 75:
+            return False
+        if not (macd_val > signal_val and macd_val > prev_macd):
+            return False
+        if price < ema:
+            return False
+        return True
+
+    def breakout_entry(self, df, price, resistance, rsi, adx, volume_ratio):
+        """
+        Standalone breakout entry with fake breakout filter.
+        Requires: price > resistance, volume confirm, strong candle, RSI < 75.
+        """
+        if price <= resistance:
+            return {'action': 'HOLD', 'strength': 0, 'reason': 'No breakout'}
+
+        # Anti-chase: skip if price already ran too far past resistance
+        if price > resistance * 1.002:
+            return {'action': 'HOLD', 'strength': 0,
+                    'reason': f'Breakout blocked: price chasing (>{0.2}% past R)'}
+
+        # RSI overbought guard - avoid buying tops
+        if rsi >= 75:
+            return {'action': 'HOLD', 'strength': 0,
+                    'reason': f'Breakout blocked: RSI {rsi:.1f} >= 75 (overbought)'}
+
+        # Volume confirmation: need 1.5x avg volume
+        if volume_ratio < 1.5:
+            return {'action': 'HOLD', 'strength': 0,
+                    'reason': f'Breakout blocked: volume {volume_ratio:.1f}x < 1.5x (weak)'}
+
+        # Strong candle filter: body must be >50% of candle range
+        candle = df.iloc[-1]
+        body_size = abs(candle['close'] - candle['open'])
+        candle_range = candle['high'] - candle['low']
+        strong_candle = candle['close'] > candle['open']  # green candle
+
+        if candle_range == 0 or not strong_candle:
+            return {'action': 'HOLD', 'strength': 0,
+                    'reason': 'Breakout blocked: weak/red candle'}
+
+        body_ratio = body_size / candle_range
+        if body_ratio < 0.5:
+            return {'action': 'HOLD', 'strength': 0,
+                    'reason': f'Breakout blocked: body ratio {body_ratio:.2f} < 0.50 (wick heavy)'}
+
+        # ADX must confirm trend
+        if adx['adx'] < self.min_adx_for_entry:
+            return {'action': 'HOLD', 'strength': 0,
+                    'reason': f'Breakout blocked: ADX {adx["adx"]:.1f} too low'}
+
+        trend_up = adx['plus_di'] > adx['minus_di']
+        if not trend_up:
+            return {'action': 'HOLD', 'strength': 0,
+                    'reason': 'Breakout blocked: DI- > DI+ (bearish pressure)'}
+
+        return {
+            'action': 'BUY',
+            'strength': 0.80,
+            'reason': f"BREAKOUT BUY: Price > R (vol={volume_ratio:.1f}x, body={body_ratio:.0%}, RSI={rsi:.1f})",
+            'entry_type': 'BREAKOUT'
+        }
+
+    # ════════════════════════════════════════════════════════════════════
+    # TRADE SCORING & DYNAMIC SIZING
+    # ════════════════════════════════════════════════════════════════════
+    def score_trade(self, df, price, rsi, ema_fast, ema_slow, resistance, volume_ratio):
+        """Score a trade setup 0-5. Higher = stronger conviction."""
+        score = 0
+        ema20 = self.calculate_ema(df['close'], 20)
+        ema50 = self.calculate_ema(df['close'], 50)
+
+        # Trend strength: EMA20 > EMA50
+        if ema20 > ema50:
+            score += 1
+
+        # Momentum: RSI in sweet spot 50-65
+        if 50 < rsi < 65:
+            score += 1
+
+        # Volume confirmation: 1.5x avg
+        if volume_ratio > 1.5:
+            score += 1
+
+        # Breakout condition: price above resistance
+        if price > resistance:
+            score += 1
+
+        # Strong candle: green with decent body
+        candle = df.iloc[-1]
+        if candle['close'] > candle['open']:
+            score += 1
+
+        return score
+
+    def get_score_position_size(self, balance, score):
+        """Risk % of balance based on trade score. Returns 0 to skip."""
+        if score <= 2:
+            return 0          # no trade
+        elif score == 3:
+            return balance * 0.01   # 1%
+        elif score == 4:
+            return balance * 0.02   # 2%
+        elif score >= 5:
+            return balance * 0.03   # 3%
+        return 0
+
+    def dynamic_tp_sl(self, entry_price, score):
+        """Dynamic TP/SL based on trade score."""
+        if score >= 5:
+            tp = entry_price * 1.03    # 3% TP
+            sl = entry_price * 0.99    # 1% SL
+        elif score == 4:
+            tp = entry_price * 1.025   # 2.5% TP
+            sl = entry_price * 0.99    # 1% SL
+        else:
+            tp = entry_price * 1.02    # 2% TP
+            sl = entry_price * 0.995   # 0.5% SL
+        return tp, sl
+
+    def avoid_chop(self, df):
+        """Return True if market is choppy (ATR below average = bad)."""
+        atr_current = self.calculate_atr(df, period=14)
+        atr_series = []
+        high, low, close = df['high'], df['low'], df['close']
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs()
+        ], axis=1).max(axis=1)
+        atr_avg = tr.rolling(window=14).mean().iloc[-20:-1].mean()
+        if atr_avg == 0 or np.isnan(atr_avg):
+            return False
+        if atr_current < atr_avg:
+            return True   # choppy - skip
+        return False
+
+    def session_filter(self):
+        """Block trading outside EU/US active hours (7-22 UTC)."""
+        utc_hour = datetime.utcnow().hour
+        return 7 <= utc_hour <= 22
 
     # ════════════════════════════════════════════════════════════════════
     # FILTERS
@@ -444,22 +612,25 @@ class SmartTrader:
             change_15m = ((closes.iloc[-1] - closes.iloc[-2]) / closes.iloc[-2]) * 100
             change_1h = ((closes.iloc[-1] - closes.iloc[-4]) / closes.iloc[-4]) * 100
             if change_15m < -0.5 or change_1h < -1.5:
-                print(f"   ⚠️ BTC FILTER: BTC dropping ({change_1h:.2f}% 1h) - blocking alts")
+                print(f"   BTC FILTER: dropping ({change_1h:.2f}% 1h) - blocking alts")
                 return False
             return True
         except Exception as e:
-            print(f"   ⚠️ BTC filter error: {e}")
+            print(f"   BTC filter error: {e}")
             return True
 
+    def get_volume_ratio(self, df):
+        """Return current volume / EMA(20) volume ratio."""
+        if len(df) < 20:
+            return 1.0
+        vol_ema = df['volume'].ewm(span=20, adjust=False).mean().iloc[-2]
+        current_volume = df['volume'].iloc[-1]
+        return current_volume / vol_ema if vol_ema > 0 else 1.0
+
     def check_volume(self, df):
-        volumes = df['volume'].tolist()
-        if len(volumes) < 20:
-            return True
-        current_volume = volumes[-1]
-        avg_volume = sum(volumes[-20:-1]) / 19
-        ratio = current_volume / avg_volume if avg_volume > 0 else 1
+        ratio = self.get_volume_ratio(df)
         if ratio < 0.8:
-            print(f"   📉 LOW VOLUME: {ratio:.2f}x avg - skipping")
+            print(f"   LOW VOLUME: {ratio:.2f}x avg - skipping")
             return False
         return True
 
@@ -475,7 +646,7 @@ class SmartTrader:
             if closes.iloc[-1] > ema7 and ema7 > ema18:
                 bullish_count += 1
         if bullish_count < 2:
-            print(f"   ⏱️ MTF: Only {bullish_count}/3 timeframes bullish - blocking")
+            print(f"   MTF: Only {bullish_count}/3 timeframes bullish - blocking")
             return False
         return True
 
@@ -504,7 +675,7 @@ class SmartTrader:
     # MAIN ANALYSIS (LOCATION-BASED)
     # ════════════════════════════════════════════════════════════════════
     def analyze(self, symbol):
-        # Stop scanning for new trades if daily target hit
+        # Stop scanning if daily target hit
         if self.daily_profit >= self.daily_profit_target:
             return {'action': 'HOLD', 'strength': 0,
                     'reason': f'Daily target ${self.daily_profit_target} hit - no new trades'}
@@ -516,7 +687,6 @@ class SmartTrader:
         closes = df['close']
         price = closes.iloc[-1]
 
-        # Indicators
         rsi = self.calculate_rsi(closes)
         macd = self.calculate_macd(closes)
         ema_fast = self.calculate_ema(closes, 7)
@@ -524,7 +694,16 @@ class SmartTrader:
         adx = self.calculate_adx(df)
         bb = self.calculate_bollinger(closes)
 
-        # Support/Resistance
+        # Session filter: only trade during EU/US hours
+        if not self.session_filter():
+            return {'action': 'HOLD', 'strength': 0,
+                    'reason': 'Outside active session (7-22 UTC)'}
+
+        # Chop filter: skip low-volatility chop
+        if self.avoid_chop(df):
+            return {'action': 'HOLD', 'strength': 0,
+                    'reason': 'Market choppy (ATR below avg) - skipping'}
+
         sr = self.calculate_support_resistance(df)
         support = sr['support']
         resistance = sr['resistance']
@@ -532,6 +711,18 @@ class SmartTrader:
         market_type = self.get_market_type(adx['adx'])
         state = self.get_symbol_state(symbol)
         tolerance = 0.002
+
+        # ── ADDED: ADX FILTER ─────────────────────────────────────────
+        # RANGE markets are exempt (mean reversion doesn't need trend)
+        # TREND and MIXED markets must have ADX >= 22 to avoid choppy entries
+        if market_type != 'RANGE' and adx['adx'] < self.min_adx_for_entry:
+            return {
+                'action': 'HOLD', 'strength': 0,
+                'reason': f"ADX {adx['adx']:.1f} < {self.min_adx_for_entry} - market too choppy",
+                'market_type': market_type, 'price': price,
+                'support': support, 'resistance': resistance,
+                'rsi': rsi, 'adx': adx['adx'], 'zone': 'choppy'
+            }
 
         # ── Breakout state machine ────────────────────────────────────
         if market_type == 'TREND' and price > resistance and not state['waiting_for_retest']:
@@ -545,7 +736,7 @@ class SmartTrader:
             )
             return {
                 'action': 'HOLD', 'strength': 0,
-                'reason': f"⏳ Breakout at ${resistance:.4f} - waiting for retest",
+                'reason': f"Breakout at ${resistance:.4f} - waiting for retest",
                 'market_type': market_type, 'price': price,
                 'support': support, 'resistance': resistance,
                 'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_wait'
@@ -557,7 +748,7 @@ class SmartTrader:
                 self.reset_breakout_state(symbol)
                 return {
                     'action': 'HOLD', 'strength': 0,
-                    'reason': '⏳ Breakout retest expired (10 candles)',
+                    'reason': 'Breakout retest expired (10 candles)',
                     'market_type': market_type, 'price': price,
                     'support': support, 'resistance': resistance,
                     'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_timeout'
@@ -578,7 +769,7 @@ class SmartTrader:
                 else:
                     return {
                         'action': 'HOLD', 'strength': 0,
-                        'reason': '⏳ Retest touched - waiting for confirmation candle',
+                        'reason': 'Retest touched - waiting for confirmation candle',
                         'market_type': market_type, 'price': price,
                         'support': support, 'resistance': resistance,
                         'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_retest'
@@ -586,7 +777,7 @@ class SmartTrader:
             else:
                 return {
                     'action': 'HOLD', 'strength': 0,
-                    'reason': f"⏳ Watching retest at ${state['breakout_level']:.4f}",
+                    'reason': f"Watching retest at ${state['breakout_level']:.4f}",
                     'market_type': market_type, 'price': price,
                     'support': support, 'resistance': resistance,
                     'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_wait'
@@ -599,7 +790,7 @@ class SmartTrader:
         if not near_support and not near_resistance:
             return {
                 'action': 'HOLD', 'strength': 0,
-                'reason': '🚫 HARD BLOCK: Not at support/resistance',
+                'reason': 'HARD BLOCK: Not at support/resistance',
                 'market_type': market_type, 'price': price,
                 'support': support, 'resistance': resistance,
                 'rsi': rsi, 'adx': adx['adx'], 'zone': 'middle'
@@ -609,46 +800,67 @@ class SmartTrader:
         if zone == 'middle':
             return {
                 'action': 'HOLD', 'strength': 0,
-                'reason': '🚫 HARD BLOCK: Price in middle zone',
+                'reason': 'HARD BLOCK: Price in middle zone',
                 'market_type': market_type, 'price': price,
                 'support': support, 'resistance': resistance,
                 'rsi': rsi, 'adx': adx['adx'], 'zone': zone
             }
 
-        # ── Strategy signal ───────────────────────────────────────────
+        # ── Strategy signal: pullback first, then breakout ─────────
+        volume_ratio = self.get_volume_ratio(df)
+
         if market_type == 'RANGE':
             signal = self.get_range_signal(price, rsi, bb, support, resistance)
         elif market_type == 'TREND':
             signal = self.get_trend_signal(
                 price, rsi, macd, ema_fast, ema_slow, adx, support, resistance
             )
+            # If pullback didn't fire, try breakout entry
+            if signal['action'] == 'HOLD':
+                signal = self.breakout_entry(df, price, resistance, rsi, adx, volume_ratio)
         else:
-            signal = {'action': 'HOLD', 'strength': 0,
-                      'reason': 'MIXED market - waiting for clarity'}
+            # MIXED: also try breakout if momentum is there
+            signal = self.breakout_entry(df, price, resistance, rsi, adx, volume_ratio)
 
         # ── Confirmation candle ───────────────────────────────────────
         if signal['action'] == 'BUY' and signal.get('entry_type') != 'BREAKOUT':
             if not self.has_confirmation_candle(df, 'bullish'):
                 signal = {'action': 'HOLD', 'strength': 0,
-                          'reason': '⏳ Buy signal - waiting for confirmation candle'}
+                          'reason': 'Buy signal - waiting for confirmation candle'}
 
-        # ── Extra filters for BUY ─────────────────────────────────────
+        # ── Extra filters + ADDED: final validation gate ──────────────
         if signal['action'] == 'BUY':
             if not self.btc_is_healthy():
                 return {'action': 'HOLD', 'strength': 0,
-                        'reason': '🛡️ BTC dumping - entry blocked'}
+                        'reason': 'BTC dumping - entry blocked'}
             if not self.check_volume(df):
                 return {'action': 'HOLD', 'strength': 0,
-                        'reason': '📉 Low volume - entry blocked'}
+                        'reason': 'Low volume - entry blocked'}
             if not self.check_multi_timeframe(symbol):
                 return {'action': 'HOLD', 'strength': 0,
-                        'reason': '⏱️ Timeframes not aligned - entry blocked'}
+                        'reason': 'Timeframes not aligned - entry blocked'}
 
-        # ── Clear breakout state if trade confirmed ───────────────────
+            # ADDED: Final setup validation (last gate before trade fires)
+            entry_type = signal.get('entry_type', 'PULLBACK')
+            prices_list = closes.tolist()
+            if entry_type == 'BREAKOUT':
+                if not self.valid_breakout_setup(
+                    price, rsi,
+                    macd['macd'], macd['signal'], macd['prev_macd'], ema_slow
+                ):
+                    return {'action': 'HOLD', 'strength': 0,
+                            'reason': 'Breakout validation failed - not all conditions met'}
+            else:
+                if not self.valid_setup(
+                    price, prices_list, rsi,
+                    macd['macd'], macd['signal'], macd['prev_macd'], ema_slow
+                ):
+                    return {'action': 'HOLD', 'strength': 0,
+                            'reason': 'Setup validation failed - not all conditions met'}
+
         if signal.get('clear_breakout_wait'):
             self.reset_breakout_state(symbol)
 
-        # ── Add metadata ──────────────────────────────────────────────
         signal['market_type'] = market_type
         signal['price'] = price
         signal['support'] = support
@@ -656,6 +868,16 @@ class SmartTrader:
         signal['rsi'] = rsi
         signal['adx'] = adx['adx']
         signal['zone'] = zone
+
+        # Attach trade score for dynamic sizing
+        if signal['action'] == 'BUY':
+            volume_ratio = self.get_volume_ratio(df)
+            signal['score'] = self.score_trade(
+                df, price, rsi, ema_fast, ema_slow, resistance, volume_ratio
+            )
+            if signal['score'] <= 2:
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': f"Score {signal['score']}/5 too low - skipping"}
 
         return signal
 
@@ -668,7 +890,6 @@ class SmartTrader:
         if risk_per_unit == 0:
             return 0
         position_size = risk_amount / risk_per_unit
-        # Cap at max_position_cap of balance
         max_size = (balance * self.max_position_cap) / entry_price
         position_size = min(position_size, max_size)
         if position_size * entry_price < 10:
@@ -680,27 +901,39 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     def execute_buy(self, symbol, signal):
         if self.trade_lock:
-            print(f"   🔒 TRADE LOCK - skipping duplicate {symbol}")
+            print(f"   TRADE LOCK - skipping duplicate {symbol}")
             return None
         self.trade_lock = True
         try:
             balance = self.get_balance()
             price = signal['price']
             entry_time = datetime.now()
+            score = signal.get('score', 3)
 
-            # Stop loss: structure-based, never more than 3%
+            # Dynamic TP/SL based on score
+            dynamic_tp, dynamic_sl = self.dynamic_tp_sl(price, score)
+
+            # Structure-based SL as fallback
             support = signal.get('support_override', signal.get('support', price * 0.985))
             structure_sl = support * 0.995
-            max_sl = price * 0.97
-            stop_loss_price = max(structure_sl, max_sl)
+            # Use the tighter of dynamic SL and structure SL (but never more than 3%)
+            stop_loss_price = max(dynamic_sl, structure_sl, price * 0.97)
 
-            # Risk % by session
-            session, _ = self.get_market_session()
-            risk_percent = 0.01 if session == 'asia' else 0.015
+            # Dynamic position sizing by score
+            score_risk_amount = self.get_score_position_size(balance, score)
+            if score_risk_amount == 0:
+                print(f"   Score {score}/5 too low for position - skipping")
+                return None
 
-            quantity = self.calculate_position_size(balance, price, stop_loss_price, risk_percent)
-            if quantity == 0:
-                print(f"   ⚠️ Position size too small - skipping")
+            # Convert risk amount to quantity
+            risk_per_unit = abs(price - stop_loss_price)
+            if risk_per_unit == 0:
+                return None
+            quantity = score_risk_amount / risk_per_unit
+            max_size = (balance * self.max_position_cap) / price
+            quantity = min(quantity, max_size)
+            if quantity * price < 10:
+                print(f"   Position size too small - skipping")
                 return None
 
             step_size, precision = self.get_symbol_precision(symbol)
@@ -716,9 +949,8 @@ class SmartTrader:
             fill_price = float(order['fills'][0]['price'])
             entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
-            # Take profit at 2.5% from fill price (fixed, not 1:1)
             stop_loss = stop_loss_price
-            take_profit = fill_price * (1 + self.take_profit_percent / 100)
+            take_profit = dynamic_tp  # Score-based TP
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
 
@@ -756,12 +988,13 @@ class SmartTrader:
             if signal.get('clear_breakout_wait'):
                 self.reset_breakout_state(symbol)
 
-            msg = (f"🚀 TRADE OPENED\n"
+            msg = (f"TRADE OPENED\n"
                    f"Pair: {symbol}\n"
                    f"Type: {signal.get('entry_type', 'PULLBACK')}\n"
+                   f"Score: {score}/5\n"
                    f"Entry: ${fill_price:.4f}\n"
-                   f"SL: ${stop_loss:.4f} ({self.stop_loss_percent}%)\n"
-                   f"TP: ${take_profit:.4f} ({self.take_profit_percent}%)\n"
+                   f"SL: ${stop_loss:.4f}\n"
+                   f"TP: ${take_profit:.4f}\n"
                    f"R:R target: {rr_target}")
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
@@ -769,7 +1002,7 @@ class SmartTrader:
             return position
 
         except Exception as e:
-            print(f"   ❌ Buy failed: {e}")
+            print(f"   Buy failed: {e}")
             return None
         finally:
             self.trade_lock = False
@@ -786,7 +1019,7 @@ class SmartTrader:
             sell_quantity = round(sell_quantity, precision)
 
             if sell_quantity <= 0:
-                print(f"   ⚠️ Sell quantity too small for {symbol}")
+                print(f"   Sell quantity too small for {symbol}")
                 return None
 
             order = self.client.create_order(
@@ -800,17 +1033,14 @@ class SmartTrader:
             exit_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
             pnl = (fill_price - position['entry_price']) * sell_quantity
             pnl_percent = ((fill_price / position['entry_price']) - 1) * 100
-            total_trade_pnl = position.get('realized_pnl', 0.0) + pnl
-            position['realized_pnl'] = total_trade_pnl
+            position['realized_pnl'] = position.get('realized_pnl', 0.0) + pnl
 
-            # Update single profit/loss tracker
             if pnl >= 0:
                 self.daily_profit += pnl
             else:
                 self.daily_loss += abs(pnl)
             self.weekly_pnl += pnl
 
-            # Remove or reduce position
             remaining_quantity = round(position['quantity'] - sell_quantity, precision)
             if remaining_quantity <= 0:
                 self.open_positions = [p for p in self.open_positions
@@ -818,7 +1048,6 @@ class SmartTrader:
             else:
                 position['quantity'] = remaining_quantity
 
-            # Risk controls
             balance = self.get_balance()
             if remaining_quantity <= 0:
                 safe_balance = max(balance, 1e-9)
@@ -828,7 +1057,6 @@ class SmartTrader:
                 else:
                     self.consecutive_losses = 0
 
-            # Log trade
             self._log_trade({
                 'id': position.get('trade_id'),
                 'pair': symbol,
@@ -846,13 +1074,14 @@ class SmartTrader:
                 'entry_reason': position.get('entry_reason'),
             })
 
-            emoji = "✅" if pnl >= 0 else "❌"
+            emoji = "WIN" if pnl >= 0 else "LOSS"
             label = "PARTIAL SELL" if remaining_quantity > 0 else "TRADE CLOSED"
-            msg = (f"{emoji} {label}\n"
+            net_pnl = self.daily_profit - self.daily_loss
+            msg = (f"{emoji} | {label}\n"
                    f"Pair: {symbol}\n"
                    f"Reason: {reason}\n"
                    f"PnL: ${pnl:.2f} ({pnl_percent:+.2f}%)\n"
-                   f"Daily P&L: ${self.daily_profit - self.daily_loss:.2f}\n"
+                   f"Daily P&L: ${net_pnl:.2f}\n"
                    f"Balance: ${balance:.2f}")
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
@@ -860,7 +1089,7 @@ class SmartTrader:
             return {'pnl': pnl, 'pnl_percent': pnl_percent}
 
         except Exception as e:
-            print(f"   ❌ Sell failed: {e}")
+            print(f"   Sell failed: {e}")
             return None
 
     def _log_trade(self, trade_data):
@@ -869,7 +1098,8 @@ class SmartTrader:
             f.write(json.dumps(trade_data, ensure_ascii=True) + "\n")
 
     # ════════════════════════════════════════════════════════════════════
-    # POSITION MANAGEMENT (single unified exit system)
+    # POSITION MANAGEMENT
+    # FIXED: Stop loss is now check #1 (safety first)
     # ════════════════════════════════════════════════════════════════════
     def check_positions(self):
         for position in self.open_positions[:]:
@@ -880,49 +1110,53 @@ class SmartTrader:
 
             pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
 
-            # 1. BREAK-EVEN SHIELD: move SL to entry at 1% profit
+            # 1. STOP LOSS (first - always)
+            if current_price <= position['stop_loss']:
+                print(f"\n   STOP LOSS {symbol} @ ${current_price:.4f}")
+                self.execute_sell(position, 'STOP_LOSS')
+                continue
+
+            # 2. BREAK-EVEN SHIELD: move SL to entry at 1% profit
             if pnl_percent >= self.break_even_trigger and not position.get('be_active'):
                 position['stop_loss'] = position['entry_price']
                 position['be_active'] = True
-                print(f"   🛡️ BREAK-EVEN: {symbol} SL moved to entry ${position['entry_price']:.4f}")
+                print(f"   BREAK-EVEN: {symbol} SL moved to entry ${position['entry_price']:.4f}")
                 self.send_telegram(
-                    f"🛡️ Break-Even Active\n{symbol}\nSL moved to entry"
+                    f"Break-Even Active\n{symbol}\nSL moved to entry\nProfit: +{pnl_percent:.2f}%"
                 )
 
-            # 2. TRAILING STOP: activates at 1.5% profit, trails 0.8%
+            # 3. TRAILING STOP: activates at 1.5% profit, trails 0.8%
             if pnl_percent >= self.trailing_stop_activation:
                 if not position.get('trailing_stop_active'):
                     position['trailing_stop_active'] = True
                     position['highest_price'] = current_price
                     position['trailing_stop_price'] = current_price * (1 - self.trailing_stop_distance / 100)
-                    print(f"   🔒 TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
+                    print(f"   TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
                     self.send_telegram(
-                        f"🔒 Trailing Stop Active\n{symbol}\n"
+                        f"Trailing Stop Active\n{symbol}\n"
                         f"Profit: +{pnl_percent:.2f}%\n"
                         f"Trail: ${position['trailing_stop_price']:.4f}"
                     )
 
-                # Update trailing stop if price moves higher
                 if current_price > position.get('highest_price', 0):
                     position['highest_price'] = current_price
                     new_trail = current_price * (1 - self.trailing_stop_distance / 100)
                     if new_trail > position.get('trailing_stop_price', 0):
                         position['trailing_stop_price'] = new_trail
-                        print(f"   📈 TRAILING STOP RAISED {symbol} @ ${new_trail:.4f}")
+                        print(f"   TRAILING STOP RAISED {symbol} @ ${new_trail:.4f}")
 
-                # Check if trailing stop hit
                 if position.get('trailing_stop_price') and current_price <= position['trailing_stop_price']:
-                    print(f"\n   🔒 TRAILING STOP HIT {symbol} @ ${current_price:.4f}")
+                    print(f"\n   TRAILING STOP HIT {symbol} @ ${current_price:.4f}")
                     self.execute_sell(position, 'TRAILING_STOP')
                     continue
 
-            # 3. RUNNER: after partial TP, exit if price returns to entry
+            # 4. RUNNER: after partial TP, exit if price returns to entry
             if position.get('runner_active') and current_price <= position['entry_price']:
-                print(f"\n   ⚖️ BREAKEVEN RUNNER EXIT {symbol}")
+                print(f"\n   RUNNER BREAKEVEN EXIT {symbol}")
                 self.execute_sell(position, 'BREAKEVEN_RUNNER')
                 continue
 
-            # 4. PARTIAL TP at 2.5%: sell 70%, let 30% run
+            # 5. PARTIAL TP at 2.5%: sell 70%, let 30% run
             if not position.get('partial_taken') and current_price >= position['take_profit']:
                 partial_qty = position['original_quantity'] * self.partial_tp_percent
                 result = self.execute_sell(position, 'PARTIAL_TAKE_PROFIT', quantity=partial_qty)
@@ -930,19 +1164,13 @@ class SmartTrader:
                     position['partial_taken'] = True
                     position['runner_active'] = True
                     position['stop_loss'] = position['entry_price']
-                    print(f"   🏃 Runner active {symbol} - SL at entry")
+                    print(f"   RUNNER ACTIVE {symbol} - 30% riding, SL at entry")
                 continue
 
-            # 5. STOP LOSS
-            if current_price <= position['stop_loss']:
-                print(f"\n   🛑 STOP LOSS {symbol} @ ${current_price:.4f}")
-                self.execute_sell(position, 'STOP_LOSS')
-                continue
-
-            # 6. TAKE PROFIT (full, if partial not triggered)
-            if current_price >= position['take_profit'] and position.get('partial_taken'):
-                print(f"\n   🎯 TAKE PROFIT RUNNER {symbol} @ ${current_price:.4f}")
-                self.execute_sell(position, 'TAKE_PROFIT_RUNNER')
+            # 6. FULL TP (if partial not triggered)
+            if not position.get('partial_taken') and current_price >= position['take_profit']:
+                print(f"\n   TAKE PROFIT {symbol} @ ${current_price:.4f}")
+                self.execute_sell(position, 'TAKE_PROFIT')
                 continue
 
     # ════════════════════════════════════════════════════════════════════
@@ -951,7 +1179,7 @@ class SmartTrader:
     def check_circuit_breaker(self):
         total = self.get_total_balance()
         if total <= self.circuit_breaker_limit:
-            msg = (f"🚨 CIRCUIT BREAKER TRIGGERED\n"
+            msg = (f"CIRCUIT BREAKER TRIGGERED\n"
                    f"Balance: ${total:.2f}\n"
                    f"Limit: ${self.circuit_breaker_limit:.2f}\n"
                    f"Bot stopped to protect capital.")
@@ -963,21 +1191,17 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # DAILY / WEEKLY RESETS
     # ════════════════════════════════════════════════════════════════════
-    def _get_week_key(self):
-        iso = datetime.now().date().isocalendar()
-        return (iso[0], iso[1])
-
     def check_daily_reset(self):
         today = datetime.now().date()
         current_week = self._get_week_key()
 
         if current_week != self.last_week_reset_key:
-            print(f"\n   🔄 New week - resetting weekly P&L")
+            print(f"\n   New week - resetting weekly P&L")
             self.weekly_pnl = 0.0
             self.last_week_reset_key = current_week
 
         if today != self.last_reset_date:
-            print(f"\n   🔄 New day - resetting daily counters")
+            print(f"\n   New day - resetting daily counters")
             self.daily_trades = 0
             self.daily_profit = 0.0
             self.daily_loss = 0.0
@@ -986,61 +1210,43 @@ class SmartTrader:
             self.last_trade_time = None
             self.last_reset_date = today
             self.send_telegram(
-                f"🌅 New trading day\n"
+                f"New trading day\n"
                 f"Target: ${self.daily_profit_target}\n"
                 f"Loss limit: ${self.max_daily_loss}"
             )
 
     # ════════════════════════════════════════════════════════════════════
-    # CAN TRADE (single unified gate)
+    # CAN TRADE
     # ════════════════════════════════════════════════════════════════════
     def can_trade(self):
-        # Weekly loss guard
         if self.weekly_pnl <= -self.max_weekly_loss:
-            return False, f"🛑 WEEKLY LOSS LIMIT: ${self.weekly_pnl:.2f}"
-
-        # Daily profit target hit
+            return False, f"WEEKLY LOSS LIMIT: ${self.weekly_pnl:.2f}"
         if self.daily_profit >= self.daily_profit_target:
-            return False, f"🎯 DAILY TARGET HIT: ${self.daily_profit:.2f}"
-
-        # Daily loss limit
+            return False, f"DAILY TARGET HIT: ${self.daily_profit:.2f}"
         if self.daily_loss >= self.max_daily_loss:
-            return False, f"🔴 DAILY LOSS LIMIT: -${self.daily_loss:.2f}"
-
-        # Daily loss ratio
+            return False, f"DAILY LOSS LIMIT: -${self.daily_loss:.2f}"
         if self.daily_loss_ratio >= 0.03:
-            return False, f"🔴 DAILY LOSS RATIO: {self.daily_loss_ratio*100:.1f}%"
-
-        # Consecutive losses
+            return False, f"DAILY LOSS RATIO: {self.daily_loss_ratio*100:.1f}%"
         if self.consecutive_losses >= self.max_consecutive_losses:
-            return False, f"🛑 CONSECUTIVE LOSSES: {self.consecutive_losses}"
-
-        # Hard trade cap
+            return False, f"CONSECUTIVE LOSSES: {self.consecutive_losses}"
         if self.daily_trades >= self.hard_max_trades:
-            return False, f"🛑 MAX TRADES: {self.daily_trades}/{self.hard_max_trades}"
-
-        # Cooldown
+            return False, f"MAX TRADES: {self.daily_trades}/{self.hard_max_trades}"
         if self.last_trade_time:
             elapsed = (datetime.now() - self.last_trade_time).total_seconds() / 60
             if elapsed < self.trade_cooldown_minutes:
                 remaining = self.trade_cooldown_minutes - elapsed
-                return False, f"⏳ COOLDOWN: {remaining:.0f}min remaining"
-
-        # Session trade limit
+                return False, f"COOLDOWN: {remaining:.0f}min remaining"
         session, settings = self.get_market_session()
         if self.daily_trades >= settings['max_trades']:
             return False, f"Session limit ({self.daily_trades}/{settings['max_trades']} {session.upper()})"
-
         return True, "OK"
 
     # ════════════════════════════════════════════════════════════════════
-    # SYNC EXISTING POSITIONS ON STARTUP
+    # SYNC EXISTING POSITIONS
     # ════════════════════════════════════════════════════════════════════
     def sync_existing_positions(self):
-        print("\n   🔄 Syncing existing positions...")
-        known_entries = {
-            'BTCUSDT': 72753.0
-        }
+        print("\n   Syncing existing positions...")
+        known_entries = {'BTCUSDT': 72753.0}
         try:
             account = self.client.get_account()
             for balance in account['balances']:
@@ -1089,9 +1295,9 @@ class SmartTrader:
                 }
                 self.open_positions.append(position)
                 pnl = (current_price - entry_price) * amount
-                print(f"   ✅ Synced: {amount:.8f} {asset} @ ${entry_price:.2f} | P&L: ${pnl:.2f}")
+                print(f"   Synced: {amount:.8f} {asset} @ ${entry_price:.2f} | P&L: ${pnl:.2f}")
         except Exception as e:
-            print(f"   ❌ Sync error: {e}")
+            print(f"   Sync error: {e}")
 
     # ════════════════════════════════════════════════════════════════════
     # MAIN LOOP
@@ -1102,31 +1308,28 @@ class SmartTrader:
         self._started = True
 
         print("\n" + "=" * 60)
-        print("   🚀 SMART TRADER V2 - LIVE")
+        print("   SMART TRADER V2 - LIVE")
         print(f"   PID: {os.getpid()}")
         print("=" * 60)
 
         balance = self.get_balance()
-        print(f"\n   💰 Balance: ${balance:.2f} USDT")
+        print(f"\n   Balance: ${balance:.2f} USDT")
 
         last_heartbeat = datetime.now()
 
         while True:
             try:
-                # ── Circuit breaker ───────────────────────────────────
                 if not self.check_circuit_breaker():
                     break
 
-                # ── Daily reset ───────────────────────────────────────
                 self.check_daily_reset()
 
-                # ── Heartbeat every 6 hours ───────────────────────────
                 if (datetime.now() - last_heartbeat).seconds > 21600:
                     balance = self.get_balance()
                     session, _ = self.get_market_session()
                     net_pnl = self.daily_profit - self.daily_loss
                     self.send_telegram(
-                        f"❤️ Heartbeat\n"
+                        f"Heartbeat\n"
                         f"Balance: ${balance:.2f}\n"
                         f"Session: {session.upper()}\n"
                         f"Trades today: {self.daily_trades}/{self.max_trades_per_day}\n"
@@ -1135,62 +1338,51 @@ class SmartTrader:
                     )
                     last_heartbeat = datetime.now()
 
-                # ── Manage open positions first ───────────────────────
                 self.check_positions()
 
-                # ── Position cap ──────────────────────────────────────
                 if len(self.open_positions) >= self.max_positions:
-                    print(f"\r   🔒 Position open - waiting for exit", end='', flush=True)
+                    print(f"\r   Position open - waiting for exit", end='', flush=True)
                     time.sleep(10)
                     continue
 
-                # ── Check if trading is allowed ───────────────────────
                 can_trade_result, reason = self.can_trade()
 
                 if not can_trade_result:
-                    # Hard stops - sleep until new day
                     hard_stops = ['DAILY TARGET', 'DAILY LOSS', 'WEEKLY LOSS',
                                   'MAX TRADES', 'CONSECUTIVE LOSSES']
                     if any(s in reason for s in hard_stops):
-                        print(f"\n   🛑 {reason}")
-                        print(f"   💤 Sleeping until next day...")
-                        self.send_telegram(f"🛑 Trading stopped: {reason}")
+                        print(f"\n   {reason}")
+                        print(f"   Sleeping until next day...")
+                        self.send_telegram(f"Trading stopped: {reason}")
                         while datetime.now().date() == self.last_reset_date:
                             time.sleep(300)
                         continue
-                    # Soft blocks - just wait
-                    print(f"\r   ⏸️ {reason}", end='', flush=True)
+                    print(f"\r   {reason}", end='', flush=True)
                     time.sleep(30)
                     continue
 
-                # ── Scan pairs ────────────────────────────────────────
                 session, settings = self.get_market_session()
                 min_strength = settings['min_strength']
 
-                print(f"\n   📊 Scanning {len(self.trading_pairs)} pairs... "
+                print(f"\n   Scanning {len(self.trading_pairs)} pairs... "
                       f"[{session.upper()} | {settings['mode']} | "
                       f"Trades: {self.daily_trades}/{settings['max_trades']}]")
 
                 for symbol in self.trading_pairs:
-                    # Skip if already in this symbol
                     if any(p['symbol'] == symbol for p in self.open_positions):
                         continue
-
-                    # Position cap re-check
                     if len(self.open_positions) >= self.max_positions:
                         break
-
-                    # BTC filter for alts
                     if symbol not in ('BTCUSDT',) and not self.btc_is_healthy():
-                        print(f"   ⚠️ {symbol} skipped - BTC filter")
+                        print(f"   {symbol} skipped - BTC filter")
                         continue
 
                     signal = self.analyze(symbol)
 
-                    # Log anything interesting
                     if signal['action'] != 'HOLD' or any(
                         x in signal.get('reason', '')
-                        for x in ['HARD BLOCK', 'WAITING', 'Breakout', 'Daily target']
+                        for x in ['HARD BLOCK', 'Breakout', 'Daily target',
+                                  'ADX', 'BUY', 'SELL', 'validation']
                     ):
                         print(f"   {symbol}: {signal['action']} "
                               f"({signal.get('market_type','N/A')}|{signal.get('zone','?')}) "
@@ -1200,22 +1392,22 @@ class SmartTrader:
                         if len(self.open_positions) >= self.max_positions:
                             break
                         self.execute_buy(symbol, signal)
-                        break  # One trade per cycle
+                        break
 
                     time.sleep(0.5)
 
-                print(f"   ✅ Cycle complete. Next scan in 10s...")
+                print(f"   Cycle complete. Next scan in 10s...")
                 time.sleep(10)
 
             except KeyboardInterrupt:
-                print("\n\n   🛑 Bot stopped by user")
+                print("\n\n   Bot stopped by user")
                 break
             except Exception as e:
-                print(f"\n   ❌ Loop error: {e}")
+                print(f"\n   Loop error: {e}")
                 time.sleep(10)
 
         net_pnl = self.daily_profit - self.daily_loss
-        print(f"\n   📊 Session Summary:")
+        print(f"\n   Session Summary:")
         print(f"      Trades: {self.daily_trades}")
         print(f"      Daily P&L: ${net_pnl:.2f}")
         print(f"      Open positions: {len(self.open_positions)}")
@@ -1225,7 +1417,7 @@ if __name__ == '__main__':
     trader = SmartTrader()
     balance = trader.get_balance()
     trader.send_telegram(
-        f"🚀 Smart Trader V2 Started\n"
+        f"Smart Trader V2 Started\n"
         f"Balance: ${balance:.2f}\n"
         f"Target: ${trader.daily_profit_target}/day\n"
         f"Pairs: {', '.join(trader.trading_pairs)}"
