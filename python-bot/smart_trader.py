@@ -15,7 +15,7 @@ Pairs: BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, BNBUSDT, XRPUSDT
 import os
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from binance.client import Client
 from binance.enums import *
 import pandas as pd
@@ -597,7 +597,7 @@ class SmartTrader:
 
     def session_filter(self):
         """Block trading outside EU/US active hours (7-22 UTC)."""
-        utc_hour = datetime.utcnow().hour
+        utc_hour = datetime.now(timezone.utc).hour
         return 7 <= utc_hour <= 22
 
     # ════════════════════════════════════════════════════════════════════
