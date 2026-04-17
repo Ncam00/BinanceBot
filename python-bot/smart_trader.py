@@ -2,7 +2,7 @@
 SMART TRADER V2 - Location-Based Trading Bot
 =============================================
 Fixed & Cleaned: April 2026
-Target: $5/day | 60%+ win rate | Protect capital first
+Target: $20/day | 60%+ win rate | Protect capital first
 
 Changes from previous version:
 + ADX filter added: skips choppy markets below ADX 22
@@ -56,11 +56,11 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # DAILY / WEEKLY LIMITS
         # ════════════════════════════════════════════════════════════════════
-        self.daily_profit_target = 5.00
+        self.daily_profit_target = 20.00
         self.max_daily_loss = 7.00
         self.max_weekly_loss = 20.00
-        self.max_trades_per_day = 3
-        self.hard_max_trades = 3
+        self.max_trades_per_day = 5
+        self.hard_max_trades = 5
         self.trade_cooldown_minutes = 30
         self.max_consecutive_losses = 2
 
@@ -351,6 +351,41 @@ class SmartTrader:
             'mid_point': (resistance + support) / 2
         }
 
+    def calculate_levels(self, df, lookback=20):
+        highs = df['high'].iloc[-lookback:]
+        lows = df['low'].iloc[-lookback:]
+        resistance = highs.max()
+        support = lows.min()
+        return resistance, support
+
+    def level_context(self, price, resistance, support):
+        range_size = resistance - support
+        if range_size <= 0:
+            return {
+                'near_resistance': False,
+                'near_support': False,
+                'breakout': False,
+                'breakdown': False,
+            }
+
+        near_resistance = price > resistance - (range_size * 0.1)
+        near_support = price < support + (range_size * 0.1)
+        breakout_zone = price > resistance
+        breakdown_zone = price < support
+
+        return {
+            'near_resistance': near_resistance,
+            'near_support': near_support,
+            'breakout': breakout_zone,
+            'breakdown': breakdown_zone,
+        }
+
+    def dead_zone_filter(self, price, resistance, support):
+        range_size = resistance - support
+        if price <= 0:
+            return True
+        return (range_size / price) < 0.01
+
     def is_near_level(self, price, level):
         return abs(price - level) / level * 100 <= self.near_level_percent
 
@@ -524,11 +559,13 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # TRADE SCORING & DYNAMIC SIZING
     # ════════════════════════════════════════════════════════════════════
-    def score_trade(self, df, price, rsi, ema_fast, ema_slow, resistance, volume_ratio):
-        """Score a trade setup 0-5. Higher = stronger conviction."""
+    def score_trade(self, df, price, rsi, ema_fast, ema_slow, volume_ratio):
+        """Score a trade setup using momentum, volume, candle strength, and level context."""
         score = 0
         ema20 = self.calculate_ema(df['close'], 20)
         ema50 = self.calculate_ema(df['close'], 50)
+        resistance, support = self.calculate_levels(df)
+        context = self.level_context(price, resistance, support)
 
         # Trend strength: EMA20 > EMA50
         if ema20 > ema50:
@@ -542,13 +579,18 @@ class SmartTrader:
         if volume_ratio > 1.5:
             score += 1
 
-        # Breakout condition: price above resistance
-        if price > resistance:
-            score += 1
-
         # Strong candle: green with decent body
         candle = df.iloc[-1]
         if candle['close'] > candle['open']:
+            score += 1
+
+        # Level awareness: reward true breakouts, penalize likely rejection.
+        if context['breakout']:
+            score += 2
+        elif context['near_resistance']:
+            score -= 1
+
+        if context['near_support']:
             score += 1
 
         return score
@@ -599,6 +641,80 @@ class SmartTrader:
         """Block trading outside EU/US active hours (7-22 UTC)."""
         utc_hour = datetime.now(timezone.utc).hour
         return 7 <= utc_hour <= 22
+
+    def get_btc_bias(self):
+        """Use BTC trend and RSI as a market bias filter for all long entries."""
+        df = self.get_candles('BTCUSDT', '15m', 100)
+        if df is None or len(df) < 50:
+            return 'NEUTRAL'
+
+        closes = df['close']
+        ema20 = self.calculate_ema(closes, 20)
+        ema50 = self.calculate_ema(closes, 50)
+        rsi = self.calculate_rsi(closes)
+
+        if ema20 > ema50 and rsi > 50:
+            return 'BULLISH'
+        if ema20 < ema50 and rsi < 50:
+            return 'BEARISH'
+        return 'NEUTRAL'
+
+    def get_pair_snapshot(self, symbol):
+        """Build a lightweight ranking snapshot for a symbol."""
+        df = self.get_candles(symbol, '15m', 100)
+        if df is None or len(df) < 50:
+            return None
+
+        closes = df['close']
+        atr_current = self.calculate_atr(df, period=14)
+        tr = pd.concat([
+            df['high'] - df['low'],
+            (df['high'] - df['close'].shift()).abs(),
+            (df['low'] - df['close'].shift()).abs()
+        ], axis=1).max(axis=1)
+        atr_avg = tr.rolling(window=14).mean().iloc[-20:-1].mean()
+
+        return {
+            'symbol': symbol,
+            'price': closes.iloc[-1],
+            'rsi': self.calculate_rsi(closes),
+            'ema20': self.calculate_ema(closes, 20),
+            'ema50': self.calculate_ema(closes, 50),
+            'volume_ratio': self.get_volume_ratio(df),
+            'atr': atr_current,
+            'atr_avg': 0 if np.isnan(atr_avg) else atr_avg,
+            'df': df,
+        }
+
+    def rank_pairs(self, pair_snapshots):
+        ranked = []
+        for symbol, data in pair_snapshots.items():
+            score = 0
+
+            if data['volume_ratio'] > 1.0:
+                score += 1
+            if data['ema20'] > data['ema50']:
+                score += 1
+            if data['rsi'] > 50:
+                score += 1
+            if data['atr'] > data['atr_avg']:
+                score += 1
+
+            ranked.append((symbol, score))
+
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        return ranked
+
+    def elite_filter(self, score, context, snapshot):
+        if score < 3:
+            return False
+        if snapshot['volume_ratio'] < 1.0:
+            return False
+        if snapshot['atr'] < snapshot['atr_avg']:
+            return False
+        if context['near_resistance'] and not context['breakout']:
+            return False
+        return True
 
     # ════════════════════════════════════════════════════════════════════
     # FILTERS
@@ -707,6 +823,16 @@ class SmartTrader:
         sr = self.calculate_support_resistance(df)
         support = sr['support']
         resistance = sr['resistance']
+        recent_resistance, recent_support = self.calculate_levels(df)
+
+        if self.dead_zone_filter(price, recent_resistance, recent_support):
+            return {
+                'action': 'HOLD', 'strength': 0,
+                'reason': 'Dead zone: range too tight (<1%)',
+                'market_type': 'N/A', 'price': price,
+                'support': recent_support, 'resistance': recent_resistance,
+                'rsi': rsi, 'adx': adx['adx'], 'zone': 'dead_zone'
+            }
 
         market_type = self.get_market_type(adx['adx'])
         state = self.get_symbol_state(symbol)
@@ -873,7 +999,7 @@ class SmartTrader:
         if signal['action'] == 'BUY':
             volume_ratio = self.get_volume_ratio(df)
             signal['score'] = self.score_trade(
-                df, price, rsi, ema_fast, ema_slow, resistance, volume_ratio
+                df, price, rsi, ema_fast, ema_slow, volume_ratio
             )
             if signal['score'] <= 2:
                 return {'action': 'HOLD', 'strength': 0,
@@ -1363,11 +1489,13 @@ class SmartTrader:
 
                 session, settings = self.get_market_session()
                 min_strength = settings['min_strength']
+                btc_bias = self.get_btc_bias()
 
                 print(f"\n   Scanning {len(self.trading_pairs)} pairs... "
                       f"[{session.upper()} | {settings['mode']} | "
-                      f"Trades: {self.daily_trades}/{settings['max_trades']}]")
+                      f"Trades: {self.daily_trades}/{settings['max_trades']} | BTC: {btc_bias}]")
 
+                pair_snapshots = {}
                 for symbol in self.trading_pairs:
                     if any(p['symbol'] == symbol for p in self.open_positions):
                         continue
@@ -1377,7 +1505,30 @@ class SmartTrader:
                         print(f"   {symbol} skipped - BTC filter")
                         continue
 
+                    snapshot = self.get_pair_snapshot(symbol)
+                    if snapshot:
+                        pair_snapshots[symbol] = snapshot
+
+                ranked_pairs = self.rank_pairs(pair_snapshots)
+                top_symbols = [item[0] for item in ranked_pairs[:2]]
+
+                for symbol in top_symbols:
+                    if len(self.open_positions) >= self.max_positions:
+                        break
+
+                    snapshot = pair_snapshots[symbol]
+                    resistance, support = self.calculate_levels(snapshot['df'])
+                    context = self.level_context(snapshot['price'], resistance, support)
+
+                    if self.dead_zone_filter(snapshot['price'], resistance, support):
+                        print(f"   {symbol}: HOLD (dead_zone) - range too tight")
+                        continue
+
                     signal = self.analyze(symbol)
+
+                    if btc_bias == 'BEARISH' and signal.get('action') == 'BUY':
+                        print(f"   {symbol}: HOLD (btc_bias) - BTC bearish blocked long")
+                        continue
 
                     if signal['action'] != 'HOLD' or any(
                         x in signal.get('reason', '')
@@ -1387,6 +1538,12 @@ class SmartTrader:
                         print(f"   {symbol}: {signal['action']} "
                               f"({signal.get('market_type','N/A')}|{signal.get('zone','?')}) "
                               f"- {signal['reason']}")
+
+                    if signal['action'] == 'BUY':
+                        score = signal.get('score', 0)
+                        if not self.elite_filter(score, context, snapshot):
+                            print(f"   {symbol}: HOLD (elite_filter) - setup not elite")
+                            continue
 
                     if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
                         if len(self.open_positions) >= self.max_positions:
