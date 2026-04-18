@@ -151,6 +151,20 @@ class EntryEngine:
                 if confidence < 3:
                     return {'action': 'HOLD', 'pair': pair,
                             'reason': f'Low confidence ({confidence}/4)'}
+
+                if confidence == 3:
+                    pre_breakout = (
+                        lows is not None and len(lows) >= 3 and
+                        all(lows[i] >= lows[i - 1] for i in range(-min(3, len(lows)), 0)) and
+                        volume > avg_volume * 0.9 and
+                        (resistance - price) / resistance <= 0.01
+                    )
+                    if not pre_breakout:
+                        return {'action': 'HOLD', 'pair': pair,
+                                'reason': 'Score 3 but no pre-breakout structure'}
+                    return {'action': 'CANDIDATE_SMALL', 'pair': pair, 'level': sig['level'],
+                            'confidence': confidence, 'price': price}
+
                 return {'action': 'CANDIDATE', 'pair': pair, 'level': sig['level'],
                         'confidence': confidence, 'price': price}
 
@@ -178,7 +192,7 @@ class EntryEngine:
             )
             if not result:
                 continue
-            if result['action'] == 'CANDIDATE':
+            if result['action'] in ('CANDIDATE', 'CANDIDATE_SMALL'):
                 candidates.append(result)
             else:
                 signals.append(result)
@@ -186,14 +200,15 @@ class EntryEngine:
         if candidates:
             top_pair = max(candidates, key=lambda x: x['confidence'])
             self.get(top_pair['pair'])['active'] = False
-            self.execute_trade(top_pair['pair'], top_pair['price'])
+            small = top_pair['action'] == 'CANDIDATE_SMALL'
+            self.execute_trade(top_pair['pair'], top_pair['price'], small_position=small)
             signals.append({**top_pair, 'action': 'BUY'})
 
         return signals
 
-    def execute_trade(self, pair, price):
+    def execute_trade(self, pair, price, small_position=False):
         if not self.execute_fn:
-            print(f"EXECUTING TRADE: {pair} at {price}")
+            print(f"EXECUTING TRADE: {pair} at {price} {'(small)' if small_position else ''}")
             return
         signal = {
             'action': 'BUY',
@@ -201,6 +216,7 @@ class EntryEngine:
             'strength': 0.85,
             'entry_type': 'BREAKOUT',
             'support_override': self.signals[pair]['level'],
+            'small_position': small_position,
         }
         self.execute_fn(pair, signal)
 
@@ -1080,8 +1096,12 @@ class SmartTrader:
             session, _ = self.get_market_session()
             base_risk = 0.01 if session == 'asia' else 0.015
             base_risk = self.adjust_risk(base_risk)
-            risk_percent = base_risk if strong_setup else base_risk * 0.5
-            print(f"   📐 {'STRONG' if strong_setup else 'DECENT'} setup "
+            small_position = signal.get('small_position', False)
+            if small_position:
+                risk_percent = base_risk * 0.3
+            else:
+                risk_percent = base_risk if strong_setup else base_risk * 0.5
+            print(f"   📐 {'SMALL' if small_position else 'STRONG' if strong_setup else 'DECENT'} setup "
                   f"(strength={signal.get('strength', 0):.2f}) → risk {risk_percent*100:.2f}%")
 
             quantity = self.calculate_position_size(balance, price, stop_loss_price, risk_percent)
