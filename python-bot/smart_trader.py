@@ -207,8 +207,12 @@ class EntryEngine:
             if market_mode == 'CHOPPY':
                 print(f"{pair} is choppy → allowing limited trades (B+ and SCOUT only)")
             if not result:
+                print(f"Skipping {pair} because: volume below average")
                 continue
-            if result['action'] in ('CANDIDATE', 'CANDIDATE_SMALL'):
+            if result['action'] == 'HOLD':
+                print(f"Skipping {pair} because: {result.get('reason', 'HOLD')}")
+                signals.append(result)
+            elif result['action'] in ('CANDIDATE', 'CANDIDATE_SMALL'):
                 candidates.append(result)
             else:
                 signals.append(result)
