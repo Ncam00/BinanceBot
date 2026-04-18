@@ -1069,11 +1069,6 @@ Reason: {reason}
             return {'action': 'HOLD', 'strength': 0,
                     'reason': 'Outside active session (7-22 UTC)'}
 
-        # Chop filter: skip only when ATR is materially below average.
-        if self.avoid_chop(df):
-            return {'action': 'HOLD', 'strength': 0,
-                'reason': 'Market choppy (ATR below 85% of avg) - skipping'}
-
         sr = self.calculate_support_resistance(df)
         support = sr['support']
         resistance = sr['resistance']
@@ -1121,20 +1116,17 @@ Reason: {reason}
         compression_setup = self.detect_pre_breakout(df, price, resistance, volume_ratio)
         trade_score = self.get_trade_score(trade_data, context)
         strong_breakout = self.is_strong_breakout(trade_data, context)
+        entry_type = None
+        entry_reason = None
+        entry_strength = 0.0
+        support_override = None
+        clear_breakout_wait = False
+        retest_reason = None
 
-        # ── ADDED: ADX FILTER ─────────────────────────────────────────
-        # RANGE markets are exempt (mean reversion doesn't need trend)
-        # TREND and MIXED markets must have ADX >= configured minimum to avoid weak setups
-        if market_type != 'RANGE' and adx['adx'] < self.min_adx_for_entry:
-            return {
-                'action': 'HOLD', 'strength': 0,
-                'reason': f"ADX {adx['adx']:.1f} < {self.min_adx_for_entry} - market too choppy",
-                'market_type': market_type, 'price': price,
-                'support': support, 'resistance': resistance,
-                'rsi': rsi, 'adx': adx['adx'], 'zone': 'choppy'
-            }
+        if market_mode == 'CHOPPY':
+            print(f"{symbol} choppy -> allowing limited trades")
 
-        # ── Breakout state machine ────────────────────────────────────
+        # Track breakout state without blocking the tier decision path.
         if market_type == 'TREND' and price > resistance and not state['waiting_for_retest'] and not compression_setup and not strong_breakout and trade_score < 3:
             state['waiting_for_retest'] = True
             state['breakout_level'] = resistance
@@ -1144,13 +1136,7 @@ Reason: {reason}
                 f"📈 {symbol} Breakout detected\n"
                 f"Level: ${resistance:.4f}\nWaiting for retest..."
             )
-            return {
-                'action': 'HOLD', 'strength': 0,
-                'reason': f"Breakout at ${resistance:.4f} - waiting for retest",
-                'market_type': market_type, 'price': price,
-                'support': support, 'resistance': resistance,
-                'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_wait'
-            }
+            retest_reason = f"Breakout at ${resistance:.4f} - waiting for retest"
 
         if state.get('waiting_for_retest'):
             if compression_setup or strong_breakout or trade_score >= 3:
@@ -1159,105 +1145,115 @@ Reason: {reason}
                 state['retest_candles'] += 1
                 if state['retest_candles'] > 10:
                     self.reset_breakout_state(symbol)
-                    return {
-                        'action': 'HOLD', 'strength': 0,
-                        'reason': 'Breakout retest expired (10 candles)',
-                        'market_type': market_type, 'price': price,
-                        'support': support, 'resistance': resistance,
-                        'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_timeout'
-                    }
+                    retest_reason = 'Breakout retest expired (10 candles)'
 
                 if state['breakout_direction'] == 'LONG' and \
                    price <= state['breakout_level'] * (1 + tolerance):
                     current_open = df['open'].iloc[-1]
                     current_close = df['close'].iloc[-1]
                     if current_close > current_open and rsi > 50:
-                        signal = {
-                            'action': 'BUY', 'strength': 0.80,
-                            'reason': f"BREAKOUT BUY: Retest confirmed @ ${state['breakout_level']:.4f}",
-                            'entry_type': 'BREAKOUT',
-                            'support_override': state['breakout_level'],
-                            'clear_breakout_wait': True
-                        }
+                        strong_breakout = True
+                        support_override = state['breakout_level']
+                        clear_breakout_wait = True
+                        entry_reason = f"BREAKOUT BUY: Retest confirmed @ ${state['breakout_level']:.4f}"
                     else:
-                        return {
-                            'action': 'HOLD', 'strength': 0,
-                            'reason': 'Retest touched - waiting for confirmation candle',
-                            'market_type': market_type, 'price': price,
-                            'support': support, 'resistance': resistance,
-                            'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_retest'
-                        }
+                        retest_reason = 'Retest touched - waiting for confirmation candle'
                 else:
-                    return {
-                        'action': 'HOLD', 'strength': 0,
-                        'reason': f"Watching retest at ${state['breakout_level']:.4f}",
-                        'market_type': market_type, 'price': price,
-                        'support': support, 'resistance': resistance,
-                    'rsi': rsi, 'adx': adx['adx'], 'zone': 'breakout_wait'
-                }
+                    retest_reason = f"Watching retest at ${state['breakout_level']:.4f}"
 
-        # ── HARD BLOCK: must be near S/R ─────────────────────────────
         near_support = self.is_near_level(price, support)
         near_resistance = self.is_near_level(price, resistance)
 
-        if not near_support and not near_resistance and not context['breakout'] and not context['breakdown']:
-            return {
-                'action': 'HOLD', 'strength': 0,
-                'reason': 'HARD BLOCK: Not at support/resistance',
-                'market_type': market_type, 'price': price,
-                'support': support, 'resistance': resistance,
-                'rsi': rsi, 'adx': adx['adx'], 'zone': 'middle'
-            }
-
         zone = self.get_trade_zone(price, support, resistance)
-        if zone == 'middle':
+
+        # Entry decision always runs before filters.
+        if compression_setup:
+            entry_type = 'SCOUT'
+            entry_reason = 'SCOUT COMPRESSION ENTRY: Near resistance with higher lows'
+            entry_strength = 0.70
+        elif strong_breakout:
+            entry_type = 'A+'
+            entry_reason = entry_reason or 'IMPERFECT BREAKOUT ENTRY: Breakout candle strong enough to skip retest'
+            entry_strength = 0.85
+        elif self.is_b_plus_trade(trade_score, context):
+            entry_type = 'B+'
+            entry_reason = f'FLEX ENTRY: 3-of-5 confirmation matched ({trade_score}/5)'
+            entry_strength = 0.75
+
+        if entry_type is None:
+            reason = retest_reason or f'No valid trend entry ({trade_score}/5 checks)'
             return {
-                'action': 'HOLD', 'strength': 0,
-                'reason': 'HARD BLOCK: Price in middle zone',
-                'market_type': market_type, 'price': price,
-                'support': support, 'resistance': resistance,
-                'rsi': rsi, 'adx': adx['adx'], 'zone': zone
+                'action': 'HOLD',
+                'strength': 0,
+                'reason': reason,
+                'market_type': market_type,
+                'price': price,
+                'support': support,
+                'resistance': resistance,
+                'rsi': rsi,
+                'adx': adx['adx'],
+                'zone': zone,
+                'market_mode': market_mode,
             }
 
-        # ── Strategy signal: market mode first, then specific strategy ─
-        if market_mode == 'RANGING':
-            signal = self.ranging_trade(price, rsi, support, resistance, volume_ratio)
-        elif market_mode == 'TRENDING' and market_type == 'RANGE':
-            signal = self.get_range_signal(price, rsi, bb, support, resistance)
-        elif market_mode == 'TRENDING' and market_type == 'TREND':
-            if compression_setup:
-                signal = {
-                    'action': 'BUY',
-                    'strength': 0.70,
-                    'reason': 'SCOUT COMPRESSION ENTRY: Near resistance with higher lows',
-                    'entry_type': 'SCOUT',
-                    'entry_tier': 'SCOUT',
-                    'scout_trade': True,
-                    'score': trade_score,
-                }
-            elif strong_breakout:
-                signal = {
-                    'action': 'BUY',
-                    'strength': 0.85,
-                    'reason': 'IMPERFECT BREAKOUT ENTRY: Breakout candle strong enough to skip retest',
-                    'entry_type': 'BREAKOUT',
-                    'entry_tier': 'A+',
-                    'score': max(trade_score, 4),
-                }
-            elif self.is_b_plus_trade(trade_score, context):
-                signal = {
-                    'action': 'BUY',
-                    'strength': 0.75,
-                    'reason': f'FLEX ENTRY: 3-of-5 confirmation matched ({trade_score}/5)',
-                    'entry_type': 'B_PLUS',
-                    'entry_tier': 'B+',
-                    'fallback_trade': True,
-                    'score': trade_score,
-                }
-            else:
-                signal = {'action': 'HOLD', 'strength': 0, 'reason': f'No valid trend entry ({trade_score}/5 checks)'}
+        if entry_type == 'A+' and market_mode == 'CHOPPY':
+            return {
+                'action': 'HOLD', 'strength': 0,
+                'reason': 'Skipping A+ due to chop',
+                'market_type': market_type, 'price': price,
+                'support': support, 'resistance': resistance,
+                'rsi': rsi, 'adx': adx['adx'], 'zone': zone,
+                'market_mode': market_mode,
+            }
+
+        if entry_type == 'A+' and market_type != 'RANGE' and adx['adx'] < self.min_adx_for_entry:
+            return {
+                'action': 'HOLD', 'strength': 0,
+                'reason': f'Skipping A+ due to weak ADX ({adx["adx"]:.1f} < {self.min_adx_for_entry})',
+                'market_type': market_type, 'price': price,
+                'support': support, 'resistance': resistance,
+                'rsi': rsi, 'adx': adx['adx'], 'zone': zone,
+                'market_mode': market_mode,
+            }
+
+        if entry_type == 'A+' and self.dead_zone_filter(price, recent_resistance, recent_support):
+            return {
+                'action': 'HOLD', 'strength': 0,
+                'reason': 'Skipping A+ due to dead zone',
+                'market_type': market_type, 'price': price,
+                'support': recent_support, 'resistance': recent_resistance,
+                'rsi': rsi, 'adx': adx['adx'], 'zone': 'dead_zone',
+                'market_mode': market_mode,
+            }
+
+        signal = {
+            'action': 'BUY',
+            'strength': entry_strength,
+            'reason': entry_reason,
+            'score': trade_score,
+        }
+        if entry_type == 'SCOUT':
+            signal.update({
+                'entry_type': 'SCOUT',
+                'entry_tier': 'SCOUT',
+                'scout_trade': True,
+            })
+        elif entry_type == 'A+':
+            signal.update({
+                'entry_type': 'BREAKOUT',
+                'entry_tier': 'A+',
+                'score': max(trade_score, 4),
+            })
+            if support_override is not None:
+                signal['support_override'] = support_override
+            if clear_breakout_wait:
+                signal['clear_breakout_wait'] = True
         else:
-            signal = {'action': 'HOLD', 'strength': 0, 'reason': 'No valid market-mode setup'}
+            signal.update({
+                'entry_type': 'B_PLUS',
+                'entry_tier': 'B+',
+                'fallback_trade': True,
+            })
 
         # ── Confirmation candle ───────────────────────────────────────
         if signal['action'] == 'BUY' and signal.get('entry_type') not in ('BREAKOUT', 'SCOUT'):
@@ -1881,14 +1877,7 @@ Reason: {reason}
                     context['structure_clean'] = context['trend'] and (context['breakout'] or not context['near_resistance']) and not context['breakdown']
                     score = self.get_trade_score(snapshot, context)
 
-                    if self.dead_zone_filter(snapshot['price'], resistance, support):
-                        self.debug_symbol_check(symbol, snapshot, context, score, 'Dead zone: range too tight')
-                        print(f"X Skipping {symbol} due to condition above")
-                        continue
-
                     signal = self.analyze(symbol)
-
-                        print(f"{symbol} reached entry logic")
 
                     if btc_bias == 'BEARISH' and signal.get('action') == 'BUY':
                         self.debug_symbol_check(symbol, snapshot, context, score, 'BTC bearish blocked long')
@@ -1914,6 +1903,10 @@ Reason: {reason}
                     if signal['action'] == 'BUY':
                         if len(self.open_positions) >= self.max_positions:
                             break
+                        scout = signal.get('entry_tier') == 'SCOUT'
+                        breakout = signal.get('entry_tier') == 'A+'
+                        entry_type = signal.get('entry_tier') or signal.get('entry_type')
+                        print(f"{symbol} | score={signal.get('score', score)} | scout={scout} | breakout={breakout} | entry={entry_type}")
                         if self.execute_buy(symbol, signal):
                             a_trade_taken = True
                         break
