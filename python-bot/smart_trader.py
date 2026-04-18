@@ -139,17 +139,18 @@ class EntryEngine:
                 if confidence < 3:
                     return {'action': 'HOLD', 'pair': pair,
                             'reason': f'Low confidence ({confidence}/4)'}
-                sig['active'] = False
-                self.execute_trade(pair, price)
-                return {'action': 'BUY', 'pair': pair, 'level': sig['level'],
-                        'confidence': confidence}
+                return {'action': 'CANDIDATE', 'pair': pair, 'level': sig['level'],
+                        'confidence': confidence, 'price': price}
 
         return None
 
     def scan_market(self, market_data):
+        candidates = []
         signals = []
         for pair in self.pairs:
-            data = market_data[pair]
+            data = market_data.get(pair)
+            if not data:
+                continue
             result = self.process_pair(
                 pair,
                 price=data['price'],
@@ -162,8 +163,19 @@ class EntryEngine:
                 prev_close=data.get('prev_close'),
                 atr=data.get('atr'),
             )
-            if result:
+            if not result:
+                continue
+            if result['action'] == 'CANDIDATE':
+                candidates.append(result)
+            else:
                 signals.append(result)
+
+        if candidates:
+            top_pair = max(candidates, key=lambda x: x['confidence'])
+            self.get(top_pair['pair'])['active'] = False
+            self.execute_trade(top_pair['pair'], top_pair['price'])
+            signals.append({**top_pair, 'action': 'BUY'})
+
         return signals
 
     def execute_trade(self, pair, price):
