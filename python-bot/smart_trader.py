@@ -201,12 +201,13 @@ class EntryEngine:
             top_pair = max(candidates, key=lambda x: x['confidence'])
             self.get(top_pair['pair'])['active'] = False
             small = top_pair['action'] == 'CANDIDATE_SMALL'
-            self.execute_trade(top_pair['pair'], top_pair['price'], small_position=small)
+            top_atr = market_data.get(top_pair['pair'], {}).get('atr')
+            self.execute_trade(top_pair['pair'], top_pair['price'], small_position=small, atr=top_atr)
             signals.append({**top_pair, 'action': 'BUY'})
 
         return signals
 
-    def execute_trade(self, pair, price, small_position=False):
+    def execute_trade(self, pair, price, small_position=False, atr=None):
         if not self.execute_fn:
             print(f"EXECUTING TRADE: {pair} at {price} {'(small)' if small_position else ''}")
             return
@@ -217,6 +218,7 @@ class EntryEngine:
             'entry_type': 'BREAKOUT',
             'support_override': self.signals[pair]['level'],
             'small_position': small_position,
+            'atr': atr,
         }
         self.execute_fn(pair, signal)
 
@@ -1154,6 +1156,7 @@ class SmartTrader:
                 'trailing_stop_active': False,
                 'highest_price': fill_price,
                 'trailing_stop_price': None,
+                'atr': signal.get('atr'),
                 'timestamp': datetime.now(),
                 'signal': signal
             }
@@ -1329,7 +1332,12 @@ class SmartTrader:
                 # Update trailing stop if price moves higher
                 if current_price > position.get('highest_price', 0):
                     position['highest_price'] = current_price
-                    new_trail = current_price * (1 - self.trailing_stop_distance / 100)
+                    strong_trend = position.get('signal', {}).get('strength', 0) >= self.strong_setup_threshold
+                    atr = position.get('atr')
+                    if strong_trend and atr:
+                        new_trail = current_price - atr * 0.8
+                    else:
+                        new_trail = current_price * (1 - self.trailing_stop_distance / 100)
                     locked = self.trailing_stop(current_price, position['entry_price'])
                     if locked:
                         new_trail = max(new_trail, locked)
