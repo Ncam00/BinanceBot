@@ -1142,11 +1142,15 @@ class SmartTrader:
             fill_price = float(order['fills'][0]['price'])
             entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
-            take_profit, stop_loss = self.set_tp_sl(
-                fill_price,
-                score=signal.get('confidence'),
-                strong_trend=strong_setup,
-            )
+            if 'tp_percent_override' in signal:
+                take_profit = fill_price * (1 + signal['tp_percent_override'] / 100)
+                stop_loss   = fill_price * (1 - signal['sl_percent_override'] / 100)
+            else:
+                take_profit, stop_loss = self.set_tp_sl(
+                    fill_price,
+                    score=signal.get('confidence'),
+                    strong_trend=strong_setup,
+                )
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
 
@@ -1476,6 +1480,44 @@ class SmartTrader:
             return current_price * 0.995         # lock profit at 0.5% below current
         return None
 
+    def forced_b_plus_attempt(self, market_data):
+        if self.daily_trades > 0:
+            return
+        if not self.can_trade():
+            return
+
+        print("[FORCED B+ ATTEMPT]")
+
+        best_pair = None
+        best_score = -1
+        for symbol, data in market_data.items():
+            score = self.entry_engine.get_confidence(
+                data['price'], data['resistance'], data['volume'], data['avg_volume'],
+                data['close'], data['open'], data['ma50'],
+            )
+            if score > best_score:
+                best_score = score
+                best_pair = symbol
+
+        if not best_pair:
+            return
+
+        data = market_data[best_pair]
+        balance = self.get_balance()
+        signal = {
+            'action':              'BUY',
+            'price':               data['price'],
+            'strength':            0.85,
+            'entry_type':          'FORCED_B_PLUS',
+            'support_override':    data.get('support', data['price'] * 0.99),
+            'confidence':          best_score,
+            'tp_percent_override': 1.2,
+            'sl_percent_override': 1.0,
+            'atr':                 data.get('atr'),
+            'forced':              True,
+        }
+        self.execute_buy(best_pair, signal)
+
     def adapt_strategy(self):
         wr = self.win_rate()
         if wr < 0.5:
@@ -1785,7 +1827,10 @@ if __name__ == '__main__':
     while True:
         try:
             market_data = trader.get_market_data()
-            engine.scan_market(market_data)
+            signals = engine.scan_market(market_data)
+            bought = any(s.get('action') == 'BUY' for s in signals)
+            if not bought:
+                trader.forced_b_plus_attempt(market_data)
             time.sleep(5)
         except KeyboardInterrupt:
             print("\n\n   🛑 Bot stopped by user")
