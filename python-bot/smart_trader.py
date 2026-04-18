@@ -1087,29 +1087,6 @@ Reason: {reason}
             'rsi': rsi,
         }
 
-        if market_mode == 'CHOPPY':
-            # In choppy conditions allow B+ and SCOUT only - do not block everything
-            compression_early = self.is_compression_setup(trade_data, context)
-            score_early = self.get_trade_score(trade_data, context)
-            if not compression_early and score_early < 3:
-                return {
-                    'action': 'HOLD', 'strength': 0,
-                    'reason': 'Choppy market: no B+ or scout setup found',
-                    'market_type': 'CHOPPY', 'price': price,
-                    'support': recent_support, 'resistance': recent_resistance,
-                    'rsi': rsi, 'adx': adx['adx'], 'zone': 'choppy_market',
-                    'market_mode': market_mode,
-                }
-
-        if self.dead_zone_filter(price, recent_resistance, recent_support):
-            return {
-                'action': 'HOLD', 'strength': 0,
-                'reason': 'Dead zone: range too tight (<1%)',
-                'market_type': 'N/A', 'price': price,
-                'support': recent_support, 'resistance': recent_resistance,
-                'rsi': rsi, 'adx': adx['adx'], 'zone': 'dead_zone'
-            }
-
         market_type = self.get_market_type(adx['adx'])
         state = self.get_symbol_state(symbol)
         tolerance = 0.002
@@ -1885,6 +1862,11 @@ Reason: {reason}
                         print(f"X Skipping {symbol} due to condition above")
                         continue
 
+                    scout = signal.get('entry_tier') == 'SCOUT' or self.is_scout_candidate(snapshot, context)
+                    breakout = signal.get('entry_tier') == 'A+' or bool(context.get('breakout'))
+                    entry_type = signal.get('entry_tier') or signal.get('entry_type')
+                    print(f"{symbol} | score={signal.get('score', score)} | scout={scout} | breakout={breakout} | entry={entry_type}")
+
                     # Force visibility: always print why a symbol was skipped or acted on
                     reason_text = signal.get('reason', 'no reason')
                     print(f"   {symbol} [{signal['action']}] ({signal.get('market_type','N/A')}|{signal.get('zone','?')}) - {reason_text}")
@@ -1903,10 +1885,6 @@ Reason: {reason}
                     if signal['action'] == 'BUY':
                         if len(self.open_positions) >= self.max_positions:
                             break
-                        scout = signal.get('entry_tier') == 'SCOUT'
-                        breakout = signal.get('entry_tier') == 'A+'
-                        entry_type = signal.get('entry_tier') or signal.get('entry_type')
-                        print(f"{symbol} | score={signal.get('score', score)} | scout={scout} | breakout={breakout} | entry={entry_type}")
                         if self.execute_buy(symbol, signal):
                             a_trade_taken = True
                         break
