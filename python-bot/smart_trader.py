@@ -96,27 +96,28 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None):
         sig = self.get(pair)
 
         # ADX filter — skip choppy markets
         if adx is not None and adx < adx_threshold:
             return {'action': 'HOLD', 'pair': pair, 'reason': f'ADX {adx:.1f} < {adx_threshold} (choppy)'}
 
-        # Volume filter
-        if volume < avg_volume:
+        # Market mode
+        market_mode = 'CHOPPY' if (atr is not None and atr_avg is not None and atr < atr_avg * 0.8) else 'ACTIVE'
+
+        # Volume filter — skip entirely only in ACTIVE mode (CHOPPY can still scout)
+        if market_mode == 'ACTIVE' and volume < avg_volume:
             return None
 
-        # Pre-breakout detection
+        # Pre-breakout detection (SCOUT)
         if not sig['active'] and price < resistance:
             price_near_resistance = (resistance - price) / resistance <= 0.01
-            volume_increasing = volume > avg_volume * 0.9
             higher_lows_forming = (
                 lows is not None and len(lows) >= 3 and
                 all(lows[i] >= lows[i - 1] for i in range(-min(3, len(lows)), 0))
             )
-            pre_breakout = price_near_resistance and volume_increasing and higher_lows_forming
-            if pre_breakout:
+            if price_near_resistance and higher_lows_forming:
                 return {'action': 'PRE_BREAKOUT', 'pair': pair, 'level': resistance}
 
         # New breakout detected
@@ -144,7 +145,7 @@ class EntryEngine:
 
             momentum = (
                 prev_close is not None and close > prev_close and
-                volume > avg_volume * 1.2
+                volume > avg_volume * 1.05
             )
             candle_strength = (
                 atr is not None and (close - open_price) > (atr * 0.5)
@@ -152,6 +153,9 @@ class EntryEngine:
 
             if breakout and retest and bullish_candle and momentum and candle_strength:
                 confidence = self.get_confidence(price, resistance, volume, avg_volume, close, open_price, ma)
+                if market_mode == 'CHOPPY' and confidence < 4:
+                    return {'action': 'HOLD', 'pair': pair,
+                            'reason': f'CHOPPY market: B+ (score 4) required, got {confidence}'}
                 if confidence < 3:
                     return {'action': 'HOLD', 'pair': pair,
                             'reason': f'Low confidence ({confidence}/4)'}
@@ -160,7 +164,6 @@ class EntryEngine:
                     pre_breakout = (
                         lows is not None and len(lows) >= 3 and
                         all(lows[i] >= lows[i - 1] for i in range(-min(3, len(lows)), 0)) and
-                        volume > avg_volume * 0.9 and
                         (resistance - price) / resistance <= 0.01
                     )
                     if not pre_breakout:
@@ -195,7 +198,12 @@ class EntryEngine:
                 lows=data.get('lows'),
                 adx=data.get('adx'),
                 adx_threshold=22,
+                atr_avg=data.get('atr_avg'),
             )
+            atr = data.get('atr', 0)
+            atr_avg = data.get('atr_avg', 0)
+            market_mode = 'CHOPPY' if (atr and atr_avg and atr < atr_avg * 0.8) else 'ACTIVE'
+            print(f"{pair} | ATR: {atr:.2f} | AVG: {atr_avg:.2f} | MODE: {market_mode}")
             if not result:
                 continue
             if result['action'] in ('CANDIDATE', 'CANDIDATE_SMALL'):
@@ -609,11 +617,11 @@ class SmartTrader:
         return market_data
 
     def market_is_valid(self, data):
-        if data['atr'] < data['atr_avg']:
-            return False   # low volatility — chop
+        if data['atr'] < data['atr_avg'] * 0.8:
+            return 'CHOPPY'
         if data['volume'] < data['avg_volume']:
-            return False
-        return True
+            return 'CHOPPY'
+        return 'ACTIVE'
 
     # ════════════════════════════════════════════════════════════════════
     # MARKET TYPE
@@ -999,9 +1007,10 @@ class SmartTrader:
                 'volume':     volumes[-1],
                 'avg_volume': sum(volumes[-20:-1]) / 19,
             }
-            if not self.market_is_valid(market_snapshot):
+            market_mode = self.market_is_valid(market_snapshot)
+            if market_mode == 'CHOPPY':
                 return {'action': 'HOLD', 'strength': 0,
-                        'reason': '🚫 Market invalid: low volatility or volume'}
+                        'reason': '🚫 Market CHOPPY: B+/SCOUT only via EntryEngine'}
             # Trend filter
             layers = self.check_signal_layers(
                 price, ema20, ema_trend, ema200, rsi, macd, closes, df, adx
