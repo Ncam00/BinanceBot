@@ -204,6 +204,8 @@ class EntryEngine:
             atr_avg = data.get('atr_avg', 0)
             market_mode = 'CHOPPY' if (atr and atr_avg and atr < atr_avg * 0.8) else 'ACTIVE'
             print(f"{pair} | ATR: {atr:.2f} | AVG: {atr_avg:.2f} | MODE: {market_mode}")
+            if market_mode == 'CHOPPY':
+                print(f"{pair} is choppy → allowing limited trades (B+ and SCOUT only)")
             if not result:
                 continue
             if result['action'] in ('CANDIDATE', 'CANDIDATE_SMALL'):
