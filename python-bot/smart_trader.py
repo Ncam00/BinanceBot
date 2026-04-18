@@ -586,14 +586,19 @@ class SmartTrader:
             'entry_type': 'BREAKOUT'
         }
 
+    def detect_higher_lows(self, df):
+        if len(df) < 4:
+            return False
+        recent_lows = df['low'].iloc[-4:-1].tolist()
+        return recent_lows[0] < recent_lows[1] < recent_lows[2]
+
     def detect_pre_breakout(self, df, price, resistance, volume_ratio):
         if len(df) < 4:
             return False
         price_near_resistance = price >= resistance * 0.995
-        recent_lows = df['low'].iloc[-4:-1].tolist()
-        higher_lows_forming = recent_lows[0] < recent_lows[1] < recent_lows[2]
-        volume_increasing = df['volume'].iloc[-1] > df['volume'].iloc[-2] and volume_ratio >= 1.0
-        return price_near_resistance and volume_increasing and higher_lows_forming
+        higher_lows_forming = self.detect_higher_lows(df)
+        volume_ok = volume_ratio > 1.1
+        return price_near_resistance and higher_lows_forming and volume_ok
 
     # ════════════════════════════════════════════════════════════════════
     # TRADE SCORING & DYNAMIC SIZING
@@ -656,21 +661,30 @@ class SmartTrader:
                 'sl_percent': 0.8,
             }
 
-        if signal.get('fallback_trade'):
+        if signal.get('scout_trade'):
             return {
-                'entry_type': 'fallback',
-                'balance_fraction': 0.08,
-                'tp1_percent': 1.2,
-                'tp2_percent': 1.2,
+                'entry_type': 'scout',
+                'balance_fraction': 0.05,
+                'tp1_percent': 2.5,
+                'tp2_percent': 2.5,
                 'sl_percent': 1.0,
             }
 
-        if signal_type == 'PRE_BREAKOUT' and score == 3:
+        if signal.get('fallback_trade'):
             return {
-                'entry_type': 'early',
-                'balance_fraction': 0.08,
+                'entry_type': 'b_plus',
+                'balance_fraction': 0.05,
                 'tp1_percent': 1.5,
                 'tp2_percent': 1.5,
+                'sl_percent': 1.0,
+            }
+
+        if signal_type == 'SCOUT' and score >= 3:
+            return {
+                'entry_type': 'scout',
+                'balance_fraction': 0.05,
+                'tp1_percent': 2.5,
+                'tp2_percent': 2.5,
                 'sl_percent': 1.0,
             }
 
@@ -716,12 +730,19 @@ class SmartTrader:
     def dynamic_tp_sl(self, entry_price, score, signal):
         """Return TP1, TP2 and SL using the entry profile model."""
         profile = self.get_entry_profile(signal, score)
-        single_target_profiles = {'fallback', 'engagement', 'ranging'}
+        single_target_profiles = {'b_plus', 'engagement', 'ranging', 'scout'}
         tp1 = None if profile['entry_type'] in single_target_profiles else entry_price * (1 + profile['tp1_percent'] / 100)
         tp2_percent = 3.5 if signal.get('strong_trend') and profile['entry_type'] not in single_target_profiles else profile['tp2_percent']
         tp2 = entry_price * (1 + tp2_percent / 100)
         sl = entry_price * (1 - profile['sl_percent'] / 100)
         return tp1, tp2, sl, profile
+
+    def is_b_plus_trade(self, snapshot, context):
+        return (
+            context['trend'] is True and
+            snapshot['volume_ratio'] >= 1.0 and
+            context['structure_clean'] is True
+        )
 
     def is_fallback_candidate(self, score, context, snapshot):
         trend_aligned = snapshot['ema20'] > snapshot['ema50']
@@ -737,12 +758,12 @@ class SmartTrader:
 
     def detect_market_mode(self, snapshot):
         if snapshot['atr_avg'] <= 0:
-            return 'DEAD'
+            return 'CHOPPY'
         if snapshot['atr'] > snapshot['atr_avg'] * 1.3:
             return 'TRENDING'
         if snapshot['atr'] > snapshot['atr_avg'] * 0.9:
             return 'RANGING'
-        return 'DEAD'
+        return 'CHOPPY'
 
     def is_session_active(self, session_name):
         return session_name in ('london', 'us')
@@ -1011,13 +1032,13 @@ class SmartTrader:
         resistance = sr['resistance']
         recent_resistance, recent_support = self.calculate_levels(df)
 
-        if market_mode == 'DEAD':
+        if market_mode == 'CHOPPY':
             return {
                 'action': 'HOLD', 'strength': 0,
-                'reason': 'Dead market: ATR below active threshold',
-                'market_type': 'DEAD', 'price': price,
+                'reason': 'Choppy market: ATR below active threshold',
+                'market_type': 'CHOPPY', 'price': price,
                 'support': recent_support, 'resistance': recent_resistance,
-                'rsi': rsi, 'adx': adx['adx'], 'zone': 'dead_market',
+                'rsi': rsi, 'adx': adx['adx'], 'zone': 'choppy_market',
                 'market_mode': market_mode,
             }
 
@@ -1144,9 +1165,9 @@ class SmartTrader:
                     signal = {
                         'action': 'BUY',
                         'strength': 0.70,
-                        'reason': 'PRE_BREAKOUT BUY: Price near resistance, volume increasing, higher lows forming',
-                        'entry_type': 'PRE_BREAKOUT',
-                        'pre_breakout': True,
+                        'reason': 'SCOUT ENTRY: Price near resistance, higher lows forming, volume > 1.1x',
+                        'entry_type': 'SCOUT',
+                        'scout_trade': True,
                     }
                 else:
                     signal = self.breakout_entry(df, price, resistance, rsi, adx, volume_ratio)
@@ -1154,7 +1175,7 @@ class SmartTrader:
             signal = {'action': 'HOLD', 'strength': 0, 'reason': 'No valid market-mode setup'}
 
         # ── Confirmation candle ───────────────────────────────────────
-        if signal['action'] == 'BUY' and signal.get('entry_type') != 'BREAKOUT':
+        if signal['action'] == 'BUY' and signal.get('entry_type') not in ('BREAKOUT', 'SCOUT'):
             if not self.has_confirmation_candle(df, 'bullish'):
                 signal = {'action': 'HOLD', 'strength': 0,
                           'reason': 'Buy signal - waiting for confirmation candle'}
@@ -1174,7 +1195,7 @@ class SmartTrader:
             # ADDED: Final setup validation (last gate before trade fires)
             entry_type = signal.get('entry_type', 'PULLBACK')
             prices_list = closes.tolist()
-            if entry_type == 'BREAKOUT':
+            if entry_type in ('BREAKOUT', 'SCOUT'):
                 if not self.valid_breakout_setup(
                     price, rsi,
                     macd['macd'], macd['signal'], macd['prev_macd'], ema_slow
@@ -1212,9 +1233,9 @@ class SmartTrader:
             if signal['score'] <= 2:
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': f"Score {signal['score']}/5 too low - skipping"}
-            if signal.get('entry_type') == 'PRE_BREAKOUT' and signal['score'] != 3:
+            if signal.get('entry_type') == 'SCOUT' and signal['score'] < 3:
                 return {'action': 'HOLD', 'strength': 0,
-                        'reason': f"Pre-breakout requires score 3, got {signal['score']}"}
+                        'reason': f"Scout entry requires score >= 3, got {signal['score']}"}
 
         return signal
 
@@ -1767,6 +1788,9 @@ class SmartTrader:
                     snapshot = pair_snapshots[symbol]
                     resistance, support = self.calculate_levels(snapshot['df'])
                     context = self.level_context(snapshot['price'], resistance, support)
+                    context['trend'] = snapshot['ema20'] > snapshot['ema50']
+                    context['higher_lows'] = self.detect_higher_lows(snapshot['df'])
+                    context['structure_clean'] = context['trend'] and not context['near_resistance'] and not context['breakdown']
 
                     if self.dead_zone_filter(snapshot['price'], resistance, support):
                         print(f"   {symbol}: HOLD (dead_zone) - range too tight")
@@ -1815,6 +1839,9 @@ class SmartTrader:
                         snapshot = pair_snapshots[symbol]
                         resistance, support = self.calculate_levels(snapshot['df'])
                         context = self.level_context(snapshot['price'], resistance, support)
+                        context['trend'] = snapshot['ema20'] > snapshot['ema50']
+                        context['higher_lows'] = self.detect_higher_lows(snapshot['df'])
+                        context['structure_clean'] = context['trend'] and not context['near_resistance'] and not context['breakdown']
 
                         if self.dead_zone_filter(snapshot['price'], resistance, support):
                             continue
@@ -1825,16 +1852,15 @@ class SmartTrader:
                         if btc_bias == 'BEARISH':
                             continue
 
-                        score = signal.get('score', 0)
-                        if not self.is_fallback_candidate(score, context, snapshot):
+                        if not self.is_b_plus_trade(snapshot, context):
                             continue
 
                         fallback_signal = dict(signal)
                         fallback_signal['fallback_trade'] = True
                         fallback_signal['strength'] = max(fallback_signal.get('strength', 0), min_strength)
 
-                        print(f"\n[FALLBACK TRADE - {symbol}]")
-                        print("   Score 3 setup accepted: trend aligned, not near resistance, volume/ATR acceptable")
+                        print(f"\n[B+ TRADE - {symbol}]")
+                        print("   Trend aligned, structure clean, and volume at/above average")
 
                         if self.execute_buy(symbol, fallback_signal):
                             self.fallback_trade_taken = True
