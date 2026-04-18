@@ -861,6 +861,8 @@ class SmartTrader:
             'rsi': self.calculate_rsi(closes),
             'ema20': self.calculate_ema(closes, 20),
             'ema50': self.calculate_ema(closes, 50),
+            'volume': df['volume'].iloc[-1],
+            'avg_volume': df['volume'].ewm(span=20, adjust=False).mean().iloc[-2],
             'volume_ratio': self.get_volume_ratio(df),
             'atr': atr_current,
             'atr_avg': 0 if np.isnan(atr_avg) else atr_avg,
@@ -869,6 +871,22 @@ class SmartTrader:
         }
         snapshot['market_mode'] = self.detect_market_mode(snapshot)
         return snapshot
+
+    def debug_symbol_check(self, symbol, snapshot, context, score, reason):
+        print(
+            f"""
+{symbol} CHECK:
+ATR: {snapshot.get('atr', 0):.2f} | ATR AVG: {snapshot.get('atr_avg', 0):.2f}
+Volume: {snapshot.get('volume', 0):.2f} | AvgVol: {snapshot.get('avg_volume', 0):.2f}
+Score: {score}
+Market Mode: {snapshot.get('market_mode', 'UNKNOWN')}
+Conditions:
+- Trend: {context.get('trend')}
+- Structure: {context.get('structure_clean')}
+- EMA: {context.get('ema_alignment')}
+Reason: {reason}
+"""
+        )
 
     def rank_pairs(self, pair_snapshots):
         ranked = []
@@ -1788,6 +1806,7 @@ class SmartTrader:
                 self.check_positions()
 
                 if len(self.open_positions) >= self.max_positions:
+                    print("X Skipping scan due to open position limit")
                     print(f"\r   Position open - waiting for exit", end='', flush=True)
                     time.sleep(10)
                     continue
@@ -1804,6 +1823,7 @@ class SmartTrader:
                         while datetime.now().date() == self.last_reset_date:
                             time.sleep(300)
                         continue
+                    print(f"X Skipping loop due to gate: {reason}")
                     print(f"\r   {reason}", end='', flush=True)
                     time.sleep(30)
                     continue
@@ -1820,11 +1840,12 @@ class SmartTrader:
                 pair_snapshots = {}
                 for symbol in self.trading_pairs:
                     if any(p['symbol'] == symbol for p in self.open_positions):
+                        print(f"X Skipping {symbol} due to existing open position")
                         continue
                     if len(self.open_positions) >= self.max_positions:
                         break
                     if symbol not in ('BTCUSDT',) and not self.btc_is_healthy():
-                        print(f"   {symbol} skipped - BTC filter")
+                        print(f"X Skipping {symbol} due to BTC filter")
                         continue
 
                     snapshot = self.get_pair_snapshot(symbol)
@@ -1833,6 +1854,7 @@ class SmartTrader:
 
                 dynamic_trade_cap = self.get_dynamic_trade_cap(pair_snapshots, session)
                 if self.daily_trades >= dynamic_trade_cap:
+                    print(f"X Skipping loop due to dynamic trade cap {self.daily_trades}/{dynamic_trade_cap}")
                     print(f"\r   Dynamic trade cap reached ({self.daily_trades}/{dynamic_trade_cap})", end='', flush=True)
                     time.sleep(30)
                     continue
@@ -1858,16 +1880,21 @@ class SmartTrader:
                     context = self.level_context(snapshot['price'], resistance, support)
                     context['trend'] = snapshot['ema20'] > snapshot['ema50']
                     context['higher_lows'] = self.detect_higher_lows(snapshot['df'])
+                    context['ema_alignment'] = snapshot['ema20'] > snapshot['ema50']
                     context['structure_clean'] = context['trend'] and not context['near_resistance'] and not context['breakdown']
+                    score = self.get_trade_score(snapshot, context)
 
                     if self.dead_zone_filter(snapshot['price'], resistance, support):
-                        print(f"   {symbol}: HOLD (dead_zone) - range too tight")
+                        self.debug_symbol_check(symbol, snapshot, context, score, 'Dead zone: range too tight')
+                        print(f"X Skipping {symbol} due to condition above")
                         continue
 
                     signal = self.analyze(symbol)
 
                     if btc_bias == 'BEARISH' and signal.get('action') == 'BUY':
+                        self.debug_symbol_check(symbol, snapshot, context, score, 'BTC bearish blocked long')
                         print(f"   {symbol} skipped because: BTC bearish blocked long")
+                        print(f"X Skipping {symbol} due to condition above")
                         continue
 
                     # Force visibility: always print why a symbol was skipped or acted on
