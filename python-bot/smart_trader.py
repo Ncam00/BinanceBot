@@ -596,10 +596,11 @@ class SmartTrader:
         )
 
     def is_compression_setup(self, data, context):
+        # Scout trigger: near resistance + higher lows is enough.
+        # Volume boost is a bonus but not required to allow early entry.
         return (
             context['near_resistance'] and
-            context['higher_lows'] and
-            data['volume'] > data['avg_volume'] * 1.1
+            context['higher_lows']
         )
 
     def detect_higher_lows(self, df):
@@ -1866,17 +1867,12 @@ class SmartTrader:
                     signal = self.analyze(symbol)
 
                     if btc_bias == 'BEARISH' and signal.get('action') == 'BUY':
-                        print(f"   {symbol}: HOLD (btc_bias) - BTC bearish blocked long")
+                        print(f"   {symbol} skipped because: BTC bearish blocked long")
                         continue
 
-                    if signal['action'] != 'HOLD' or any(
-                        x in signal.get('reason', '')
-                        for x in ['HARD BLOCK', 'Breakout', 'Daily target',
-                                  'ADX', 'BUY', 'SELL', 'validation']
-                    ):
-                        print(f"   {symbol}: {signal['action']} "
-                              f"({signal.get('market_type','N/A')}|{signal.get('zone','?')}) "
-                              f"- {signal['reason']}")
+                    # Force visibility: always print why a symbol was skipped or acted on
+                    reason_text = signal.get('reason', 'no reason')
+                    print(f"   {symbol} [{signal['action']}] ({signal.get('market_type','N/A')}|{signal.get('zone','?')}) - {reason_text}")
 
                     if signal['action'] == 'BUY':
                         if len(self.open_positions) >= self.max_positions:
