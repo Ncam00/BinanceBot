@@ -74,7 +74,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # EXIT MANAGEMENT
         # ════════════════════════════════════════════════════════════════════
-        self.break_even_trigger = 1.0
+        self.break_even_trigger = 1.2
         self.trailing_stop_activation = 1.5
         self.trailing_stop_distance = 0.8
         self.partial_tp_percent = 0.50
@@ -586,6 +586,15 @@ class SmartTrader:
             'entry_type': 'BREAKOUT'
         }
 
+    def detect_pre_breakout(self, df, price, resistance, volume_ratio):
+        if len(df) < 4:
+            return False
+        price_near_resistance = price >= resistance * 0.995
+        recent_lows = df['low'].iloc[-4:-1].tolist()
+        higher_lows_forming = recent_lows[0] < recent_lows[1] < recent_lows[2]
+        volume_increasing = df['volume'].iloc[-1] > df['volume'].iloc[-2] and volume_ratio >= 1.0
+        return price_near_resistance and volume_increasing and higher_lows_forming
+
     # ════════════════════════════════════════════════════════════════════
     # TRADE SCORING & DYNAMIC SIZING
     # ════════════════════════════════════════════════════════════════════
@@ -656,6 +665,15 @@ class SmartTrader:
                 'sl_percent': 1.0,
             }
 
+        if signal_type == 'PRE_BREAKOUT' and score == 3:
+            return {
+                'entry_type': 'early',
+                'balance_fraction': 0.08,
+                'tp1_percent': 1.5,
+                'tp2_percent': 1.5,
+                'sl_percent': 1.0,
+            }
+
         if signal_type == 'BREAKOUT' and score == 3:
             return {
                 'entry_type': 'early',
@@ -668,9 +686,9 @@ class SmartTrader:
         if signal_type == 'BREAKOUT' and score >= 4:
             return {
                 'entry_type': 'confirmed',
-                'balance_fraction': 0.18 if score >= 5 else 0.15,
+                'balance_fraction': 0.20 if score >= 5 else 0.15,
                 'tp1_percent': 1.5,
-                'tp2_percent': 2.5,
+                'tp2_percent': 2.0,
                 'sl_percent': 1.2,
             }
 
@@ -700,7 +718,8 @@ class SmartTrader:
         profile = self.get_entry_profile(signal, score)
         single_target_profiles = {'fallback', 'engagement', 'ranging'}
         tp1 = None if profile['entry_type'] in single_target_profiles else entry_price * (1 + profile['tp1_percent'] / 100)
-        tp2 = entry_price * (1 + profile['tp2_percent'] / 100)
+        tp2_percent = 3.5 if signal.get('strong_trend') and profile['entry_type'] not in single_target_profiles else profile['tp2_percent']
+        tp2 = entry_price * (1 + tp2_percent / 100)
         sl = entry_price * (1 - profile['sl_percent'] / 100)
         return tp1, tp2, sl, profile
 
@@ -1118,9 +1137,19 @@ class SmartTrader:
             signal = self.get_trend_signal(
                 price, rsi, macd, ema_fast, ema_slow, adx, support, resistance
             )
-            # If pullback didn't fire, try breakout entry
+            # Allow a small early entry when a breakout is building before confirmation.
             if signal['action'] == 'HOLD':
-                signal = self.breakout_entry(df, price, resistance, rsi, adx, volume_ratio)
+                pre_breakout = self.detect_pre_breakout(df, price, resistance, volume_ratio)
+                if pre_breakout:
+                    signal = {
+                        'action': 'BUY',
+                        'strength': 0.70,
+                        'reason': 'PRE_BREAKOUT BUY: Price near resistance, volume increasing, higher lows forming',
+                        'entry_type': 'PRE_BREAKOUT',
+                        'pre_breakout': True,
+                    }
+                else:
+                    signal = self.breakout_entry(df, price, resistance, rsi, adx, volume_ratio)
         else:
             signal = {'action': 'HOLD', 'strength': 0, 'reason': 'No valid market-mode setup'}
 
@@ -1171,6 +1200,8 @@ class SmartTrader:
         signal['adx'] = adx['adx']
         signal['zone'] = zone
         signal['market_mode'] = market_mode
+        signal['atr_value'] = atr_current
+        signal['strong_trend'] = market_mode == 'TRENDING' and market_type == 'TREND' and adx['adx'] >= self.adx_trend_threshold and ema_fast > ema_slow
 
         # Attach trade score for dynamic sizing
         if signal['action'] == 'BUY':
@@ -1181,6 +1212,9 @@ class SmartTrader:
             if signal['score'] <= 2:
                 return {'action': 'HOLD', 'strength': 0,
                         'reason': f"Score {signal['score']}/5 too low - skipping"}
+            if signal.get('entry_type') == 'PRE_BREAKOUT' and signal['score'] != 3:
+                return {'action': 'HOLD', 'strength': 0,
+                        'reason': f"Pre-breakout requires score 3, got {signal['score']}"}
 
         return signal
 
@@ -1266,6 +1300,8 @@ class SmartTrader:
                 'rr_target': rr_target,
                 'entry_type': profile['entry_type'],
                 'fallback_trade': signal.get('fallback_trade', False),
+                'strong_trend': signal.get('strong_trend', False),
+                'atr_value': signal.get('atr_value', 0.0),
                 'entry_reason': signal.get('reason', ''),
                 'market_condition': signal.get('market_type', '').lower(),
                 'entry_time': entry_time,
@@ -1289,16 +1325,16 @@ class SmartTrader:
             if signal.get('clear_breakout_wait'):
                 self.reset_breakout_state(symbol)
 
-                        tp1_line = f"TP1: ${tp1_price:.4f}\n" if tp1_price is not None else ""
-                        msg = (f"TRADE OPENED\n"
-                                     f"Pair: {symbol}\n"
-                                     f"Type: {profile['entry_type']}\n"
-                                     f"Score: {score}/5\n"
-                                     f"Entry: ${fill_price:.4f}\n"
-                                     f"SL: ${stop_loss:.4f}\n"
-                                     f"{tp1_line}"
-                                     f"TP2: ${take_profit:.4f}\n"
-                                     f"R:R target: {rr_target}")
+            tp1_line = f"TP1: ${tp1_price:.4f}\n" if tp1_price is not None else ""
+            msg = (f"TRADE OPENED\n"
+                   f"Pair: {symbol}\n"
+                   f"Type: {profile['entry_type']}\n"
+                   f"Score: {score}/5\n"
+                   f"Entry: ${fill_price:.4f}\n"
+                   f"SL: ${stop_loss:.4f}\n"
+                   f"{tp1_line}"
+                   f"TP2: ${take_profit:.4f}\n"
+                   f"R:R target: {rr_target}")
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
 
@@ -1435,7 +1471,10 @@ class SmartTrader:
                 if not position.get('trailing_stop_active'):
                     position['trailing_stop_active'] = True
                     position['highest_price'] = current_price
-                    position['trailing_stop_price'] = current_price * (1 - self.trailing_stop_distance / 100)
+                    if position.get('strong_trend') and position.get('atr_value', 0) > 0:
+                        position['trailing_stop_price'] = current_price - (position['atr_value'] * 0.8)
+                    else:
+                        position['trailing_stop_price'] = current_price * (1 - self.trailing_stop_distance / 100)
                     print(f"   TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
                     self.send_telegram(
                         f"Trailing Stop Active\n{symbol}\n"
@@ -1445,7 +1484,10 @@ class SmartTrader:
 
                 if current_price > position.get('highest_price', 0):
                     position['highest_price'] = current_price
-                    new_trail = current_price * (1 - self.trailing_stop_distance / 100)
+                    if position.get('strong_trend') and position.get('atr_value', 0) > 0:
+                        new_trail = current_price - (position['atr_value'] * 0.8)
+                    else:
+                        new_trail = current_price * (1 - self.trailing_stop_distance / 100)
                     if new_trail > position.get('trailing_stop_price', 0):
                         position['trailing_stop_price'] = new_trail
                         print(f"   TRAILING STOP RAISED {symbol} @ ${new_trail:.4f}")
@@ -1680,7 +1722,7 @@ class SmartTrader:
                 session, settings = self.get_market_session()
                 min_strength = settings['min_strength']
                 btc_bias = self.get_btc_bias()
-                    session_active = self.is_session_active(session)
+                session_active = self.is_session_active(session)
 
                 print(f"\n   Scanning {len(self.trading_pairs)} pairs... "
                       f"[{session.upper()} | {settings['mode']} | "
@@ -1707,7 +1749,7 @@ class SmartTrader:
                     continue
 
                 ranked_pairs = self.rank_pairs(pair_snapshots)
-                top_symbols = [item[0] for item in ranked_pairs[:2]]
+                top_symbols = [ranked_pairs[0][0]] if ranked_pairs else []
 
                 if top_symbols:
                     top_summary = ', '.join(
