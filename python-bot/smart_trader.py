@@ -91,7 +91,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         self.adx_range_threshold = 20
         self.adx_trend_threshold = 25
-        self.min_adx_for_entry = 20           # Relaxed: avoid blocking valid trend setups
+        self.min_adx_for_entry = 18           # Relaxed: allow more trades while avoiding garbage
 
         # ════════════════════════════════════════════════════════════════════
         # SESSION SETTINGS (NZ TIME)
@@ -1077,14 +1077,18 @@ class SmartTrader:
         }
 
         if market_mode == 'CHOPPY':
-            return {
-                'action': 'HOLD', 'strength': 0,
-                'reason': 'Choppy market: ATR below active threshold',
-                'market_type': 'CHOPPY', 'price': price,
-                'support': recent_support, 'resistance': recent_resistance,
-                'rsi': rsi, 'adx': adx['adx'], 'zone': 'choppy_market',
-                'market_mode': market_mode,
-            }
+            # In choppy conditions allow B+ and SCOUT only - do not block everything
+            compression_early = self.is_compression_setup(trade_data, context)
+            score_early = self.get_trade_score(trade_data, context)
+            if not compression_early and score_early < 3:
+                return {
+                    'action': 'HOLD', 'strength': 0,
+                    'reason': 'Choppy market: no B+ or scout setup found',
+                    'market_type': 'CHOPPY', 'price': price,
+                    'support': recent_support, 'resistance': recent_resistance,
+                    'rsi': rsi, 'adx': adx['adx'], 'zone': 'choppy_market',
+                    'market_mode': market_mode,
+                }
 
         if self.dead_zone_filter(price, recent_resistance, recent_support):
             return {
