@@ -220,7 +220,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # EXIT MANAGEMENT
         # ════════════════════════════════════════════════════════════════════
-        self.break_even_trigger = 1.0         # Move SL to entry at 1% profit
+        self.break_even_trigger = 1.2         # Move SL to entry at 1.2% profit
         self.trailing_stop_activation = 1.5   # Activate trailing stop at 1.5% profit
         self.trailing_stop_distance = 0.8     # Trail 0.8% below peak
         self.partial_tp_percent = 0.70        # Sell 70% at first TP, let 30% run
@@ -1065,7 +1065,11 @@ class SmartTrader:
             fill_price = float(order['fills'][0]['price'])
             entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
-            take_profit, stop_loss = self.set_tp_sl(fill_price)
+            take_profit, stop_loss = self.set_tp_sl(
+                fill_price,
+                score=signal.get('confidence'),
+                strong_trend=strong_setup,
+            )
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
 
@@ -1075,6 +1079,7 @@ class SmartTrader:
                 'quantity': quantity,
                 'original_quantity': quantity,
                 'entry_price': fill_price,
+                'entry_resistance': signal.get('resistance', fill_price),
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
                 'risk_percent': risk_percent,
@@ -1281,7 +1286,13 @@ class SmartTrader:
                     self.execute_sell(position, 'TRAILING_STOP')
                     continue
 
-            # 4. RUNNER: after partial TP, exit if price returns to entry
+            # 4. MOMENTUM ADD-ON: scale in if winning and breakout continues
+            trade_in_profit = current_price > position['entry_price']
+            breakout_continues = current_price > position.get('entry_resistance', current_price)
+            if trade_in_profit and breakout_continues and not position.get('scaled_in'):
+                self.add_small_position(position, current_price)
+
+            # 5. RUNNER: after partial TP, exit if price returns to entry
             if position.get('runner_active') and current_price <= position['entry_price']:
                 print(f"\n   ⚖️ BREAKEVEN RUNNER EXIT {symbol}")
                 self.execute_sell(position, 'BREAKEVEN_RUNNER')
@@ -1355,6 +1366,28 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # CAN TRADE (single unified gate)
     # ════════════════════════════════════════════════════════════════════
+    def add_small_position(self, position, current_price, add_pct=0.05):
+        if position.get('scaled_in'):
+            return
+        balance = self.get_balance()
+        add_qty = (balance * add_pct) / current_price
+        step_size, precision = self.get_symbol_precision(position['symbol'])
+        add_qty = round(add_qty, precision)
+        if add_qty * current_price < 10:
+            return
+        try:
+            self.client.create_order(
+                symbol=position['symbol'],
+                side='BUY',
+                type='MARKET',
+                quantity=add_qty,
+            )
+            position['quantity'] += add_qty
+            position['scaled_in'] = True
+            print(f"   ➕ SCALE-IN {position['symbol']} +{add_qty} @ ${current_price:.4f}")
+        except Exception as e:
+            print(f"   ❌ Scale-in error: {e}")
+
     def trailing_stop(self, current_price, entry_price):
         if current_price > entry_price * 1.01:   # price up > 1%
             return current_price * 0.995         # lock profit at 0.5% below current
@@ -1363,13 +1396,24 @@ class SmartTrader:
     def adapt_strategy(self):
         wr = self.win_rate()
         if wr < 0.5:
-            return {'tp': 1.5, 'sl': 0.8}   # tighten — protect capital
+            return {'tp': 1.5, 'sl': 0.8}
         elif wr > 0.6:
-            return {'tp': 2.5, 'sl': 1.2}   # scale aggression
-        return {'tp': 2.0, 'sl': 1.0}       # neutral
+            return {'tp': 2.5, 'sl': 1.2}
+        return {'tp': 2.0, 'sl': 1.0}
 
-    def set_tp_sl(self, entry_price):
+    def set_tp_sl(self, entry_price, score=None, strong_trend=False):
         params = self.adapt_strategy()
+        # Score-based TP: reward better setups with more room to run
+        if score is not None:
+            if score >= 5:
+                params['tp'] = 3.0
+            elif score >= 4:
+                params['tp'] = 2.5
+            else:
+                params['tp'] = 1.5
+        # Strong trend override: let winners run longer
+        elif strong_trend:
+            params['tp'] = max(params['tp'], 3.0)
         tp = entry_price * (1 + params['tp'] / 100)
         sl = entry_price * (1 - params['sl'] / 100)
         return tp, sl
