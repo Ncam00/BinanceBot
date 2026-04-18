@@ -619,7 +619,7 @@ class SmartTrader:
             'volume': df['volume'].iloc[-1],
             'avg_volume': avg_volume,
         }
-        return self.is_compression_setup(data, context)
+        return self.is_scout_candidate(data, context)
 
     # ════════════════════════════════════════════════════════════════════
     # TRADE SCORING & DYNAMIC SIZING
@@ -775,17 +775,11 @@ class SmartTrader:
         sl = entry_price * (1 - profile['sl_percent'] / 100)
         return tp1, tp2, sl, profile
 
-    def is_b_plus_trade(self, snapshot, context):
-        return (
-            context['trend'] is True and
-            snapshot['volume_ratio'] >= 1.0 and
-            context['structure_clean'] is True
-        )
+    def is_b_plus_trade(self, score, context):
+        return score >= 3
 
-    def is_scout_candidate(self, signal, snapshot):
-        market_active = snapshot['atr_avg'] > 0 and snapshot['atr'] > snapshot['atr_avg'] * 0.8
-        volume_ok = snapshot['volume_ratio'] > 0.8
-        return signal.get('scout_trade') and market_active and volume_ok
+    def is_scout_candidate(self, data, context):
+        return self.is_compression_setup(data, context)
 
     def detect_market_mode(self, snapshot):
         if snapshot['atr_avg'] <= 0:
@@ -941,22 +935,25 @@ Reason: {reason}
             print(f"- {key}: {status}")
 
     def get_dynamic_min_score(self, snapshot, context):
-        """Raise the minimum score in weaker conditions; keep it lower in stronger ones."""
-        if context['breakout'] and snapshot['volume_ratio'] > 1.3 and snapshot['atr'] > snapshot['atr_avg']:
-            return 3
-        return 4
+        """Return the live threshold used by the current entry hierarchy."""
+        data = {
+            'volume': snapshot.get('volume', 0),
+            'avg_volume': snapshot.get('avg_volume', 0),
+        }
+        if self.is_scout_candidate(data, context):
+            return 0
+        return 3
 
     def elite_filter(self, score, context, snapshot):
-        min_score = self.get_dynamic_min_score(snapshot, context)
-        if score < min_score:
-            return False
-        if snapshot['volume_ratio'] < 1.0:
-            return False
-        if snapshot['atr'] < snapshot['atr_avg']:
-            return False
-        if context['near_resistance'] and not context['breakout']:
-            return False
-        return True
+        data = {
+            'volume': snapshot.get('volume', 0),
+            'avg_volume': snapshot.get('avg_volume', 0),
+        }
+        if self.is_scout_candidate(data, context):
+            return True
+        if context.get('breakout'):
+            return True
+        return self.is_b_plus_trade(score, context)
 
     # ════════════════════════════════════════════════════════════════════
     # FILTERS
@@ -1072,10 +1069,10 @@ Reason: {reason}
             return {'action': 'HOLD', 'strength': 0,
                     'reason': 'Outside active session (7-22 UTC)'}
 
-        # Chop filter: skip low-volatility chop
+        # Chop filter: skip only when ATR is materially below average.
         if self.avoid_chop(df):
             return {'action': 'HOLD', 'strength': 0,
-                    'reason': 'Market choppy (ATR below avg) - skipping'}
+                'reason': 'Market choppy (ATR below 85% of avg) - skipping'}
 
         sr = self.calculate_support_resistance(df)
         support = sr['support']
@@ -1121,13 +1118,13 @@ Reason: {reason}
         market_type = self.get_market_type(adx['adx'])
         state = self.get_symbol_state(symbol)
         tolerance = 0.002
-        compression_setup = self.is_compression_setup(trade_data, context)
+        compression_setup = self.detect_pre_breakout(df, price, resistance, volume_ratio)
         trade_score = self.get_trade_score(trade_data, context)
         strong_breakout = self.is_strong_breakout(trade_data, context)
 
         # ── ADDED: ADX FILTER ─────────────────────────────────────────
         # RANGE markets are exempt (mean reversion doesn't need trend)
-        # TREND and MIXED markets must have ADX >= 22 to avoid choppy entries
+        # TREND and MIXED markets must have ADX >= configured minimum to avoid weak setups
         if market_type != 'RANGE' and adx['adx'] < self.min_adx_for_entry:
             return {
                 'action': 'HOLD', 'strength': 0,
@@ -1232,7 +1229,7 @@ Reason: {reason}
                 signal = {
                     'action': 'BUY',
                     'strength': 0.70,
-                    'reason': 'SCOUT COMPRESSION ENTRY: Near resistance, higher lows, and volume > 1.1x',
+                    'reason': 'SCOUT COMPRESSION ENTRY: Near resistance with higher lows',
                     'entry_type': 'SCOUT',
                     'entry_tier': 'SCOUT',
                     'scout_trade': True,
@@ -1247,7 +1244,7 @@ Reason: {reason}
                     'entry_tier': 'A+',
                     'score': max(trade_score, 4),
                 }
-            elif trade_score >= 3:
+            elif self.is_b_plus_trade(trade_score, context):
                 signal = {
                     'action': 'BUY',
                     'strength': 0.75,
@@ -1881,7 +1878,7 @@ Reason: {reason}
                     context['trend'] = snapshot['ema20'] > snapshot['ema50']
                     context['higher_lows'] = self.detect_higher_lows(snapshot['df'])
                     context['ema_alignment'] = snapshot['ema20'] > snapshot['ema50']
-                    context['structure_clean'] = context['trend'] and not context['near_resistance'] and not context['breakdown']
+                    context['structure_clean'] = context['trend'] and (context['breakout'] or not context['near_resistance']) and not context['breakdown']
                     score = self.get_trade_score(snapshot, context)
 
                     if self.dead_zone_filter(snapshot['price'], resistance, support):
@@ -1890,6 +1887,8 @@ Reason: {reason}
                         continue
 
                     signal = self.analyze(symbol)
+
+                        print(f"{symbol} reached entry logic")
 
                     if btc_bias == 'BEARISH' and signal.get('action') == 'BUY':
                         self.debug_symbol_check(symbol, snapshot, context, score, 'BTC bearish blocked long')
@@ -1900,6 +1899,17 @@ Reason: {reason}
                     # Force visibility: always print why a symbol was skipped or acted on
                     reason_text = signal.get('reason', 'no reason')
                     print(f"   {symbol} [{signal['action']}] ({signal.get('market_type','N/A')}|{signal.get('zone','?')}) - {reason_text}")
+
+                    if signal['action'] == 'HOLD' and 'No valid trend entry' in reason_text:
+                        min_score = self.get_dynamic_min_score(snapshot, context)
+                        checks = {
+                            'Scout Setup': self.is_scout_candidate(snapshot, context),
+                            'Breakout': context.get('breakout'),
+                            'B+ Score': self.is_b_plus_trade(score, context),
+                            'Trend': context.get('trend'),
+                            'EMA Alignment': context.get('ema_alignment'),
+                        }
+                        self.explain_skip(symbol, score, min_score, checks)
 
                     if signal['action'] == 'BUY':
                         if len(self.open_positions) >= self.max_positions:
