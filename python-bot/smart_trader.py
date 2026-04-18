@@ -96,7 +96,7 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None):
         sig = self.get(pair)
 
         # Volume filter
@@ -126,7 +126,15 @@ class EntryEngine:
                 (close - open_price) / open_price >= 0.001
             )
 
-            if breakout and retest and bullish_candle:
+            momentum = (
+                prev_close is not None and close > prev_close and
+                volume > avg_volume * 1.2
+            )
+            candle_strength = (
+                atr is not None and (close - open_price) > (atr * 0.5)
+            )
+
+            if breakout and retest and bullish_candle and momentum and candle_strength:
                 confidence = self.get_confidence(price, resistance, volume, avg_volume, close, open_price, ma)
                 if confidence < 3:
                     return {'action': 'HOLD', 'pair': pair,
@@ -151,6 +159,8 @@ class EntryEngine:
                 avg_volume=data['avg_volume'],
                 resistance=data['resistance'],
                 ma=data['ma50'],
+                prev_close=data.get('prev_close'),
+                atr=data.get('atr'),
             )
             if result:
                 signals.append(result)
@@ -538,6 +548,7 @@ class SmartTrader:
                 'close':      df['close'].iloc[-1],
                 'volume':     volumes[-1],
                 'avg_volume': sum(volumes[-20:-1]) / 19,
+                'prev_close': df['close'].iloc[-2],
                 'resistance': sr['resistance'],
                 'support':    sr['support'],
                 'ma50':       self.get_ma(closes, 50),
