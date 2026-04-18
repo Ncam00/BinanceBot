@@ -96,12 +96,24 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None):
         sig = self.get(pair)
 
         # Volume filter
         if volume < avg_volume:
             return None
+
+        # Pre-breakout detection
+        if not sig['active'] and price < resistance:
+            price_near_resistance = (resistance - price) / resistance <= 0.01
+            volume_increasing = volume > avg_volume * 0.9
+            higher_lows_forming = (
+                lows is not None and len(lows) >= 3 and
+                all(lows[i] >= lows[i - 1] for i in range(-min(3, len(lows)), 0))
+            )
+            pre_breakout = price_near_resistance and volume_increasing and higher_lows_forming
+            if pre_breakout:
+                return {'action': 'PRE_BREAKOUT', 'pair': pair, 'level': resistance}
 
         # New breakout detected
         if not sig['active'] and price > resistance:
@@ -162,6 +174,7 @@ class EntryEngine:
                 ma=data['ma50'],
                 prev_close=data.get('prev_close'),
                 atr=data.get('atr'),
+                lows=data.get('lows'),
             )
             if not result:
                 continue
@@ -566,6 +579,7 @@ class SmartTrader:
                 'ma50':       self.get_ma(closes, 50),
                 'atr':        adx['atr'],
                 'atr_avg':    atr_series.rolling(14).mean().iloc[-1],
+                'lows':       df['low'].tolist()[-5:],
             }
         return market_data
 
