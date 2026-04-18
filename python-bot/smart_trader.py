@@ -96,8 +96,12 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22):
         sig = self.get(pair)
+
+        # ADX filter — skip choppy markets
+        if adx is not None and adx < adx_threshold:
+            return {'action': 'HOLD', 'pair': pair, 'reason': f'ADX {adx:.1f} < {adx_threshold} (choppy)'}
 
         # Volume filter
         if volume < avg_volume:
@@ -189,6 +193,8 @@ class EntryEngine:
                 prev_close=data.get('prev_close'),
                 atr=data.get('atr'),
                 lows=data.get('lows'),
+                adx=data.get('adx'),
+                adx_threshold=22,
             )
             if not result:
                 continue
@@ -288,7 +294,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # ADX THRESHOLDS
         # ════════════════════════════════════════════════════════════════════
-        self.adx_range_threshold = 20         # ADX < 20 = ranging market
+        self.adx_range_threshold = 22         # ADX < 22 = market too choppy, skip
         self.adx_trend_threshold = 25         # ADX > 25 = trending market
         self.min_atr_percent = 0.003          # Skip trades when ATR < 0.3% of price
         self.max_spread_percent = 0.001       # Skip trades when spread > 0.1% of price
@@ -595,6 +601,7 @@ class SmartTrader:
                 'resistance': sr['resistance'],
                 'support':    sr['support'],
                 'ma50':       self.get_ma(closes, 50),
+                'adx':        adx['adx'],
                 'atr':        adx['atr'],
                 'atr_avg':    atr_series.rolling(14).mean().iloc[-1],
                 'lows':       df['low'].tolist()[-5:],
