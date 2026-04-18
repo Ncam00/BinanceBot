@@ -114,7 +114,7 @@ class SmartTrader:
         self.consecutive_losses = 0
         self.last_trade_win = False
         self.fallback_trade_taken = False
-        self.engagement_trade_taken = False
+        self.scout_trade_taken = False
         self.open_positions = []
         self.symbol_state = {}
         self.trade_lock = False
@@ -652,15 +652,6 @@ class SmartTrader:
                 'sl_percent': 1.0,
             }
 
-        if signal.get('engagement_trade'):
-            return {
-                'entry_type': 'engagement',
-                'balance_fraction': 0.05,
-                'tp1_percent': 1.0,
-                'tp2_percent': 1.0,
-                'sl_percent': 0.8,
-            }
-
         if signal.get('scout_trade'):
             return {
                 'entry_type': 'scout',
@@ -744,17 +735,10 @@ class SmartTrader:
             context['structure_clean'] is True
         )
 
-    def is_fallback_candidate(self, score, context, snapshot):
-        trend_aligned = snapshot['ema20'] > snapshot['ema50']
-        volume_ok = snapshot['volume_ratio'] > 0.9
-        atr_ok = snapshot['atr_avg'] > 0 and snapshot['atr'] > snapshot['atr_avg'] * 0.9
-        return score == 3 and trend_aligned and not context['near_resistance'] and volume_ok and atr_ok
-
-    def is_engagement_candidate(self, score, snapshot):
+    def is_scout_candidate(self, signal, snapshot):
         market_active = snapshot['atr_avg'] > 0 and snapshot['atr'] > snapshot['atr_avg'] * 0.8
         volume_ok = snapshot['volume_ratio'] > 0.8
-        trend_exists = snapshot['ema20'] != snapshot['ema50']
-        return score >= 3 and market_active and volume_ok and trend_exists
+        return signal.get('scout_trade') and market_active and volume_ok
 
     def detect_market_mode(self, snapshot):
         if snapshot['atr_avg'] <= 0:
@@ -1583,7 +1567,7 @@ class SmartTrader:
             self.daily_loss_ratio = 0.0
             self.consecutive_losses = 0
             self.fallback_trade_taken = False
-            self.engagement_trade_taken = False
+            self.scout_trade_taken = False
             self.last_trade_time = None
             self.last_reset_date = today
             self.send_telegram(
@@ -1825,7 +1809,7 @@ class SmartTrader:
                             self.explain_skip(symbol, score, min_score, checks)
                             continue
 
-                    if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
+                    if signal['action'] == 'BUY' and signal.get('entry_type') != 'SCOUT' and signal['strength'] >= min_strength:
                         if len(self.open_positions) >= self.max_positions:
                             break
                         if self.execute_buy(symbol, signal):
@@ -1867,7 +1851,7 @@ class SmartTrader:
                             a_trade_taken = True
                         break
 
-                if not a_trade_taken and not self.fallback_trade_taken and not self.engagement_trade_taken and len(self.open_positions) < self.max_positions:
+                if not a_trade_taken and not self.fallback_trade_taken and not self.scout_trade_taken and len(self.open_positions) < self.max_positions:
                     for symbol, _ in ranked_pairs:
                         snapshot = pair_snapshots[symbol]
                         signal = self.analyze(symbol)
@@ -1876,19 +1860,17 @@ class SmartTrader:
                         if btc_bias == 'BEARISH':
                             continue
 
-                        score = signal.get('score', 0)
-                        if not self.is_engagement_candidate(score, snapshot):
+                        if not self.is_scout_candidate(signal, snapshot):
                             continue
 
-                        engagement_signal = dict(signal)
-                        engagement_signal['engagement_trade'] = True
-                        engagement_signal['strength'] = max(engagement_signal.get('strength', 0), min_strength)
+                        scout_signal = dict(signal)
+                        scout_signal['strength'] = max(scout_signal.get('strength', 0), min_strength)
 
-                        print(f"\n[ENGAGEMENT TRADE - {symbol}]")
-                        print("   Active market accepted: ATR > 0.8x avg, volume > 0.8x avg, trend exists")
+                        print(f"\n[SCOUT TRADE - {symbol}]")
+                        print("   Pre-breakout setup accepted after A+ and B+ were skipped")
 
-                        if self.execute_buy(symbol, engagement_signal):
-                            self.engagement_trade_taken = True
+                        if self.execute_buy(symbol, scout_signal):
+                            self.scout_trade_taken = True
                             a_trade_taken = True
                         break
 
