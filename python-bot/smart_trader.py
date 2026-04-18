@@ -91,7 +91,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         self.adx_range_threshold = 20
         self.adx_trend_threshold = 25
-        self.min_adx_for_entry = 22           # ADDED: skip choppy markets
+        self.min_adx_for_entry = 20           # Relaxed: avoid blocking valid trend setups
 
         # ════════════════════════════════════════════════════════════════════
         # SESSION SETTINGS (NZ TIME)
@@ -549,10 +549,10 @@ class SmartTrader:
             return {'action': 'HOLD', 'strength': 0,
                     'reason': f'Breakout blocked: RSI {rsi:.1f} >= 75 (overbought)'}
 
-        # Volume confirmation: need 1.5x avg volume
-        if volume_ratio < 1.5:
+        # Volume confirmation: allow cleaner breakouts without requiring extreme expansion.
+        if volume_ratio < 1.2:
             return {'action': 'HOLD', 'strength': 0,
-                    'reason': f'Breakout blocked: volume {volume_ratio:.1f}x < 1.5x (weak)'}
+                'reason': f'Breakout blocked: volume {volume_ratio:.1f}x < 1.2x (weak)'}
 
         # Strong candle filter: body must be >50% of candle range
         candle = df.iloc[-1]
@@ -789,9 +789,9 @@ class SmartTrader:
     def detect_market_mode(self, snapshot):
         if snapshot['atr_avg'] <= 0:
             return 'CHOPPY'
-        if snapshot['atr'] > snapshot['atr_avg'] * 1.3:
+        if snapshot['atr'] > snapshot['atr_avg'] * 1.2:
             return 'TRENDING'
-        if snapshot['atr'] > snapshot['atr_avg'] * 0.9:
+        if snapshot['atr'] > snapshot['atr_avg'] * 0.8:
             return 'RANGING'
         return 'CHOPPY'
 
@@ -811,7 +811,7 @@ class SmartTrader:
         atr_avg = tr.rolling(window=14).mean().iloc[-20:-1].mean()
         if atr_avg == 0 or np.isnan(atr_avg):
             return False
-        if atr_current < atr_avg:
+        if atr_current < atr_avg * 0.85:
             return True   # choppy - skip
         return False
 
