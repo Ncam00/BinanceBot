@@ -1174,39 +1174,24 @@ Reason: {reason}
             }
 
         if entry_type == 'A+' and market_mode == 'CHOPPY':
-            return {
-                'action': 'HOLD', 'strength': 0,
-                'reason': 'Skipping A+ due to chop',
-                'market_type': market_type, 'price': price,
-                'support': support, 'resistance': resistance,
-                'rsi': rsi, 'adx': adx['adx'], 'zone': zone,
-                'market_mode': market_mode,
-            }
+            entry_type = None
+            entry_reason = 'Skipping A+ due to chop'
 
         if entry_type == 'A+' and market_type != 'RANGE' and adx['adx'] < self.min_adx_for_entry:
-            return {
-                'action': 'HOLD', 'strength': 0,
-                'reason': f'Skipping A+ due to weak ADX ({adx["adx"]:.1f} < {self.min_adx_for_entry})',
-                'market_type': market_type, 'price': price,
-                'support': support, 'resistance': resistance,
-                'rsi': rsi, 'adx': adx['adx'], 'zone': zone,
-                'market_mode': market_mode,
-            }
+            entry_type = None
+            entry_reason = f'Skipping A+ due to weak ADX ({adx["adx"]:.1f} < {self.min_adx_for_entry})'
 
         if entry_type == 'A+' and self.dead_zone_filter(price, recent_resistance, recent_support):
-            return {
-                'action': 'HOLD', 'strength': 0,
-                'reason': 'Skipping A+ due to dead zone',
-                'market_type': market_type, 'price': price,
-                'support': recent_support, 'resistance': recent_resistance,
-                'rsi': rsi, 'adx': adx['adx'], 'zone': 'dead_zone',
-                'market_mode': market_mode,
-            }
+            entry_type = None
+            entry_reason = 'Skipping A+ due to dead zone'
+            zone = 'dead_zone'
+            support = recent_support
+            resistance = recent_resistance
 
         signal = {
-            'action': 'BUY',
-            'strength': entry_strength,
-            'reason': entry_reason,
+            'action': 'HOLD' if entry_type is None else 'BUY',
+            'strength': 0 if entry_type is None else entry_strength,
+            'reason': entry_reason or retest_reason or f'No valid trend entry ({trade_score}/5 checks)',
             'score': trade_score,
         }
         if entry_type == 'SCOUT':
@@ -1225,7 +1210,7 @@ Reason: {reason}
                 signal['support_override'] = support_override
             if clear_breakout_wait:
                 signal['clear_breakout_wait'] = True
-        else:
+        elif entry_type == 'B+':
             signal.update({
                 'entry_type': 'B_PLUS',
                 'entry_tier': 'B+',
@@ -1235,39 +1220,64 @@ Reason: {reason}
         # ── Confirmation candle ───────────────────────────────────────
         if signal['action'] == 'BUY' and signal.get('entry_type') not in ('BREAKOUT', 'SCOUT'):
             if not self.has_confirmation_candle(df, 'bullish'):
-                signal = {'action': 'HOLD', 'strength': 0,
-                          'reason': 'Buy signal - waiting for confirmation candle'}
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': 'Buy signal - waiting for confirmation candle',
+                    'score': trade_score,
+                }
 
         # ── Extra filters + ADDED: final validation gate ──────────────
         if signal['action'] == 'BUY':
             if not self.btc_is_healthy():
-                return {'action': 'HOLD', 'strength': 0,
-                        'reason': 'BTC dumping - entry blocked'}
-            if not self.check_volume(df):
-                return {'action': 'HOLD', 'strength': 0,
-                        'reason': 'Low volume - entry blocked'}
-            if not self.check_multi_timeframe(symbol):
-                return {'action': 'HOLD', 'strength': 0,
-                        'reason': 'Timeframes not aligned - entry blocked'}
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': 'BTC dumping - entry blocked',
+                    'score': trade_score,
+                }
+            elif not self.check_volume(df):
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': 'Low volume - entry blocked',
+                    'score': trade_score,
+                }
+            elif not self.check_multi_timeframe(symbol):
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': 'Timeframes not aligned - entry blocked',
+                    'score': trade_score,
+                }
 
             # ADDED: Final setup validation (last gate before trade fires)
-            entry_type = signal.get('entry_type', 'PULLBACK')
-            entry_tier = signal.get('entry_tier')
-            prices_list = closes.tolist()
-            if entry_tier == 'A+' or entry_type == 'BREAKOUT':
-                if not self.valid_breakout_setup(
-                    price, rsi,
-                    macd['macd'], macd['signal'], macd['prev_macd'], ema_slow
-                ):
-                    return {'action': 'HOLD', 'strength': 0,
-                            'reason': 'Breakout validation failed - not all conditions met'}
-            elif entry_tier not in ('SCOUT', 'B+') and entry_type != 'B_PLUS':
-                if not self.valid_setup(
-                    price, prices_list, rsi,
-                    macd['macd'], macd['signal'], macd['prev_macd'], ema_slow
-                ):
-                    return {'action': 'HOLD', 'strength': 0,
-                            'reason': 'Setup validation failed - not all conditions met'}
+            if signal['action'] == 'BUY':
+                entry_type = signal.get('entry_type', 'PULLBACK')
+                entry_tier = signal.get('entry_tier')
+                prices_list = closes.tolist()
+                if entry_tier == 'A+' or entry_type == 'BREAKOUT':
+                    if not self.valid_breakout_setup(
+                        price, rsi,
+                        macd['macd'], macd['signal'], macd['prev_macd'], ema_slow
+                    ):
+                        signal = {
+                            'action': 'HOLD',
+                            'strength': 0,
+                            'reason': 'Breakout validation failed - not all conditions met',
+                            'score': trade_score,
+                        }
+                elif entry_tier not in ('SCOUT', 'B+') and entry_type != 'B_PLUS':
+                    if not self.valid_setup(
+                        price, prices_list, rsi,
+                        macd['macd'], macd['signal'], macd['prev_macd'], ema_slow
+                    ):
+                        signal = {
+                            'action': 'HOLD',
+                            'strength': 0,
+                            'reason': 'Setup validation failed - not all conditions met',
+                            'score': trade_score,
+                        }
 
         if signal.get('clear_breakout_wait'):
             self.reset_breakout_state(symbol)
@@ -1290,8 +1300,12 @@ Reason: {reason}
                     df, price, rsi, ema_fast, ema_slow, volume_ratio
                 )
             if signal['score'] <= 2:
-                return {'action': 'HOLD', 'strength': 0,
-                        'reason': f"Score {signal['score']}/5 too low - skipping"}
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': f"Score {signal['score']}/5 too low - skipping",
+                    'score': signal['score'],
+                }
 
         return signal
 
@@ -1858,9 +1872,12 @@ Reason: {reason}
 
                     if btc_bias == 'BEARISH' and signal.get('action') == 'BUY':
                         self.debug_symbol_check(symbol, snapshot, context, score, 'BTC bearish blocked long')
-                        print(f"   {symbol} skipped because: BTC bearish blocked long")
-                        print(f"X Skipping {symbol} due to condition above")
-                        continue
+                        signal = {
+                            **signal,
+                            'action': 'HOLD',
+                            'strength': 0,
+                            'reason': 'BTC bearish blocked long',
+                        }
 
                     scout = signal.get('entry_tier') == 'SCOUT' or self.is_scout_candidate(snapshot, context)
                     breakout = signal.get('entry_tier') == 'A+' or bool(context.get('breakout'))
