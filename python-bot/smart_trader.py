@@ -9,7 +9,7 @@ Changes from previous version:
 + Final setup validation gate (valid_setup / valid_breakout_setup)
 + Stop loss moved to position 1 in check_positions (safety first)
 
-Pairs: BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, BNBUSDT, XRPUSDT
+Pairs: BTCUSDT, ETHUSDT
 """
 
 import os
@@ -41,15 +41,15 @@ class SmartTrader:
         # TRADING PAIRS
         # ════════════════════════════════════════════════════════════════════
         self.trading_pairs = [
-            'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT', 'BNBUSDT', 'XRPUSDT'
+            'BTCUSDT', 'ETHUSDT'
         ]
         self.max_positions = 1
 
         # ════════════════════════════════════════════════════════════════════
         # CORE RISK SETTINGS
         # ════════════════════════════════════════════════════════════════════
-        self.stop_loss_percent = 1.5
-        self.take_profit_percent = 2.5
+        self.stop_loss_percent = 1.2
+        self.take_profit_percent = 2.0
         self.position_size_percent = 15
         self.max_position_cap = 0.25
 
@@ -78,6 +78,7 @@ class SmartTrader:
         self.trailing_stop_activation = 1.5
         self.trailing_stop_distance = 0.8
         self.partial_tp_percent = 0.50
+        self.bb_squeeze_threshold = 0.05
 
         # ════════════════════════════════════════════════════════════════════
         # LOCATION-BASED SETTINGS
@@ -323,12 +324,25 @@ class SmartTrader:
         current_price = closes.iloc[-1]
         bb_range = upper.iloc[-1] - lower.iloc[-1]
         pb = (current_price - lower.iloc[-1]) / bb_range if bb_range > 0 else 0.5
+        width = (bb_range / sma.iloc[-1]) if sma.iloc[-1] and not np.isnan(sma.iloc[-1]) else 0
         return {
             'upper': upper.iloc[-1],
+            'prev_upper': upper.iloc[-2] if len(upper) > 1 else upper.iloc[-1],
             'middle': sma.iloc[-1],
             'lower': lower.iloc[-1],
-            'pb': pb
+            'pb': pb,
+            'width': width
         }
+
+    def bollinger_breakout_signal(self, df, bb):
+        if len(df) < 2:
+            return False
+
+        last_close = df['close'].iloc[-1]
+        prev_close = df['close'].iloc[-2]
+        squeeze = bb['width'] < self.bb_squeeze_threshold
+        breakout = last_close > bb['upper'] and prev_close <= bb['prev_upper']
+        return breakout and squeeze
 
     # ════════════════════════════════════════════════════════════════════
     # SUPPORT / RESISTANCE
@@ -1095,6 +1109,7 @@ Reason: {reason}
         atr_avg = tr.rolling(window=14).mean().iloc[-20:-1].mean()
         adx = self.calculate_adx(df)
         bb = self.calculate_bollinger(closes)
+        bollinger_breakout = self.bollinger_breakout_signal(df, bb)
         volume_ratio = self.get_volume_ratio(df)
         avg_volume = df['volume'].ewm(span=20, adjust=False).mean().iloc[-2] if len(df) > 1 else df['volume'].mean()
 
@@ -1144,6 +1159,8 @@ Reason: {reason}
         compression_setup = context['scout']
         trade_score = context['score']
         strong_breakout = self.is_strong_breakout(trade_data, context)
+        if bollinger_breakout:
+            trade_score = min(trade_score + 1, 5)
         entry_type = None
         entry_reason = None
         entry_strength = 0.0
@@ -1190,16 +1207,23 @@ Reason: {reason}
         near_resistance = self.is_near_level(price, resistance)
 
         zone = self.get_trade_zone(price, support, resistance)
-        breakout = context['breakout'] or strong_breakout
+        breakout = context['breakout'] or strong_breakout or bollinger_breakout
         context['breakout'] = breakout
-        score = context['score']
+        score = trade_score
         scout = context['scout']
         market = context['market']
         micro_b_test = False
 
         # Entry decision always runs before filters.
         print(f"{symbol} reached entry evaluation")
-        if scout:
+        if bollinger_breakout:
+            entry_type = 'A+'
+            entry_reason = (
+                f'BOLLINGER BREAKOUT: Close cleared upper band after squeeze '
+                f'(width={bb["width"]:.3f})'
+            )
+            entry_strength = 0.85
+        elif scout:
             entry_type = 'SCOUT'
             entry_reason = 'SCOUT COMPRESSION ENTRY: Near resistance with higher lows'
             entry_strength = 0.70
@@ -1334,6 +1358,7 @@ Reason: {reason}
         signal['market_mode'] = market_mode
         signal['session_mode'] = session_mode
         signal['atr_value'] = atr_current
+        signal['bb_width'] = bb['width']
         signal['strong_trend'] = market_mode == 'TRENDING' and market_type == 'TREND' and adx['adx'] >= self.adx_trend_threshold and ema_fast > ema_slow
 
         # Attach trade score for dynamic sizing

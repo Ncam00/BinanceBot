@@ -19,7 +19,7 @@ def print_signal(symbol, signal):
 
 if __name__ == '__main__':
     trader = SmartTrader()
-    symbols = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'AVAXUSDT']
+    symbols = ['ETHUSDT', 'BTCUSDT']
 
     for symbol in symbols:
         signal = trader.analyze(symbol)
