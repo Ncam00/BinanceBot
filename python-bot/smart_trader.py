@@ -336,7 +336,11 @@ class SmartTrader:
 
     def bollinger_breakout_signal(self, df, bb):
         if len(df) < 20:
-            return False
+            return {
+                'breakout': False,
+                'strong_breakout': False,
+                'volume_ratio': 0,
+            }
 
         last_close = df['close'].iloc[-1]
         prev_close = df['close'].iloc[-2]
@@ -344,8 +348,14 @@ class SmartTrader:
         average_volume = df['volume'].rolling(20).mean().iloc[-1]
         squeeze = bb['width'] < self.bb_squeeze_threshold
         breakout = last_close > bb['upper'] and prev_close <= bb['prev_upper']
-        strong_volume = not np.isnan(average_volume) and last_volume > average_volume
-        return breakout and squeeze and strong_volume
+        volume_ratio = (last_volume / average_volume) if average_volume and not np.isnan(average_volume) else 0
+        normal_volume = volume_ratio > 1.0
+        strong_volume = volume_ratio > 1.2
+        return {
+            'breakout': breakout and squeeze and normal_volume,
+            'strong_breakout': breakout and squeeze and strong_volume,
+            'volume_ratio': volume_ratio,
+        }
 
     # ════════════════════════════════════════════════════════════════════
     # SUPPORT / RESISTANCE
@@ -1162,7 +1172,11 @@ Reason: {reason}
         compression_setup = context['scout']
         trade_score = context['score']
         strong_breakout = self.is_strong_breakout(trade_data, context)
-        if bollinger_breakout:
+        bollinger_strong_breakout = bollinger_breakout['strong_breakout']
+        bollinger_standard_breakout = bollinger_breakout['breakout']
+        if bollinger_standard_breakout:
+            trade_score = min(trade_score + 1, 5)
+        if bollinger_strong_breakout:
             trade_score = min(trade_score + 1, 5)
         entry_type = None
         entry_reason = None
@@ -1210,7 +1224,7 @@ Reason: {reason}
         near_resistance = self.is_near_level(price, resistance)
 
         zone = self.get_trade_zone(price, support, resistance)
-        breakout = context['breakout'] or strong_breakout or bollinger_breakout
+        breakout = context['breakout'] or strong_breakout or bollinger_standard_breakout
         context['breakout'] = breakout
         score = trade_score
         scout = context['scout']
@@ -1219,13 +1233,20 @@ Reason: {reason}
 
         # Entry decision always runs before filters.
         print(f"{symbol} reached entry evaluation")
-        if bollinger_breakout:
+        if bollinger_strong_breakout:
             entry_type = 'A+'
             entry_reason = (
-                f'BOLLINGER BREAKOUT: Close cleared upper band after squeeze '
-                f'(width={bb["width"]:.3f})'
+                f'BOLLINGER BREAKOUT A+: Close cleared upper band after squeeze '
+                f'(width={bb["width"]:.3f}, vol={bollinger_breakout["volume_ratio"]:.2f}x)'
             )
             entry_strength = 0.85
+        elif bollinger_standard_breakout:
+            entry_type = 'B+'
+            entry_reason = (
+                f'BOLLINGER BREAKOUT B+: Close cleared upper band after squeeze '
+                f'(width={bb["width"]:.3f}, vol={bollinger_breakout["volume_ratio"]:.2f}x)'
+            )
+            entry_strength = 0.75
         elif scout:
             entry_type = 'SCOUT'
             entry_reason = 'SCOUT COMPRESSION ENTRY: Near resistance with higher lows'
