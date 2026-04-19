@@ -48,7 +48,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # CORE RISK SETTINGS
         # ════════════════════════════════════════════════════════════════════
-        self.stop_loss_percent = 1.2
+        self.stop_loss_percent = 1.0
         self.take_profit_percent = 2.0
         self.position_size_percent = 15
         self.max_position_cap = 0.25
@@ -57,12 +57,13 @@ class SmartTrader:
         # DAILY / WEEKLY LIMITS
         # ════════════════════════════════════════════════════════════════════
         self.daily_profit_target = 20.00
-        self.max_daily_loss = 7.00
+        self.max_daily_loss = 4.00
         self.max_weekly_loss = 20.00
         self.max_trades_per_day = 5
         self.hard_max_trades = 5
         self.trade_cooldown_minutes = 30
         self.max_consecutive_losses = 2
+        self.only_a_plus_after_loss = True
 
         # ════════════════════════════════════════════════════════════════════
         # CIRCUIT BREAKER
@@ -74,10 +75,13 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # EXIT MANAGEMENT
         # ════════════════════════════════════════════════════════════════════
-        self.break_even_trigger = 1.2
-        self.trailing_stop_activation = 1.5
-        self.trailing_stop_distance = 0.8
+        self.break_even_trigger = 0.5
+        self.micro_profit_lock_trigger = 0.8
+        self.trailing_stop_activation = 1.2
+        self.trailing_stop_distance = 0.5
         self.partial_tp_percent = 0.50
+        self.soft_exit_loss_trigger = 0.4
+        self.no_momentum_price_change_threshold = 0.25
         self.bb_squeeze_threshold = 0.05
 
         # ════════════════════════════════════════════════════════════════════
@@ -113,6 +117,7 @@ class SmartTrader:
         self.daily_loss_ratio = 0.0
         self.weekly_pnl = 0.0
         self.daily_trades = 0
+        self.daily_losing_trades = 0
         self.consecutive_losses = 0
         self.last_trade_win = False
         self.fallback_trade_taken = False
@@ -742,7 +747,7 @@ class SmartTrader:
                 'balance_fraction': 0.03,
                 'tp1_percent': 1.2,
                 'tp2_percent': 1.2,
-                'sl_percent': 1.0,
+                'sl_percent': 0.9,
             }
 
         if signal.get('market_mode') == 'RANGING':
@@ -751,7 +756,7 @@ class SmartTrader:
                 'balance_fraction': 0.06,
                 'tp1_percent': 1.2,
                 'tp2_percent': 1.2,
-                'sl_percent': 1.0,
+                'sl_percent': 0.9,
             }
 
         if entry_tier == 'SCOUT' or signal.get('scout_trade'):
@@ -760,7 +765,7 @@ class SmartTrader:
                 'balance_fraction': 0.05,
                 'tp1_percent': 2.5,
                 'tp2_percent': 2.5,
-                'sl_percent': 1.0,
+                'sl_percent': 0.9,
             }
 
         if entry_tier == 'B+' or signal.get('fallback_trade'):
@@ -769,7 +774,7 @@ class SmartTrader:
                 'balance_fraction': 0.08,
                 'tp1_percent': 1.5,
                 'tp2_percent': 1.5,
-                'sl_percent': 1.0,
+                'sl_percent': 0.9,
             }
 
         if entry_tier == 'A+':
@@ -778,7 +783,7 @@ class SmartTrader:
                 'balance_fraction': 0.15,
                 'tp1_percent': 1.5,
                 'tp2_percent': 2.0,
-                'sl_percent': 1.2,
+                'sl_percent': 1.0,
             }
 
         if signal_type == 'SCOUT' and score >= 3:
@@ -787,7 +792,7 @@ class SmartTrader:
                 'balance_fraction': 0.05,
                 'tp1_percent': 2.5,
                 'tp2_percent': 2.5,
-                'sl_percent': 1.0,
+                'sl_percent': 0.9,
             }
 
         if signal_type == 'BREAKOUT' and score == 3:
@@ -796,7 +801,7 @@ class SmartTrader:
                 'balance_fraction': 0.08,
                 'tp1_percent': 1.5,
                 'tp2_percent': 1.5,
-                'sl_percent': 1.0,
+                'sl_percent': 0.9,
             }
 
         if signal_type == 'BREAKOUT' and score >= 4:
@@ -805,7 +810,7 @@ class SmartTrader:
                 'balance_fraction': 0.20 if score >= 5 else 0.15,
                 'tp1_percent': 1.5,
                 'tp2_percent': 2.0,
-                'sl_percent': 1.2,
+                'sl_percent': 1.0,
             }
 
         return {
@@ -813,7 +818,7 @@ class SmartTrader:
             'balance_fraction': 0.10,
             'tp1_percent': 1.5,
             'tp2_percent': 2.0,
-            'sl_percent': 1.0,
+            'sl_percent': 0.9,
         }
 
     def get_score_position_size(self, balance, score, signal):
@@ -1049,6 +1054,22 @@ Reason: {reason}
         current_volume = df['volume'].iloc[-1]
         return current_volume / vol_ema if vol_ema > 0 else 1.0
 
+    def has_no_momentum(self, symbol):
+        df = self.get_candles(symbol, '15m', 20)
+        if df is None or len(df) < 4:
+            return False
+
+        average_volume = df['volume'].rolling(20).mean().iloc[-1]
+        if np.isnan(average_volume) or average_volume <= 0:
+            return False
+
+        volume_is_weak = df['volume'].iloc[-1] < average_volume
+        reference_close = df['close'].iloc[-4]
+        if reference_close <= 0:
+            return False
+        recent_change = abs((df['close'].iloc[-1] - reference_close) / reference_close) * 100
+        return volume_is_weak and recent_change < self.no_momentum_price_change_threshold
+
     def check_volume(self, df):
         ratio = self.get_volume_ratio(df)
         if ratio < 0.8:
@@ -1270,6 +1291,12 @@ Reason: {reason}
             entry_reason = 'Temporary micro B+ test entry'
             entry_strength = 0.55
             micro_b_test = True
+
+        if self.only_a_plus_after_loss and self.daily_losing_trades >= 1 and entry_type not in (None, 'A+'):
+            print(f"{symbol} blocking non A+ setup after daily loss")
+            entry_type = None
+            entry_reason = 'Post-loss protection active - A+ setups only'
+            micro_b_test = False
 
         if entry_type == 'A+' and market == 'CHOPPY':
             print(f"{symbol} skipping A+ due to choppy market")
@@ -1574,6 +1601,7 @@ Reason: {reason}
             if remaining_quantity <= 0:
                 safe_balance = max(balance, 1e-9)
                 if pnl < 0:
+                    self.daily_losing_trades += 1
                     self.daily_loss_ratio += abs(pnl) / safe_balance
                     self.consecutive_losses += 1
                     self.last_trade_win = False
@@ -1634,6 +1662,12 @@ Reason: {reason}
 
             pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
 
+            if pnl_percent <= -self.soft_exit_loss_trigger and not position.get('partial_taken'):
+                if self.has_no_momentum(symbol):
+                    print(f"\n   SOFT EXIT {symbol} @ ${current_price:.4f} (no momentum)")
+                    self.execute_sell(position, 'SOFT_EXIT_NO_MOMENTUM')
+                    continue
+
             # 1. STOP LOSS (first - always)
             if current_price <= position['stop_loss']:
                 print(f"\n   STOP LOSS {symbol} @ ${current_price:.4f}")
@@ -1649,13 +1683,23 @@ Reason: {reason}
                     f"Break-Even Active\n{symbol}\nSL moved to entry\nProfit: +{pnl_percent:.2f}%"
                 )
 
-            # 3. TRAILING STOP: activates at 1.5% profit, trails 0.8%
+            if pnl_percent >= self.micro_profit_lock_trigger and not position.get('partial_taken'):
+                partial_qty = position['original_quantity'] * self.partial_tp_percent
+                result = self.execute_sell(position, 'MICRO_PROFIT_LOCK', quantity=partial_qty)
+                if result:
+                    position['partial_taken'] = True
+                    position['runner_active'] = True
+                    position['stop_loss'] = position['entry_price']
+                    print(f"   MICRO PROFIT LOCK {symbol} - secured 50%, SL at entry")
+                continue
+
+            # 3. TRAILING STOP: activates at 1.2% profit, trails 0.5%
             if pnl_percent >= self.trailing_stop_activation:
                 if not position.get('trailing_stop_active'):
                     position['trailing_stop_active'] = True
                     position['highest_price'] = current_price
                     if position.get('strong_trend') and position.get('atr_value', 0) > 0:
-                        position['trailing_stop_price'] = current_price - (position['atr_value'] * 0.8)
+                        position['trailing_stop_price'] = current_price - (position['atr_value'] * 0.5)
                     else:
                         position['trailing_stop_price'] = current_price * (1 - self.trailing_stop_distance / 100)
                     print(f"   TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
@@ -1668,7 +1712,7 @@ Reason: {reason}
                 if current_price > position.get('highest_price', 0):
                     position['highest_price'] = current_price
                     if position.get('strong_trend') and position.get('atr_value', 0) > 0:
-                        new_trail = current_price - (position['atr_value'] * 0.8)
+                        new_trail = current_price - (position['atr_value'] * 0.5)
                     else:
                         new_trail = current_price * (1 - self.trailing_stop_distance / 100)
                     if new_trail > position.get('trailing_stop_price', 0):
@@ -1743,6 +1787,7 @@ Reason: {reason}
             self.daily_profit = 0.0
             self.daily_loss = 0.0
             self.daily_loss_ratio = 0.0
+            self.daily_losing_trades = 0
             self.consecutive_losses = 0
             self.fallback_trade_taken = False
             self.scout_trade_taken = False
