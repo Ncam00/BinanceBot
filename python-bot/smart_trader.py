@@ -621,6 +621,30 @@ class SmartTrader:
         }
         return self.is_scout_candidate(data, context)
 
+    def build_context(self, data):
+        context = self.level_context(data['price'], data['resistance'], data['support'])
+        context['trend'] = data['ema_fast'] > data['ema_slow']
+        context['higher_lows'] = self.detect_higher_lows(data['df'])
+        context['ema_alignment'] = data['ema_fast'] > data['ema_slow']
+        context['structure_clean'] = (
+            context['trend'] and
+            (context['breakout'] or not context['near_resistance']) and
+            not context['breakdown']
+        )
+
+        trade_data = {
+            'open': data['df']['open'].iloc[-1],
+            'close': data['price'],
+            'volume': data['volume'],
+            'avg_volume': data['avg_volume'],
+            'atr': data['atr'],
+            'rsi': data['rsi'],
+        }
+        context['score'] = self.get_trade_score(trade_data, context)
+        context['scout'] = context['near_resistance'] and context['higher_lows']
+        context['market'] = data['market_mode']
+        return context
+
     # ════════════════════════════════════════════════════════════════════
     # TRADE SCORING & DYNAMIC SIZING
     # ════════════════════════════════════════════════════════════════════
@@ -1073,11 +1097,20 @@ Reason: {reason}
         support = sr['support']
         resistance = sr['resistance']
         recent_resistance, recent_support = self.calculate_levels(df)
-        context = self.level_context(price, resistance, support)
-        context['trend'] = ema_fast > ema_slow
-        context['higher_lows'] = self.detect_higher_lows(df)
-        context['ema_alignment'] = ema_fast > ema_slow
-        context['structure_clean'] = context['trend'] and (context['breakout'] or not context['near_resistance']) and not context['breakdown']
+        context_data = {
+            'df': df,
+            'price': price,
+            'resistance': resistance,
+            'support': support,
+            'ema_fast': ema_fast,
+            'ema_slow': ema_slow,
+            'volume': df['volume'].iloc[-1],
+            'avg_volume': avg_volume,
+            'atr': atr_current,
+            'rsi': rsi,
+            'market_mode': market_mode,
+        }
+        context = self.build_context(context_data)
         trade_data = {
             'open': df['open'].iloc[-1],
             'close': price,
@@ -1090,8 +1123,8 @@ Reason: {reason}
         market_type = self.get_market_type(adx['adx'])
         state = self.get_symbol_state(symbol)
         tolerance = 0.002
-        compression_setup = self.detect_pre_breakout(df, price, resistance, volume_ratio)
-        trade_score = self.get_trade_score(trade_data, context)
+        compression_setup = context['scout']
+        trade_score = context['score']
         strong_breakout = self.is_strong_breakout(trade_data, context)
         entry_type = None
         entry_reason = None
@@ -1099,9 +1132,6 @@ Reason: {reason}
         support_override = None
         clear_breakout_wait = False
         retest_reason = None
-
-        if market_mode == 'CHOPPY':
-            print(f"{symbol} choppy -> allowing limited trades")
 
         # Track breakout state without blocking the tier decision path.
         if market_type == 'TREND' and price > resistance and not state['waiting_for_retest'] and not compression_setup and not strong_breakout and trade_score < 3:
@@ -1142,57 +1172,47 @@ Reason: {reason}
         near_resistance = self.is_near_level(price, resistance)
 
         zone = self.get_trade_zone(price, support, resistance)
+        breakout = context['breakout'] or strong_breakout
+        context['breakout'] = breakout
+        score = context['score']
+        scout = context['scout']
+        market = context['market']
 
         # Entry decision always runs before filters.
-        if compression_setup:
+        if scout:
             entry_type = 'SCOUT'
             entry_reason = 'SCOUT COMPRESSION ENTRY: Near resistance with higher lows'
             entry_strength = 0.70
-        elif strong_breakout:
+        elif breakout:
             entry_type = 'A+'
             entry_reason = entry_reason or 'IMPERFECT BREAKOUT ENTRY: Breakout candle strong enough to skip retest'
             entry_strength = 0.85
-        elif self.is_b_plus_trade(trade_score, context):
+        elif score >= 3:
             entry_type = 'B+'
-            entry_reason = f'FLEX ENTRY: 3-of-5 confirmation matched ({trade_score}/5)'
+            entry_reason = f'FLEX ENTRY: 3-of-5 confirmation matched ({score}/5)'
             entry_strength = 0.75
-
-        if entry_type is None:
-            reason = retest_reason or f'No valid trend entry ({trade_score}/5 checks)'
-            return {
-                'action': 'HOLD',
-                'strength': 0,
-                'reason': reason,
-                'market_type': market_type,
-                'price': price,
-                'support': support,
-                'resistance': resistance,
-                'rsi': rsi,
-                'adx': adx['adx'],
-                'zone': zone,
-                'market_mode': market_mode,
-            }
-
-        if entry_type == 'A+' and market_mode == 'CHOPPY':
+        else:
             entry_type = None
-            entry_reason = 'Skipping A+ due to chop'
 
-        if entry_type == 'A+' and market_type != 'RANGE' and adx['adx'] < self.min_adx_for_entry:
-            entry_type = None
-            entry_reason = f'Skipping A+ due to weak ADX ({adx["adx"]:.1f} < {self.min_adx_for_entry})'
+        print(f"{symbol} | score={score} | scout={scout} | breakout={breakout} | entry={entry_type}")
 
-        if entry_type == 'A+' and self.dead_zone_filter(price, recent_resistance, recent_support):
+        if entry_type == 'A+' and market == 'CHOPPY':
+            print(f"{symbol} skipping A+ due to choppy market")
             entry_type = None
-            entry_reason = 'Skipping A+ due to dead zone'
-            zone = 'dead_zone'
-            support = recent_support
-            resistance = recent_resistance
+            entry_reason = 'Skipping A+ due to choppy market'
+
+        if entry_type == 'B+' and adx['adx'] < self.min_adx_for_entry:
+            print(f"{symbol} skipping weak trend setup")
+            entry_type = None
+            entry_reason = f'Skipping weak trend setup ({adx["adx"]:.1f} < {self.min_adx_for_entry})'
 
         signal = {
             'action': 'HOLD' if entry_type is None else 'BUY',
             'strength': 0 if entry_type is None else entry_strength,
-            'reason': entry_reason or retest_reason or f'No valid trend entry ({trade_score}/5 checks)',
-            'score': trade_score,
+            'reason': entry_reason or retest_reason or f'No valid setup ({score}/5 checks)',
+            'score': score,
+            'scout': scout,
+            'breakout': breakout,
         }
         if entry_type == 'SCOUT':
             signal.update({
@@ -1234,13 +1254,6 @@ Reason: {reason}
                     'action': 'HOLD',
                     'strength': 0,
                     'reason': 'BTC dumping - entry blocked',
-                    'score': trade_score,
-                }
-            elif not self.check_volume(df):
-                signal = {
-                    'action': 'HOLD',
-                    'strength': 0,
-                    'reason': 'Low volume - entry blocked',
                     'score': trade_score,
                 }
             elif not self.check_multi_timeframe(symbol):
@@ -1879,10 +1892,9 @@ Reason: {reason}
                             'reason': 'BTC bearish blocked long',
                         }
 
-                    scout = signal.get('entry_tier') == 'SCOUT' or self.is_scout_candidate(snapshot, context)
-                    breakout = signal.get('entry_tier') == 'A+' or bool(context.get('breakout'))
+                    scout = signal.get('scout', self.is_scout_candidate(snapshot, context))
+                    breakout = signal.get('breakout', bool(context.get('breakout')))
                     entry_type = signal.get('entry_tier') or signal.get('entry_type')
-                    print(f"{symbol} | score={signal.get('score', score)} | scout={scout} | breakout={breakout} | entry={entry_type}")
 
                     # Force visibility: always print why a symbol was skipped or acted on
                     reason_text = signal.get('reason', 'no reason')
