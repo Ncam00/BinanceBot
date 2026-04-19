@@ -96,7 +96,7 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0):
         sig = self.get(pair)
 
         # ADX filter — skip choppy markets
@@ -151,6 +151,14 @@ class EntryEngine:
             entry_type = None
 
         # ── PHASE 2: FILTER ──────────────────────────────────────────────────
+        if entry_type == 'A+' and bullish_timeframes < 2:
+            print(f"Skipping weak breakout (MTF misaligned: {bullish_timeframes}/3 bullish)")
+            entry_type = None
+        elif entry_type == 'B+' and bullish_timeframes < 1:
+            print(f"Skipping weak B+ setup (MTF misaligned: {bullish_timeframes}/3 bullish)")
+            entry_type = None
+        # SCOUT = allow regardless
+
         if market_mode == 'CHOPPY' and entry_type == 'B+':
             entry_type = None
 
@@ -199,6 +207,7 @@ class EntryEngine:
                 adx=data.get('adx'),
                 adx_threshold=22,
                 atr_avg=data.get('atr_avg'),
+                bullish_timeframes=data.get('bullish_timeframes', 0),
             )
             atr = data.get('atr', 0)
             atr_avg = data.get('atr_avg', 0)
@@ -592,6 +601,18 @@ class SmartTrader:
         return body > 0 and (body / candle_range) > 0.3
 
     # ════════════════════════════════════════════════════════════════════
+    def count_bullish_timeframes(self, symbol, price):
+        count = 0
+        for interval in ('15m', '1h', '4h'):
+            df = self.get_candles(symbol, interval, 55)
+            if df is None or len(df) < 50:
+                continue
+            ma50 = df['close'].rolling(50).mean().iloc[-1]
+            if price > ma50:
+                count += 1
+        return count
+
+    # ════════════════════════════════════════════════════════════════════
     def get_market_data(self):
         market_data = {}
         for symbol in self.trading_pairs:
@@ -617,8 +638,9 @@ class SmartTrader:
                 'ma50':       self.get_ma(closes, 50),
                 'adx':        adx['adx'],
                 'atr':        adx['atr'],
-                'atr_avg':    atr_series.rolling(14).mean().iloc[-1],
-                'lows':       df['low'].tolist()[-5:],
+                'atr_avg':             atr_series.rolling(14).mean().iloc[-1],
+                'lows':                df['low'].tolist()[-5:],
+                'bullish_timeframes':  self.count_bullish_timeframes(symbol, df['close'].iloc[-1]),
             }
         return market_data
 
