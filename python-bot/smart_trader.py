@@ -794,7 +794,11 @@ class SmartTrader:
         if score <= 2:
             return 0
 
-        position_notional = self.get_position_size(balance, score, signal.get('entry_tier'))
+        session_mode = signal.get('session_mode', 'NORMAL')
+        if session_mode == 'LOW_RISK':
+            position_notional = balance * 0.05
+        else:
+            position_notional = balance * 0.10
         if self.last_trade_win:
             position_notional *= 1.1
 
@@ -1099,11 +1103,12 @@ Reason: {reason}
             'atr_avg': 0 if np.isnan(atr_avg) else atr_avg,
         }
         market_mode = self.detect_market_mode(mode_snapshot)
-
-        # Session filter: only trade during EU/US hours
-        if not self.session_filter():
-            return {'action': 'HOLD', 'strength': 0,
-                    'reason': 'Outside active session (7-22 UTC)'}
+        in_active_session = self.session_filter()
+        if not in_active_session:
+            print(f"{symbol} outside main session -> allowing reduced-risk trade")
+            session_mode = 'LOW_RISK'
+        else:
+            session_mode = 'NORMAL'
 
         sr = self.calculate_support_resistance(df)
         support = sr['support']
@@ -1121,6 +1126,7 @@ Reason: {reason}
             'atr': atr_current,
             'rsi': rsi,
             'market_mode': market_mode,
+            'session_mode': session_mode,
         }
         context = self.build_context(context_data)
         trade_data = {
@@ -1326,6 +1332,7 @@ Reason: {reason}
         signal['adx'] = adx['adx']
         signal['zone'] = zone
         signal['market_mode'] = market_mode
+        signal['session_mode'] = session_mode
         signal['atr_value'] = atr_current
         signal['strong_trend'] = market_mode == 'TRENDING' and market_type == 'TREND' and adx['adx'] >= self.adx_trend_threshold and ema_fast > ema_slow
 
