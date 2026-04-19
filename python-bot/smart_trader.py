@@ -110,70 +110,80 @@ class EntryEngine:
         if market_mode == 'ACTIVE' and volume < avg_volume:
             return None
 
-        # Pre-breakout detection (SCOUT)
-        if not sig['active'] and price < resistance:
-            price_near_resistance = (resistance - price) / resistance <= 0.01
-            higher_lows_forming = (
-                lows is not None and len(lows) >= 3 and
-                all(lows[i] >= lows[i - 1] for i in range(-min(3, len(lows)), 0))
-            )
-            if price_near_resistance and higher_lows_forming:
-                return {'action': 'PRE_BREAKOUT', 'pair': pair, 'level': resistance}
-
-        # New breakout detected
+        # State machine: detect new breakout
         if not sig['active'] and price > resistance:
             self.activate(pair, resistance, direction='LONG')
             return {'action': 'BREAKOUT_WAIT', 'pair': pair, 'level': resistance}
 
-        # Watching for retest
+        # Retest timeout
         if sig['active']:
             sig['retest_candles'] += 1
             if sig['retest_candles'] > self.MAX_RETEST_CANDLES:
                 self.reset(pair)
                 return {'action': 'EXPIRED', 'pair': pair}
 
-            breakout = sig['active']
-            retest = (
-                sig['direction'] == 'LONG' and
-                price <= sig['level'] * (1 + self.TOLERANCE) and
-                abs(price - sig['level']) / sig['level'] <= 0.005
-            )
-            bullish_candle = (
-                close > open_price and
-                (close - open_price) / open_price >= 0.001
-            )
+        # ── Shared conditions ────────────────────────────────────────────────
+        price_near_resistance = (resistance - price) / resistance <= 0.01
+        higher_lows_forming = (
+            lows is not None and len(lows) >= 3 and
+            all(lows[i] >= lows[i - 1] for i in range(-min(3, len(lows)), 0))
+        )
+        retest = (
+            sig['active'] and
+            sig['direction'] == 'LONG' and
+            price <= sig['level'] * (1 + self.TOLERANCE) and
+            abs(price - sig['level']) / sig['level'] <= 0.005
+        )
+        bullish_candle  = close > open_price and (close - open_price) / open_price >= 0.001
+        momentum        = prev_close is not None and close > prev_close and volume > avg_volume * 1.05
+        candle_strength = atr is not None and (close - open_price) > (atr * 0.5)
+        breakout_confirmed = retest and bullish_candle and momentum and candle_strength
+        confidence = self.get_confidence(price, resistance, volume, avg_volume, close, open_price, ma) if sig['active'] else 0
 
-            momentum = (
-                prev_close is not None and close > prev_close and
-                volume > avg_volume * 1.05
+        # ── PHASE 1: CLASSIFY ────────────────────────────────────────────────
+        if not sig['active'] and price_near_resistance and higher_lows_forming:
+            entry_type = 'SCOUT'
+        elif sig['active'] and breakout_confirmed and confidence >= 4:
+            entry_type = 'A+'
+        elif sig['active'] and breakout_confirmed and confidence >= 3:
+            entry_type = 'B+'
+        else:
+            entry_type = None
+
+        # ── PHASE 2: FILTER ──────────────────────────────────────────────────
+        if entry_type == 'A+' and not breakout_confirmed:
+            entry_type = None
+
+        if entry_type == 'B+' and not higher_lows_forming:
+            entry_type = None
+
+        in_dead_zone = not price_near_resistance
+        if entry_type == 'SCOUT' and in_dead_zone:
+            entry_type = None
+
+        if market_mode == 'CHOPPY' and entry_type == 'B+':
+            entry_type = None
+
+        # ── ACT ──────────────────────────────────────────────────────────────
+        if entry_type == 'SCOUT':
+            return {'action': 'PRE_BREAKOUT', 'pair': pair, 'level': resistance}
+
+        if entry_type == 'A+':
+            return {'action': 'CANDIDATE', 'pair': pair, 'level': sig['level'],
+                    'confidence': confidence, 'price': price}
+
+        if entry_type == 'B+':
+            return {'action': 'CANDIDATE_SMALL', 'pair': pair, 'level': sig['level'],
+                    'confidence': confidence, 'price': price}
+
+        if entry_type is None and sig['active']:
+            reason = (
+                f'CHOPPY: B+ blocked' if market_mode == 'CHOPPY' else
+                f'No structure (higher lows missing)' if not higher_lows_forming else
+                f'Breakout not confirmed' if not breakout_confirmed else
+                f'Low confidence ({confidence}/4)'
             )
-            candle_strength = (
-                atr is not None and (close - open_price) > (atr * 0.5)
-            )
-
-            if breakout and retest and bullish_candle and momentum and candle_strength:
-                confidence = self.get_confidence(price, resistance, volume, avg_volume, close, open_price, ma)
-                if market_mode == 'CHOPPY' and confidence < 4:
-                    return {'action': 'HOLD', 'pair': pair,
-                            'reason': f'CHOPPY market: B+ (score 4) required, got {confidence}'}
-                if confidence < 3:
-                    return {'action': 'HOLD', 'pair': pair,
-                            'reason': f'Low confidence ({confidence}/4)'}
-
-                if confidence == 3:
-                    pre_breakout = (
-                        lows is not None and len(lows) >= 3 and
-                        all(lows[i] >= lows[i - 1] for i in range(-min(3, len(lows)), 0)) and
-                        (resistance - price) / resistance <= 0.01
-                    )
-                    if not pre_breakout:
-                        return {'action': 'HOLD', 'pair': pair,
-                                'reason': 'Score 3 but no pre-breakout structure'}
-                    return {'action': 'CANDIDATE_SMALL', 'pair': pair, 'level': sig['level'],
-                            'confidence': confidence, 'price': price}
-
-                return {'action': 'CANDIDATE', 'pair': pair, 'level': sig['level'],
-                        'confidence': confidence, 'price': price}
+            return {'action': 'HOLD', 'pair': pair, 'reason': reason}
 
         return None
 
