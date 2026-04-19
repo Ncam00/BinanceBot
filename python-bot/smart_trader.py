@@ -92,6 +92,7 @@ class SmartTrader:
         self.adx_range_threshold = 20
         self.adx_trend_threshold = 25
         self.min_adx_for_entry = 18           # Relaxed: allow more trades while avoiding garbage
+        self.enable_micro_b_plus_test = True
 
         # ════════════════════════════════════════════════════════════════════
         # SESSION SETTINGS (NZ TIME)
@@ -688,6 +689,8 @@ class SmartTrader:
         return score
 
     def get_position_size(self, balance, score, entry_type):
+        if entry_type == 'MICRO_B+':
+            return balance * 0.03
         if entry_type == 'A+':
             return balance * 0.15
         if entry_type == 'B+':
@@ -705,6 +708,15 @@ class SmartTrader:
         """Choose early / confirmed / continuation profile from score and signal context."""
         signal_type = signal.get('entry_type', 'PULLBACK').upper()
         entry_tier = signal.get('entry_tier')
+
+        if signal.get('micro_b_test'):
+            return {
+                'entry_type': 'micro_b_test',
+                'balance_fraction': 0.03,
+                'tp1_percent': 1.2,
+                'tp2_percent': 1.2,
+                'sl_percent': 1.0,
+            }
 
         if signal.get('market_mode') == 'RANGING':
             return {
@@ -792,7 +804,7 @@ class SmartTrader:
     def dynamic_tp_sl(self, entry_price, score, signal):
         """Return TP1, TP2 and SL using the entry profile model."""
         profile = self.get_entry_profile(signal, score)
-        single_target_profiles = {'b_plus', 'ranging', 'scout'}
+        single_target_profiles = {'b_plus', 'ranging', 'scout', 'micro_b_test'}
         tp1 = None if profile['entry_type'] in single_target_profiles else entry_price * (1 + profile['tp1_percent'] / 100)
         tp2_percent = 3.5 if signal.get('strong_trend') and profile['entry_type'] not in single_target_profiles else profile['tp2_percent']
         tp2 = entry_price * (1 + tp2_percent / 100)
@@ -1177,8 +1189,10 @@ Reason: {reason}
         score = context['score']
         scout = context['scout']
         market = context['market']
+        micro_b_test = False
 
         # Entry decision always runs before filters.
+        print(f"{symbol} reached entry evaluation")
         if scout:
             entry_type = 'SCOUT'
             entry_reason = 'SCOUT COMPRESSION ENTRY: Near resistance with higher lows'
@@ -1196,12 +1210,19 @@ Reason: {reason}
 
         print(f"{symbol} | score={score} | scout={scout} | breakout={breakout} | entry={entry_type}")
 
+        if entry_type is None and self.enable_micro_b_plus_test:
+            print(f"{symbol} no setup -> allowing micro B+ test")
+            entry_type = 'B+'
+            entry_reason = 'Temporary micro B+ test entry'
+            entry_strength = 0.55
+            micro_b_test = True
+
         if entry_type == 'A+' and market == 'CHOPPY':
             print(f"{symbol} skipping A+ due to choppy market")
             entry_type = None
             entry_reason = 'Skipping A+ due to choppy market'
 
-        if entry_type == 'B+' and adx['adx'] < self.min_adx_for_entry:
+        if entry_type == 'B+' and not micro_b_test and adx['adx'] < self.min_adx_for_entry:
             print(f"{symbol} skipping weak trend setup")
             entry_type = None
             entry_reason = f'Skipping weak trend setup ({adx["adx"]:.1f} < {self.min_adx_for_entry})'
@@ -1236,6 +1257,8 @@ Reason: {reason}
                 'entry_tier': 'B+',
                 'fallback_trade': True,
             })
+            if micro_b_test:
+                signal['micro_b_test'] = True
 
         # ── Confirmation candle ───────────────────────────────────────
         if signal['action'] == 'BUY' and signal.get('entry_type') not in ('BREAKOUT', 'SCOUT'):
