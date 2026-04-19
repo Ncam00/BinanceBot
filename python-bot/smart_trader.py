@@ -151,16 +151,6 @@ class EntryEngine:
             entry_type = None
 
         # ── PHASE 2: FILTER ──────────────────────────────────────────────────
-        if entry_type == 'A+' and not breakout_confirmed:
-            entry_type = None
-
-        if entry_type == 'B+' and not higher_lows_forming:
-            entry_type = None
-
-        in_dead_zone = not price_near_resistance
-        if entry_type == 'SCOUT' and in_dead_zone:
-            entry_type = None
-
         if market_mode == 'CHOPPY' and entry_type == 'B+':
             entry_type = None
 
