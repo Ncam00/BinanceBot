@@ -335,14 +335,17 @@ class SmartTrader:
         }
 
     def bollinger_breakout_signal(self, df, bb):
-        if len(df) < 2:
+        if len(df) < 20:
             return False
 
         last_close = df['close'].iloc[-1]
         prev_close = df['close'].iloc[-2]
+        last_volume = df['volume'].iloc[-1]
+        average_volume = df['volume'].rolling(20).mean().iloc[-1]
         squeeze = bb['width'] < self.bb_squeeze_threshold
         breakout = last_close > bb['upper'] and prev_close <= bb['prev_upper']
-        return breakout and squeeze
+        strong_volume = not np.isnan(average_volume) and last_volume > average_volume
+        return breakout and squeeze and strong_volume
 
     # ════════════════════════════════════════════════════════════════════
     # SUPPORT / RESISTANCE
