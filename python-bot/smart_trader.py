@@ -630,11 +630,11 @@ class SmartTrader:
         )
 
     def is_compression_setup(self, data, context):
-        # Scout trigger: near resistance + higher lows is enough.
-        # Volume boost is a bonus but not required to allow early entry.
         return (
             context['near_resistance'] and
-            context['higher_lows']
+            context['higher_lows'] and
+            context.get('tightening_range', False) and
+            context.get('rising_volume', False)
         )
 
     def detect_higher_lows(self, df):
@@ -642,6 +642,42 @@ class SmartTrader:
             return False
         recent_lows = df['low'].iloc[-4:-1].tolist()
         return recent_lows[0] < recent_lows[1] < recent_lows[2]
+
+    def detect_tightening_range(self, df, window=3):
+        if len(df) < window * 2 + 1:
+            return False
+        candle_ranges = (df['high'] - df['low'])
+        recent_range = candle_ranges.iloc[-window:].mean()
+        prior_range = candle_ranges.iloc[-(window * 2):-window].mean()
+        if np.isnan(recent_range) or np.isnan(prior_range) or prior_range <= 0:
+            return False
+        return recent_range < prior_range * 0.85
+
+    def detect_rising_volume(self, df, window=3):
+        if len(df) < window * 2 + 1:
+            return False
+        recent_volume = df['volume'].iloc[-window:].mean()
+        prior_volume = df['volume'].iloc[-(window * 2):-window].mean()
+        if np.isnan(recent_volume) or np.isnan(prior_volume) or prior_volume <= 0:
+            return False
+        return recent_volume > prior_volume
+
+    def get_trend_continuation_context(self, df, price, ema20, ema50, bb):
+        trend_up = ema20 > ema50 and price > ema20
+        higher_lows = self.detect_higher_lows(df)
+        low_near_ema20 = abs(df['low'].iloc[-1] - ema20) / max(ema20, 1e-9) <= 0.004
+        soft_pullback = price >= ema20 and low_near_ema20
+        upper_band_ride = (
+            price >= bb['upper'] * 0.985 and
+            df['close'].iloc[-3:].min() >= bb['middle']
+        )
+        continuation_ready = trend_up and higher_lows and (soft_pullback or upper_band_ride)
+        return {
+            'trend_up': trend_up,
+            'soft_pullback': soft_pullback,
+            'upper_band_ride': upper_band_ride,
+            'continuation_ready': continuation_ready,
+        }
 
     def detect_pre_breakout(self, df, price, resistance, volume_ratio):
         if len(df) < 4:
@@ -660,6 +696,16 @@ class SmartTrader:
         context['trend'] = data['ema_fast'] > data['ema_slow']
         context['higher_lows'] = self.detect_higher_lows(data['df'])
         context['ema_alignment'] = data['ema_fast'] > data['ema_slow']
+        context['tightening_range'] = self.detect_tightening_range(data['df'])
+        context['rising_volume'] = self.detect_rising_volume(data['df'])
+        continuation = self.get_trend_continuation_context(
+            data['df'],
+            data['price'],
+            data['ema20'],
+            data['ema50'],
+            data['bb']
+        )
+        context.update(continuation)
         context['structure_clean'] = (
             context['trend'] and
             (context['breakout'] or not context['near_resistance']) and
@@ -675,7 +721,7 @@ class SmartTrader:
             'rsi': data['rsi'],
         }
         context['score'] = self.get_trade_score(trade_data, context)
-        context['scout'] = context['near_resistance'] and context['higher_lows']
+        context['scout'] = self.is_compression_setup(trade_data, context)
         context['market'] = data['market_mode']
         return context
 
@@ -1164,6 +1210,8 @@ Reason: {reason}
         macd = self.calculate_macd(closes)
         ema_fast = self.calculate_ema(closes, 7)
         ema_slow = self.calculate_ema(closes, 18)
+        ema20 = self.calculate_ema(closes, 20)
+        ema50 = self.calculate_ema(closes, 50)
         atr_current = self.calculate_atr(analysis_df, period=14)
         tr = pd.concat([
             analysis_df['high'] - analysis_df['low'],
@@ -1200,10 +1248,13 @@ Reason: {reason}
             'support': support,
             'ema_fast': ema_fast,
             'ema_slow': ema_slow,
+            'ema20': ema20,
+            'ema50': ema50,
             'volume': analysis_df['volume'].iloc[-1],
             'avg_volume': avg_volume,
             'atr': atr_current,
             'rsi': rsi,
+            'bb': bb,
             'market_mode': market_mode,
             'session_mode': session_mode,
         }
@@ -1279,6 +1330,7 @@ Reason: {reason}
         context['breakout'] = breakout
         score = trade_score
         scout = context['scout']
+        continuation_ready = context.get('continuation_ready', False)
         market = context['market']
         micro_b_test = False
 
@@ -1298,9 +1350,16 @@ Reason: {reason}
                 f'(width={bb["width"]:.3f}, vol={bollinger_breakout["volume_ratio"]:.2f}x)'
             )
             entry_strength = 0.75
+        elif continuation_ready:
+            entry_type = 'B+'
+            continuation_trigger = 'soft EMA20 pullback' if context.get('soft_pullback') else 'upper band ride'
+            entry_reason = (
+                f'TREND CONTINUATION B+: EMA20 > EMA50, higher lows, {continuation_trigger}'
+            )
+            entry_strength = 0.78
         elif scout:
             entry_type = 'SCOUT'
-            entry_reason = 'SCOUT COMPRESSION ENTRY: Near resistance with higher lows'
+            entry_reason = 'SCOUT COMPRESSION ENTRY: higher lows + tightening range + rising volume'
             entry_strength = 0.70
         elif breakout:
             entry_type = 'A+'
@@ -1364,10 +1423,12 @@ Reason: {reason}
                 signal['clear_breakout_wait'] = True
         elif entry_type == 'B+':
             signal.update({
-                'entry_type': 'B_PLUS',
+                'entry_type': 'CONTINUATION' if continuation_ready else 'B_PLUS',
                 'entry_tier': 'B+',
-                'fallback_trade': True,
+                'fallback_trade': not continuation_ready,
             })
+            if continuation_ready:
+                signal['continuation_trade'] = True
             if micro_b_test:
                 signal['micro_b_test'] = True
 
@@ -1442,6 +1503,11 @@ Reason: {reason}
         signal['bb_width'] = bb['width']
         signal['volume_ratio'] = volume_ratio
         signal['strong_trend'] = market_mode == 'TRENDING' and market_type == 'TREND' and adx['adx'] >= self.adx_trend_threshold and ema_fast > ema_slow
+        signal['ema20'] = ema20
+        signal['ema50'] = ema50
+        signal['trend_up'] = context.get('trend_up', False)
+        signal['soft_pullback'] = context.get('soft_pullback', False)
+        signal['upper_band_ride'] = context.get('upper_band_ride', False)
 
         if signal['action'] == 'BUY':
             expected_move = self.get_expected_move_percent(entry_price, resistance, atr_current, breakout)
