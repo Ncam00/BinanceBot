@@ -1646,6 +1646,124 @@ Reason: {reason}
             return 0
         return position_size
 
+    def get_open_position(self, symbol):
+        for position in self.open_positions:
+            if position['symbol'] == symbol:
+                return position
+        return None
+
+    def should_scale_scout_position(self, position, signal):
+        if not position or position.get('scaled_in'):
+            return False
+        if position.get('entry_type') != 'scout':
+            return False
+        if not position.get('signal', {}).get('trend_scout'):
+            return False
+        if signal.get('action') != 'BUY':
+            return False
+        if signal.get('micro_b_test'):
+            return False
+        if signal.get('entry_tier') not in ('A+', 'B+'):
+            return False
+        return signal.get('breakout') or signal.get('early_breakout')
+
+    def execute_scale_in(self, position, signal):
+        if self.trade_lock:
+            print(f"   TRADE LOCK - skipping scale-in {position['symbol']}")
+            return None
+
+        self.trade_lock = True
+        try:
+            symbol = position['symbol']
+            balance = self.get_balance()
+            price = signal['price']
+            score = signal.get('score', 3)
+
+            tp1_price, tp2_price, dynamic_sl, profile = self.dynamic_tp_sl(price, score, signal)
+            target_notional = self.get_score_position_size(balance, score, signal)
+            current_notional = position['quantity'] * price
+            add_notional = target_notional - current_notional
+            if add_notional < 10:
+                print(f"   SCALE-IN SKIPPED {symbol} - scout already near target size")
+                return None
+
+            quantity = add_notional / price
+            step_size, precision = self.get_symbol_precision(symbol)
+            quantity = round(quantity, precision)
+            if quantity <= 0 or quantity * price < 10:
+                print(f"   SCALE-IN SKIPPED {symbol} - add size too small")
+                return None
+
+            order = self.client.create_order(
+                symbol=symbol,
+                side=SIDE_BUY,
+                type=ORDER_TYPE_MARKET,
+                quantity=quantity
+            )
+
+            fill_price = float(order['fills'][0]['price'])
+            entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
+
+            old_quantity = position['quantity']
+            new_quantity = old_quantity + quantity
+            weighted_entry = ((position['entry_price'] * old_quantity) + (fill_price * quantity)) / max(new_quantity, 1e-9)
+
+            support = signal.get('support_override', signal.get('support', weighted_entry * 0.985))
+            structure_sl = support * 0.995
+            stop_loss = max(dynamic_sl, structure_sl, weighted_entry * 0.97)
+            tp1_price = None if tp1_price is None else weighted_entry * (tp1_price / price)
+            take_profit = weighted_entry * (tp2_price / price)
+            actual_risk = weighted_entry - stop_loss
+            rr_target = round((take_profit - weighted_entry) / max(actual_risk, 1e-9), 2)
+
+            position['quantity'] = new_quantity
+            position['original_quantity'] = new_quantity
+            position['entry_price'] = weighted_entry
+            position['stop_loss'] = stop_loss
+            position['tp1_price'] = tp1_price
+            position['take_profit'] = take_profit
+            position['risk_percent'] = profile['balance_fraction']
+            position['rr_target'] = rr_target
+            position['entry_type'] = profile['entry_type']
+            position['fallback_trade'] = signal.get('fallback_trade', False)
+            position['strong_trend'] = signal.get('strong_trend', False)
+            position['atr_value'] = signal.get('atr_value', 0.0)
+            position['entry_reason'] = signal.get('reason', position.get('entry_reason', ''))
+            position['market_condition'] = signal.get('market_type', '').lower()
+            position['entry_fee'] = position.get('entry_fee', 0.0) + entry_fee
+            position['entry_slippage'] = fill_price - price
+            position['highest_price'] = max(position.get('highest_price', fill_price), fill_price)
+            position['stale_exit_at'] = datetime.now() + timedelta(minutes=self.primary_candle_minutes * self.time_exit_candles)
+            position['timestamp'] = datetime.now()
+            position['signal'] = signal
+            position['scaled_in'] = True
+            position['scale_in_count'] = position.get('scale_in_count', 0) + 1
+            position['scale_in_reason'] = signal.get('reason')
+            self.last_trade_time = datetime.now()
+            self.daily_trades += 1
+
+            tp1_line = f"TP1: ${tp1_price:.4f}\n" if tp1_price is not None else ""
+            msg = (
+                f"SCOUT SCALE-IN\n"
+                f"Pair: {symbol}\n"
+                f"Upgrade: {profile['entry_type']}\n"
+                f"Added qty: {quantity:.8f}\n"
+                f"New avg entry: ${weighted_entry:.4f}\n"
+                f"SL: ${stop_loss:.4f}\n"
+                f"{tp1_line}"
+                f"TP2: ${take_profit:.4f}\n"
+                f"R:R target: {rr_target}"
+            )
+            print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
+            self.send_telegram(msg)
+            return position
+
+        except Exception as e:
+            print(f"   Scale-in failed: {e}")
+            return None
+        finally:
+            self.trade_lock = False
+
     # ════════════════════════════════════════════════════════════════════
     # EXECUTE BUY
     # ════════════════════════════════════════════════════════════════════
@@ -1727,6 +1845,9 @@ Reason: {reason}
                 'trailing_stop_active': False,
                 'highest_price': fill_price,
                 'trailing_stop_price': None,
+                'scaled_in': False,
+                'scale_in_count': 0,
+                'scale_in_reason': None,
                 'stale_exit_at': entry_time + timedelta(minutes=self.primary_candle_minutes * self.time_exit_candles),
                 'timestamp': datetime.now(),
                 'signal': signal
@@ -1877,6 +1998,11 @@ Reason: {reason}
                     print(f"\n   EARLY EXIT {symbol} @ ${current_price:.4f} (weak momentum + loss)")
                     self.execute_sell(position, 'SOFT_EXIT_NO_MOMENTUM')
                     continue
+
+            scale_signal = self.analyze(symbol)
+            if self.should_scale_scout_position(position, scale_signal):
+                self.execute_scale_in(position, scale_signal)
+                continue
 
             # 1. STOP LOSS (first - always)
             if current_price <= position['stop_loss']:
