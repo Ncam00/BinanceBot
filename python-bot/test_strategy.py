@@ -102,6 +102,8 @@ def test_scout_scale_merge_math():
         'entry_time': None,
         'entry_fee': 0.0,
         'entry_slippage': 0.0,
+        'allocated_notional': 30.0,
+        'target_position_notional': 100.0,
         'realized_pnl': 0.0,
         'partial_taken': False,
         'runner_active': False,
@@ -131,8 +133,9 @@ def test_scout_scale_merge_math():
     before_quantity = scout_position['quantity']
     result = trader.execute_scale_in(scout_position, signal)
 
-    expected_add_qty = round((100.0 - (before_quantity * 105.0)) / 105.0, 3)
+    expected_add_qty = round((100.0 - 30.0) / 105.0, 3)
     expected_total_qty = before_quantity + expected_add_qty
+    expected_allocated_notional = 30.0 + (expected_add_qty * 105.0)
     expected_avg_entry = ((100.0 * before_quantity) + (105.0 * expected_add_qty)) / expected_total_qty
     expected_stop = max(expected_avg_entry - (2.0 * 1.5), 102.0 * 0.995, expected_avg_entry * 0.97)
     expected_tp1 = expected_avg_entry * 1.025
@@ -148,6 +151,8 @@ def test_scout_scale_merge_math():
     assert result is scout_position
     assert abs(result['quantity'] - expected_total_qty) < 1e-9
     assert abs(result['original_quantity'] - expected_total_qty) < 1e-9
+    assert abs(result['allocated_notional'] - expected_allocated_notional) < 1e-9
+    assert abs(result['target_position_notional'] - 100.0) < 1e-9
     assert abs(result['entry_price'] - expected_avg_entry) < 1e-9
     assert result['entry_type'] == 'a_plus'
     assert result['scaled_in'] is True
@@ -158,8 +163,24 @@ def test_scout_scale_merge_math():
     assert abs(result['take_profit'] - expected_tp2) < 1e-9
 
 
+def test_position_scaling():
+    scout_price = 100.0
+    scout_notional = 30.0
+    scale_price = 105.0
+    scale_notional = 70.0
+
+    scout_quantity = scout_notional / scout_price
+    scale_quantity = scale_notional / scale_price
+    total_quantity = scout_quantity + scale_quantity
+    avg_entry = ((scout_price * scout_quantity) + (scale_price * scale_quantity)) / total_quantity
+
+    assert abs((scout_quantity * scout_price) + (scale_quantity * scale_price) - 100.0) < 1e-9
+    assert 100.0 < avg_entry < 105.0
+
+
 if __name__ == '__main__':
     test_scout_scale_merge_math()
+    test_position_scaling()
 
     trader = SmartTrader()
     symbols = ['ETHUSDT', 'BTCUSDT']

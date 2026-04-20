@@ -86,8 +86,11 @@ class SmartTrader:
         self.bb_squeeze_threshold = 0.05
         self.atr_stop_multiplier = 1.5
         self.atr_target_multiplier = 2.0
-        self.time_exit_candles = 4
+        self.time_exit_candles = 3
         self.primary_candle_minutes = 15
+        self.trend_scout_fraction = 0.30
+        self.trend_scale_in_fraction = 0.70
+        self.trend_scout_target_fraction = 0.10
 
         # ════════════════════════════════════════════════════════════════════
         # LOCATION-BASED SETTINGS
@@ -367,10 +370,10 @@ class SmartTrader:
             'volume_ratio': volume_ratio,
         }
 
-    def is_early_breakout(self, price, upper_band, volume, average_volume):
-        if upper_band <= 0 or average_volume <= 0:
+    def is_early_breakout(self, price, resistance, volume_ratio, rising_volume):
+        if resistance <= 0:
             return False
-        return price > upper_band * 0.998 and volume > average_volume * 1.1
+        return price > resistance * 0.998 and rising_volume and volume_ratio > 1.1
 
     # ════════════════════════════════════════════════════════════════════
     # SUPPORT / RESISTANCE
@@ -875,10 +878,12 @@ class SmartTrader:
         if entry_tier == 'SCOUT' or signal.get('scout_trade'):
             return {
                 'entry_type': 'scout',
-                'balance_fraction': 0.03 if signal.get('trend_scout') else (0.005 if market_type == 'CHOPPY' else 0.05),
+                'balance_fraction': self.trend_scout_target_fraction * self.trend_scout_fraction if signal.get('trend_scout') else (0.005 if market_type == 'CHOPPY' else 0.05),
                 'tp_mode': 'quick_percent',
                 'tp_percent': 0.75 if signal.get('trend_scout') else (0.5 if market_type == 'CHOPPY' else 1.0),
                 'sl_atr_multiplier': 1.0,
+                'scale_target_fraction': self.trend_scout_target_fraction if signal.get('trend_scout') else None,
+                'scale_entry_fraction': self.trend_scout_fraction if signal.get('trend_scout') else None,
             }
 
         if market_type == 'TRENDING' and entry_tier == 'A+':
@@ -1206,7 +1211,7 @@ Reason: {reason}
             return False
         return True
 
-    def check_multi_timeframe(self, symbol):
+    def get_multi_timeframe_count(self, symbol):
         bullish_count = 0
         for tf in ['1m', '5m', '15m']:
             df = self.get_candles(symbol, tf, 50)
@@ -1217,6 +1222,10 @@ Reason: {reason}
             ema18 = closes.ewm(span=18).mean().iloc[-1]
             if closes.iloc[-1] > ema7 and ema7 > ema18:
                 bullish_count += 1
+        return bullish_count
+
+    def check_multi_timeframe(self, symbol):
+        bullish_count = self.get_multi_timeframe_count(symbol)
         if bullish_count < 2:
             print(f"   MTF: Only {bullish_count}/3 timeframes bullish - blocking")
             return False
@@ -1331,9 +1340,9 @@ Reason: {reason}
         bollinger_standard_breakout = bollinger_breakout['breakout']
         early_breakout = market_type == 'TRENDING' and self.is_early_breakout(
             price,
-            bb['upper'],
-            analysis_df['volume'].iloc[-1],
-            avg_volume,
+            resistance,
+            volume_ratio,
+            context.get('rising_volume', False),
         )
         if bollinger_standard_breakout:
             trade_score = min(trade_score + 1, 5)
@@ -1407,11 +1416,11 @@ Reason: {reason}
                 entry_strength = 0.60
         elif market_type == 'TRENDING' and early_breakout and quality_tier == 'A+':
             entry_type = 'A+'
-            entry_reason = 'EARLY BREAKOUT A+: price pressing upper band with 1.1x+ volume'
+            entry_reason = 'EARLY BREAKOUT A+: price is within 0.2% of resistance with rising volume'
             entry_strength = 0.84
         elif market_type == 'TRENDING' and early_breakout and quality_tier == 'B+':
             entry_type = 'B+'
-            entry_reason = 'EARLY BREAKOUT B+: price pressing upper band with adaptive volume'
+            entry_reason = 'EARLY BREAKOUT B+: price is within 0.2% of resistance with rising volume'
             entry_strength = 0.76
         elif quality_tier == 'A+' and bollinger_strong_breakout:
             entry_type = 'A+'
@@ -1537,6 +1546,8 @@ Reason: {reason}
 
         # ── Extra filters + ADDED: final validation gate ──────────────
         if signal['action'] == 'BUY':
+            mtf_bullish_count = self.get_multi_timeframe_count(symbol)
+            allow_breakout_override = signal.get('breakout') and volume_ratio >= 1.2
             if not self.btc_is_healthy():
                 signal = {
                     'action': 'HOLD',
@@ -1544,13 +1555,15 @@ Reason: {reason}
                     'reason': 'BTC dumping - entry blocked',
                     'score': trade_score,
                 }
-            elif not self.check_multi_timeframe(symbol):
+            elif mtf_bullish_count < 2 and not allow_breakout_override:
                 signal = {
                     'action': 'HOLD',
                     'strength': 0,
                     'reason': 'Timeframes not aligned - entry blocked',
                     'score': trade_score,
                 }
+            elif mtf_bullish_count < 2 and allow_breakout_override:
+                print(f"   MTF OVERRIDE: breakout volume spike allows entry with {mtf_bullish_count}/3 bullish")
 
             # ADDED: Final setup validation (last gate before trade fires)
             if signal['action'] == 'BUY':
@@ -1596,6 +1609,7 @@ Reason: {reason}
         signal['bb_width'] = bb['width']
         signal['bb_middle'] = bb['middle']
         signal['volume_ratio'] = volume_ratio
+        signal['volume_spike'] = volume_ratio >= 1.2
         signal['strong_trend'] = market_mode == 'TRENDING' and market_type == 'TRENDING' and adx['adx'] >= self.adx_trend_threshold and ema_fast > ema_slow
         signal['early_breakout'] = early_breakout
         signal['ema20'] = ema20
@@ -1665,6 +1679,8 @@ Reason: {reason}
             return False
         if signal.get('entry_tier') not in ('A+', 'B+'):
             return False
+        if signal.get('price', 0) <= position.get('entry_price', 0):
+            return False
         return signal.get('breakout') or signal.get('early_breakout')
 
     def execute_scale_in(self, position, signal):
@@ -1675,14 +1691,15 @@ Reason: {reason}
         self.trade_lock = True
         try:
             symbol = position['symbol']
-            balance = self.get_balance()
             price = signal['price']
             score = signal.get('score', 3)
 
             tp1_price, tp2_price, dynamic_sl, profile = self.dynamic_tp_sl(price, score, signal)
-            target_notional = self.get_score_position_size(balance, score, signal)
-            current_notional = position['quantity'] * price
-            add_notional = target_notional - current_notional
+            target_notional = position.get('target_position_notional')
+            if target_notional is None:
+                target_notional = self.get_score_position_size(self.get_balance(), score, signal)
+            allocated_notional = position.get('allocated_notional', position['quantity'] * position['entry_price'])
+            add_notional = target_notional - allocated_notional
             if add_notional < 10:
                 print(f"   SCALE-IN SKIPPED {symbol} - scout already near target size")
                 return None
@@ -1727,6 +1744,8 @@ Reason: {reason}
 
             position['quantity'] = new_quantity
             position['original_quantity'] = new_quantity
+            position['allocated_notional'] = allocated_notional + (quantity * fill_price)
+            position['target_position_notional'] = target_notional
             position['entry_price'] = weighted_entry
             position['stop_loss'] = stop_loss
             position['tp1_price'] = tp1_price
@@ -1802,6 +1821,11 @@ Reason: {reason}
                 print(f"   Score {score}/5 too low for position - skipping")
                 return None
 
+            target_position_notional = balance * profile.get('scale_target_fraction', profile['balance_fraction'])
+            if signal.get('session_mode') == 'LOW_RISK':
+                target_position_notional = min(target_position_notional, balance * 0.10)
+            target_position_notional = min(target_position_notional, balance * self.max_position_cap)
+
             # Convert target notional to quantity
             quantity = position_notional / price
             if quantity * price < 10:
@@ -1847,6 +1871,8 @@ Reason: {reason}
                 'entry_time': entry_time,
                 'entry_fee': entry_fee,
                 'entry_slippage': fill_price - price,
+                'allocated_notional': quantity * fill_price,
+                'target_position_notional': signal.get('target_position_notional', target_position_notional),
                 'realized_pnl': 0.0,
                 'partial_taken': False,
                 'runner_active': False,
@@ -2019,8 +2045,8 @@ Reason: {reason}
                 self.execute_sell(position, 'STOP_LOSS')
                 continue
 
-            if not position.get('partial_taken') and pnl_percent <= 0 and datetime.now() >= position.get('stale_exit_at', datetime.max):
-                print(f"\n   TIME EXIT {symbol} @ ${current_price:.4f} (4 candles without profit)")
+            if not position.get('partial_taken') and pnl_percent < 0 and datetime.now() >= position.get('stale_exit_at', datetime.max):
+                print(f"\n   TIME EXIT {symbol} @ ${current_price:.4f} (3 candles and still losing)")
                 self.execute_sell(position, 'TIME_EXIT')
                 continue
 
