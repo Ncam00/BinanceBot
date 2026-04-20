@@ -1622,7 +1622,11 @@ Reason: {reason}
 
             fill_price = float(order['fills'][0]['price'])
             exit_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
-            pnl = (fill_price - position['entry_price']) * sell_quantity
+            gross_pnl = (fill_price - position['entry_price']) * sell_quantity
+            # Prorate entry fee by fraction of position being sold
+            entry_fee_share = position.get('entry_fee', 0) * (sell_quantity / max(position['original_quantity'], 1e-9))
+            total_fees = exit_fee + entry_fee_share
+            pnl = gross_pnl - total_fees   # net PnL after fees
             pnl_percent = ((fill_price / position['entry_price']) - 1) * 100
             position['realized_pnl'] = position.get('realized_pnl', 0.0) + pnl
 
@@ -1659,6 +1663,8 @@ Reason: {reason}
                 'position_size': sell_quantity,
                 'stop_loss': position['stop_loss'],
                 'take_profit': position['take_profit'],
+                'gross_pnl': round(gross_pnl, 4),
+                'fees': round(total_fees, 4),
                 'profit': round(pnl, 4),
                 'win': pnl > 0,
                 'entry_time': position.get('entry_time').isoformat() if position.get('entry_time') else None,
