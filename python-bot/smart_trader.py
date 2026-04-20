@@ -96,7 +96,7 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None):
         sig = self.get(pair)
 
         # ADX filter — skip choppy markets
@@ -159,6 +159,13 @@ class EntryEngine:
             entry_type = None
         # SCOUT = allow regardless
 
+        if entry_type in ('A+', 'B+') and ema20 is not None:
+            trend_up = ema20 > ma
+            ema_entry_ok = price <= ema20 * 1.002
+            if not (trend_up and ema_entry_ok):
+                print(f"Skipping {pair}: EMA entry missed (price={price:.2f} ema20={ema20:.2f} trend_up={trend_up})")
+                entry_type = None
+
         if market_mode == 'CHOPPY' and entry_type == 'B+':
             entry_type = None
 
@@ -168,11 +175,11 @@ class EntryEngine:
 
         if entry_type == 'A+':
             return {'action': 'CANDIDATE', 'pair': pair, 'level': sig['level'],
-                    'confidence': confidence, 'price': price}
+                    'confidence': confidence, 'price': price, 'trade_type': 'A+'}
 
         if entry_type == 'B+':
             return {'action': 'CANDIDATE_SMALL', 'pair': pair, 'level': sig['level'],
-                    'confidence': confidence, 'price': price}
+                    'confidence': confidence, 'price': price, 'trade_type': 'B+'}
 
         if entry_type is None and sig['active']:
             reason = (
@@ -208,6 +215,7 @@ class EntryEngine:
                 adx_threshold=22,
                 atr_avg=data.get('atr_avg'),
                 bullish_timeframes=data.get('bullish_timeframes', 0),
+                ema20=data.get('ema20'),
             )
             atr = data.get('atr', 0)
             atr_avg = data.get('atr_avg', 0)
@@ -231,14 +239,14 @@ class EntryEngine:
             self.get(top_pair['pair'])['active'] = False
             small = top_pair['action'] == 'CANDIDATE_SMALL'
             top_atr = market_data.get(top_pair['pair'], {}).get('atr')
-            self.execute_trade(top_pair['pair'], top_pair['price'], small_position=small, atr=top_atr)
+            self.execute_trade(top_pair['pair'], top_pair['price'], small_position=small, atr=top_atr, trade_type=top_pair.get('trade_type', 'A+'))
             signals.append({**top_pair, 'action': 'BUY'})
 
         return signals
 
-    def execute_trade(self, pair, price, small_position=False, atr=None):
+    def execute_trade(self, pair, price, small_position=False, atr=None, trade_type='A+'):
         if not self.execute_fn:
-            print(f"EXECUTING TRADE: {pair} at {price} {'(small)' if small_position else ''}")
+            print(f"EXECUTING TRADE: {pair} at {price} ({trade_type}{'  small' if small_position else ''})")
             return
         signal = {
             'action': 'BUY',
@@ -248,6 +256,7 @@ class EntryEngine:
             'support_override': self.signals[pair]['level'],
             'small_position': small_position,
             'atr': atr,
+            'trade_type': trade_type,
         }
         self.execute_fn(pair, signal)
 
@@ -636,6 +645,7 @@ class SmartTrader:
                 'resistance': sr['resistance'],
                 'support':    sr['support'],
                 'ma50':       self.get_ma(closes, 50),
+                'ema20':      self.calculate_ema(df['close'], 20),
                 'adx':        adx['adx'],
                 'atr':        adx['atr'],
                 'atr_avg':             atr_series.rolling(14).mean().iloc[-1],
@@ -1142,16 +1152,20 @@ class SmartTrader:
             session, _ = self.get_market_session()
             base_risk = 0.01 if session == 'asia' else 0.015
             base_risk = self.adjust_risk(base_risk)
+            trade_type = signal.get('trade_type', 'A+')
             small_position = signal.get('small_position', False)
-            if small_position:
-                risk_percent = base_risk * 0.3
+            if trade_type == 'A+':
+                quantity = (balance * 0.15) / price
+            elif trade_type == 'B+':
+                quantity = (balance * 0.07) / price
+            elif small_position:
+                quantity = (balance * 0.05) / price
             else:
                 risk_percent = base_risk if strong_setup else base_risk * 0.5
-            print(f"   📐 {'SMALL' if small_position else 'STRONG' if strong_setup else 'DECENT'} setup "
-                  f"(strength={signal.get('strength', 0):.2f}) → risk {risk_percent*100:.2f}%")
+                quantity = self.calculate_position_size(balance, price, stop_loss_price, risk_percent)
+            print(f"   📐 {trade_type} setup → size {'15%' if trade_type == 'A+' else '7%' if trade_type == 'B+' else '5%'} of balance")
 
-            quantity = self.calculate_position_size(balance, price, stop_loss_price, risk_percent)
-            if quantity == 0:
+            if quantity == 0 or quantity * price < 10:
                 print(f"   ⚠️ Position size too small - skipping")
                 return None
 
@@ -1176,6 +1190,7 @@ class SmartTrader:
                     fill_price,
                     score=signal.get('confidence'),
                     strong_trend=strong_setup,
+                    trade_type=trade_type,
                 )
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
@@ -1355,7 +1370,14 @@ class SmartTrader:
                 self.execute_sell(position, 'STOP_LOSS')
                 continue
 
-            # 2. BREAK-EVEN SHIELD: move SL to entry at 1% profit
+            # 2. KILL BAD TRADES: exit if still losing after 3 candles (45 min)
+            candles_open = int((datetime.now() - position['entry_time']).total_seconds() / (15 * 60))
+            if candles_open > 3 and pnl_percent < 0:
+                print(f"\n   ⚡ KILL BAD TRADE {symbol}: {candles_open} candles open, PNL {pnl_percent:.2f}%")
+                self.execute_sell(position, 'TIMEOUT_LOSS')
+                continue
+
+            # 3. BREAK-EVEN SHIELD: move SL to entry at 1% profit
             if pnl_percent >= self.break_even_trigger and not position.get('be_active'):
                 position['stop_loss'] = position['entry_price']
                 position['be_active'] = True
@@ -1552,10 +1574,15 @@ class SmartTrader:
             return {'tp': 2.5, 'sl': 1.2}
         return {'tp': 2.0, 'sl': 1.0}
 
-    def set_tp_sl(self, entry_price, score=None, strong_trend=False):
+    def set_tp_sl(self, entry_price, score=None, strong_trend=False, trade_type=None):
         params = self.adapt_strategy()
-        # Score-based TP: reward better setups with more room to run
-        if score is not None:
+        # Trade type overrides first (A+ / B+)
+        if trade_type == 'A+':
+            params['tp'] = 3.0   # midpoint of 2-4%
+        elif trade_type == 'B+':
+            params['tp'] = 1.25  # midpoint of 1-1.5%
+        # Score-based fallback
+        elif score is not None:
             if score >= 5:
                 params['tp'] = 3.0
             elif score >= 4:
