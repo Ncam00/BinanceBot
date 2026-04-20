@@ -75,8 +75,8 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # EXIT MANAGEMENT
         # ════════════════════════════════════════════════════════════════════
-        self.break_even_trigger = 0.5
-        self.micro_profit_lock_trigger = 0.8
+        self.break_even_trigger = 1.0
+        self.micro_profit_lock_trigger = 2.0
         self.trailing_stop_activation = 1.2
         self.trailing_stop_distance = 0.5
         self.partial_tp_percent = 0.50
@@ -359,13 +359,18 @@ class SmartTrader:
         squeeze = bb['width'] < self.bb_squeeze_threshold
         breakout = last_close > bb['upper'] and prev_close <= bb['prev_upper']
         volume_ratio = (last_volume / average_volume) if average_volume and not np.isnan(average_volume) else 0
-        normal_volume = volume_ratio > 1.0
+        normal_volume = volume_ratio > 1.1
         strong_volume = volume_ratio > 1.2
         return {
             'breakout': breakout and squeeze and normal_volume,
             'strong_breakout': breakout and squeeze and strong_volume,
             'volume_ratio': volume_ratio,
         }
+
+    def is_early_breakout(self, price, upper_band, volume, average_volume):
+        if upper_band <= 0 or average_volume <= 0:
+            return False
+        return price > upper_band * 0.998 and volume > average_volume * 1.1
 
     # ════════════════════════════════════════════════════════════════════
     # SUPPORT / RESISTANCE
@@ -870,9 +875,9 @@ class SmartTrader:
         if entry_tier == 'SCOUT' or signal.get('scout_trade'):
             return {
                 'entry_type': 'scout',
-                'balance_fraction': 0.005 if market_type == 'CHOPPY' else 0.05,
+                'balance_fraction': 0.03 if signal.get('trend_scout') else (0.005 if market_type == 'CHOPPY' else 0.05),
                 'tp_mode': 'quick_percent',
-                'tp_percent': 0.5 if market_type == 'CHOPPY' else 1.0,
+                'tp_percent': 0.75 if signal.get('trend_scout') else (0.5 if market_type == 'CHOPPY' else 1.0),
                 'sl_atr_multiplier': 1.0,
             }
 
@@ -880,8 +885,9 @@ class SmartTrader:
             return {
                 'entry_type': 'a_plus',
                 'balance_fraction': 0.15,
-                'tp_mode': 'atr_runner',
-                'tp_atr_multiplier': 3.0,
+                'tp_mode': 'runner_percent',
+                'tp1_percent': 2.5,
+                'tp2_percent': 4.0,
                 'sl_atr_multiplier': 1.5,
             }
 
@@ -936,9 +942,9 @@ class SmartTrader:
             if tp_mode == 'middle_band' and signal.get('bb_middle'):
                 tp1 = None
                 tp2 = signal['bb_middle']
-            elif tp_mode == 'atr_runner':
-                tp1 = entry_price + (atr_value * sl_atr_multiplier)
-                tp2 = entry_price + (atr_value * profile.get('tp_atr_multiplier', self.atr_target_multiplier))
+            elif tp_mode == 'runner_percent':
+                tp1 = entry_price * (1 + profile.get('tp1_percent', 2.5) / 100)
+                tp2 = entry_price * (1 + profile.get('tp2_percent', 4.0) / 100)
             elif tp_mode == 'quick_percent':
                 tp1 = None
                 tp2 = entry_price * (1 + profile.get('tp_percent', 1.0) / 100)
@@ -1323,6 +1329,12 @@ Reason: {reason}
         strong_breakout = self.is_strong_breakout(trade_data, context)
         bollinger_strong_breakout = bollinger_breakout['strong_breakout']
         bollinger_standard_breakout = bollinger_breakout['breakout']
+        early_breakout = market_type == 'TRENDING' and self.is_early_breakout(
+            price,
+            bb['upper'],
+            analysis_df['volume'].iloc[-1],
+            avg_volume,
+        )
         if bollinger_standard_breakout:
             trade_score = min(trade_score + 1, 5)
         if bollinger_strong_breakout:
@@ -1373,7 +1385,7 @@ Reason: {reason}
         near_resistance = self.is_near_level(price, resistance)
 
         zone = self.get_trade_zone(price, support, resistance)
-        breakout = context['breakout'] or strong_breakout or bollinger_standard_breakout
+        breakout = context['breakout'] or strong_breakout or bollinger_standard_breakout or early_breakout
         context['breakout'] = breakout
         score = trade_score
         scout = context['scout']
@@ -1393,6 +1405,14 @@ Reason: {reason}
                 entry_type = 'RANGING'
                 entry_reason = f"RANGING SCALP B+: {ranging_signal['reason']}"
                 entry_strength = 0.60
+        elif market_type == 'TRENDING' and early_breakout and quality_tier == 'A+':
+            entry_type = 'A+'
+            entry_reason = 'EARLY BREAKOUT A+: price pressing upper band with 1.1x+ volume'
+            entry_strength = 0.84
+        elif market_type == 'TRENDING' and early_breakout and quality_tier == 'B+':
+            entry_type = 'B+'
+            entry_reason = 'EARLY BREAKOUT B+: price pressing upper band with adaptive volume'
+            entry_strength = 0.76
         elif quality_tier == 'A+' and bollinger_strong_breakout:
             entry_type = 'A+'
             entry_reason = (
@@ -1421,6 +1441,10 @@ Reason: {reason}
                 f'TREND CONTINUATION B+: controlled EMA pullback with {continuation_trigger}'
             )
             entry_strength = 0.78
+        elif market_type == 'TRENDING' and scout and context.get('higher_lows'):
+            entry_type = 'SCOUT'
+            entry_reason = 'TREND SCOUT: compression + higher lows before breakout'
+            entry_strength = 0.62
         elif market_type == 'CHOPPY' and scout:
             entry_type = 'SCOUT'
             entry_reason = 'SCOUT ENTRY: compression + higher lows + rising volume in choppy market'
@@ -1473,6 +1497,8 @@ Reason: {reason}
                 'entry_tier': 'SCOUT',
                 'scout_trade': True,
             })
+            if market_type == 'TRENDING':
+                signal['trend_scout'] = True
         elif entry_type == 'RANGING':
             signal.update({
                 'entry_type': 'RANGING',
@@ -1571,6 +1597,7 @@ Reason: {reason}
         signal['bb_middle'] = bb['middle']
         signal['volume_ratio'] = volume_ratio
         signal['strong_trend'] = market_mode == 'TRENDING' and market_type == 'TRENDING' and adx['adx'] >= self.adx_trend_threshold and ema_fast > ema_slow
+        signal['early_breakout'] = early_breakout
         signal['ema20'] = ema20
         signal['ema50'] = ema50
         signal['trend_up'] = context.get('trend_up', False)
@@ -1871,7 +1898,11 @@ Reason: {reason}
                     f"Break-Even Active\n{symbol}\nSL moved to entry\nProfit: +{pnl_percent:.2f}%"
                 )
 
-            if pnl_percent >= self.micro_profit_lock_trigger and not position.get('partial_taken'):
+            if (
+                pnl_percent >= self.micro_profit_lock_trigger and
+                not position.get('partial_taken') and
+                position.get('entry_type') == 'a_plus'
+            ):
                 partial_qty = position['original_quantity'] * self.partial_tp_percent
                 result = self.execute_sell(position, 'MICRO_PROFIT_LOCK', quantity=partial_qty)
                 if result:
