@@ -48,8 +48,8 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # CORE RISK SETTINGS
         # ════════════════════════════════════════════════════════════════════
-        self.stop_loss_percent = 1.0
-        self.take_profit_percent = 2.0
+        self.stop_loss_percent = 1.5
+        self.take_profit_percent = 2.5
         self.position_size_percent = 15
         self.max_position_cap = 0.25
 
@@ -82,6 +82,7 @@ class SmartTrader:
         self.partial_tp_percent = 0.50
         self.soft_exit_loss_trigger = 0.4
         self.no_momentum_price_change_threshold = 0.25
+        self.min_expected_move_percent = 0.7
         self.bb_squeeze_threshold = 0.05
 
         # ════════════════════════════════════════════════════════════════════
@@ -721,20 +722,21 @@ class SmartTrader:
         return score
 
     def get_position_size(self, balance, score, entry_type):
+        base_size = 0.15
         if entry_type == 'MICRO_B+':
             return balance * 0.03
         if entry_type == 'A+':
-            return balance * 0.15
+            return balance * base_size          # full size (15%)
         if entry_type == 'B+':
-            return balance * 0.08
+            return balance * (base_size * 0.6)  # reduced size (~9%)
         if entry_type == 'SCOUT':
-            return balance * 0.05
+            return balance * (base_size * 0.4)  # scout (~6%)
 
         if score >= 4:
-            return balance * 0.15
+            return balance * base_size
         if score == 3:
-            return balance * 0.08
-        return balance * 0.05
+            return balance * (base_size * 0.6)
+        return balance * (base_size * 0.4)
 
     def get_entry_profile(self, signal, score):
         """Choose early / confirmed / continuation profile from score and signal context."""
@@ -826,16 +828,26 @@ class SmartTrader:
         if score <= 2:
             return 0
 
+        volume_ratio = signal.get('volume_ratio', 1.0)
         session_mode = signal.get('session_mode', 'NORMAL')
-        if session_mode == 'LOW_RISK':
-            position_notional = balance * 0.05
+        if volume_ratio > 1.2:
+            position_notional = balance * 0.20
         else:
             position_notional = balance * 0.10
+        if session_mode == 'LOW_RISK':
+            position_notional = min(position_notional, balance * 0.10)
         if self.last_trade_win:
             position_notional *= 1.1
 
         max_notional = balance * self.max_position_cap
         return min(position_notional, max_notional)
+
+    def get_expected_move_percent(self, entry_price, resistance, atr_value, breakout):
+        if entry_price <= 0:
+            return 0
+        if breakout:
+            return max((atr_value / entry_price) * 100, 0)
+        return max(((resistance - entry_price) / entry_price) * 100, 0)
 
     def dynamic_tp_sl(self, entry_price, score, signal):
         """Return TP1, TP2 and SL using the entry profile model."""
@@ -1070,6 +1082,22 @@ Reason: {reason}
         recent_change = abs((df['close'].iloc[-1] - reference_close) / reference_close) * 100
         return volume_is_weak and recent_change < self.no_momentum_price_change_threshold
 
+    def should_exit_early(self, position, current_price):
+        """Return True if trade is losing and volume momentum is weak."""
+        df = self.get_candles(position['symbol'], '15m', 25)
+        if df is None or len(df) < 20:
+            return False
+        entry = position['entry_price']
+        profit = (current_price - entry) / entry
+        last = df.iloc[-1]
+        avg_volume = df['volume'].rolling(20).mean().iloc[-1]
+        if np.isnan(avg_volume) or avg_volume <= 0:
+            return False
+        weak_momentum = last['volume'] < avg_volume
+        if profit < -0.004 and weak_momentum:
+            return True
+        return False
+
     def check_volume(self, df):
         ratio = self.get_volume_ratio(df)
         if ratio < 0.8:
@@ -1124,28 +1152,30 @@ Reason: {reason}
                     'reason': f'Daily target ${self.daily_profit_target} hit - no new trades'}
 
         df = self.get_candles(symbol, '15m', 100)
-        if df is None or len(df) < 50:
+        if df is None or len(df) < 51:
             return {'action': 'HOLD', 'strength': 0, 'reason': 'Insufficient data'}
 
-        closes = df['close']
+        analysis_df = df.iloc[:-1].copy()
+        entry_price = df['open'].iloc[-1]
+        closes = analysis_df['close']
         price = closes.iloc[-1]
 
         rsi = self.calculate_rsi(closes)
         macd = self.calculate_macd(closes)
         ema_fast = self.calculate_ema(closes, 7)
         ema_slow = self.calculate_ema(closes, 18)
-        atr_current = self.calculate_atr(df, period=14)
+        atr_current = self.calculate_atr(analysis_df, period=14)
         tr = pd.concat([
-            df['high'] - df['low'],
-            (df['high'] - df['close'].shift()).abs(),
-            (df['low'] - df['close'].shift()).abs()
+            analysis_df['high'] - analysis_df['low'],
+            (analysis_df['high'] - analysis_df['close'].shift()).abs(),
+            (analysis_df['low'] - analysis_df['close'].shift()).abs()
         ], axis=1).max(axis=1)
         atr_avg = tr.rolling(window=14).mean().iloc[-20:-1].mean()
-        adx = self.calculate_adx(df)
+        adx = self.calculate_adx(analysis_df)
         bb = self.calculate_bollinger(closes)
-        bollinger_breakout = self.bollinger_breakout_signal(df, bb)
-        volume_ratio = self.get_volume_ratio(df)
-        avg_volume = df['volume'].ewm(span=20, adjust=False).mean().iloc[-2] if len(df) > 1 else df['volume'].mean()
+        bollinger_breakout = self.bollinger_breakout_signal(analysis_df, bb)
+        volume_ratio = self.get_volume_ratio(analysis_df)
+        avg_volume = analysis_df['volume'].ewm(span=20, adjust=False).mean().iloc[-2] if len(analysis_df) > 1 else analysis_df['volume'].mean()
 
         mode_snapshot = {
             'atr': atr_current,
@@ -1159,18 +1189,18 @@ Reason: {reason}
         else:
             session_mode = 'NORMAL'
 
-        sr = self.calculate_support_resistance(df)
+        sr = self.calculate_support_resistance(analysis_df)
         support = sr['support']
         resistance = sr['resistance']
-        recent_resistance, recent_support = self.calculate_levels(df)
+        recent_resistance, recent_support = self.calculate_levels(analysis_df)
         context_data = {
-            'df': df,
+            'df': analysis_df,
             'price': price,
             'resistance': resistance,
             'support': support,
             'ema_fast': ema_fast,
             'ema_slow': ema_slow,
-            'volume': df['volume'].iloc[-1],
+            'volume': analysis_df['volume'].iloc[-1],
             'avg_volume': avg_volume,
             'atr': atr_current,
             'rsi': rsi,
@@ -1179,9 +1209,9 @@ Reason: {reason}
         }
         context = self.build_context(context_data)
         trade_data = {
-            'open': df['open'].iloc[-1],
+            'open': analysis_df['open'].iloc[-1],
             'close': price,
-            'volume': df['volume'].iloc[-1],
+            'volume': analysis_df['volume'].iloc[-1],
             'avg_volume': avg_volume,
             'atr': atr_current,
             'rsi': rsi,
@@ -1343,7 +1373,7 @@ Reason: {reason}
 
         # ── Confirmation candle ───────────────────────────────────────
         if signal['action'] == 'BUY' and signal.get('entry_type') not in ('BREAKOUT', 'SCOUT'):
-            if not self.has_confirmation_candle(df, 'bullish'):
+            if not self.has_confirmation_candle(analysis_df, 'bullish'):
                 signal = {
                     'action': 'HOLD',
                     'strength': 0,
@@ -1400,7 +1430,7 @@ Reason: {reason}
             self.reset_breakout_state(symbol)
 
         signal['market_type'] = market_type
-        signal['price'] = price
+        signal['price'] = entry_price
         signal['support'] = support
         signal['resistance'] = resistance
         signal['rsi'] = rsi
@@ -1410,13 +1440,25 @@ Reason: {reason}
         signal['session_mode'] = session_mode
         signal['atr_value'] = atr_current
         signal['bb_width'] = bb['width']
+        signal['volume_ratio'] = volume_ratio
         signal['strong_trend'] = market_mode == 'TRENDING' and market_type == 'TREND' and adx['adx'] >= self.adx_trend_threshold and ema_fast > ema_slow
+
+        if signal['action'] == 'BUY':
+            expected_move = self.get_expected_move_percent(entry_price, resistance, atr_current, breakout)
+            signal['expected_move'] = expected_move
+            if expected_move < self.min_expected_move_percent:
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': f'Expected move {expected_move:.2f}% below {self.min_expected_move_percent:.2f}% minimum',
+                    'score': signal.get('score', trade_score),
+                }
 
         # Attach trade score for dynamic sizing
         if signal['action'] == 'BUY':
             if 'score' not in signal:
                 signal['score'] = self.score_trade(
-                    df, price, rsi, ema_fast, ema_slow, volume_ratio
+                    analysis_df, price, rsi, ema_fast, ema_slow, volume_ratio
                 )
             if signal['score'] <= 2:
                 signal = {
@@ -1662,9 +1704,9 @@ Reason: {reason}
 
             pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
 
-            if pnl_percent <= -self.soft_exit_loss_trigger and not position.get('partial_taken'):
-                if self.has_no_momentum(symbol):
-                    print(f"\n   SOFT EXIT {symbol} @ ${current_price:.4f} (no momentum)")
+            if not position.get('partial_taken'):
+                if self.should_exit_early(position, current_price):
+                    print(f"\n   EARLY EXIT {symbol} @ ${current_price:.4f} (weak momentum + loss)")
                     self.execute_sell(position, 'SOFT_EXIT_NO_MOMENTUM')
                     continue
 
