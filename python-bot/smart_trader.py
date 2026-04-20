@@ -1710,9 +1710,18 @@ Reason: {reason}
 
             support = signal.get('support_override', signal.get('support', weighted_entry * 0.985))
             structure_sl = support * 0.995
-            stop_loss = max(dynamic_sl, structure_sl, weighted_entry * 0.97)
-            tp1_price = None if tp1_price is None else weighted_entry * (tp1_price / price)
-            take_profit = weighted_entry * (tp2_price / price)
+            atr_value = signal.get('atr_value', 0.0)
+            sl_atr_multiplier = profile.get('sl_atr_multiplier', self.atr_stop_multiplier)
+            if atr_value and atr_value > 0:
+                weighted_dynamic_sl = weighted_entry - (atr_value * sl_atr_multiplier)
+            else:
+                weighted_dynamic_sl = weighted_entry * 0.99
+            stop_loss = max(weighted_dynamic_sl, structure_sl, weighted_entry * 0.97)
+
+            price_ratio_tp1 = None if tp1_price is None else (tp1_price / max(price, 1e-9))
+            price_ratio_tp2 = tp2_price / max(price, 1e-9)
+            tp1_price = None if price_ratio_tp1 is None else weighted_entry * price_ratio_tp1
+            take_profit = weighted_entry * price_ratio_tp2
             actual_risk = weighted_entry - stop_loss
             rr_target = round((take_profit - weighted_entry) / max(actual_risk, 1e-9), 2)
 
