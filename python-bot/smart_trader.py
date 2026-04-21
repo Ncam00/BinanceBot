@@ -937,20 +937,41 @@ class SmartTrader:
         }
 
     def get_score_position_size(self, balance, score, signal):
-        """Position notional based on execution profile."""
+        """
+        Target: $35-65 positions on ~$475 USD account
+        A+ trending: ~$65 (13.5%)
+        B+ / continuation: ~$47 (10%)
+        SCOUT: ~$35 (7%)
+        """
         if score <= 2:
             return 0
 
-        profile = self.get_entry_profile(signal, score)
+        entry_tier = signal.get('entry_tier', '')
+        market_type = signal.get('market_type', 'CHOPPY')
         session_mode = signal.get('session_mode', 'NORMAL')
-        position_notional = balance * profile['balance_fraction']
-        if session_mode == 'LOW_RISK':
-            position_notional = min(position_notional, balance * 0.10)
-        if self.last_trade_win:
-            position_notional *= 1.1
 
-        max_notional = balance * self.max_position_cap
-        return min(position_notional, max_notional)
+        # Base sizing by tier
+        if entry_tier == 'A+' and market_type == 'TRENDING':
+            fraction = 0.135   # ~$64 on $475
+        elif entry_tier == 'A+':
+            fraction = 0.10    # ~$47
+        elif entry_tier in ('B+', 'CONTINUATION'):
+            fraction = 0.09    # ~$43
+        elif entry_tier == 'SCOUT':
+            fraction = 0.07    # ~$33
+        else:
+            fraction = 0.08    # ~$38 default
+
+        # Asia session — reduce size
+        if session_mode == 'LOW_RISK':
+            fraction = min(fraction, 0.07)
+
+        # Winning streak boost — small
+        if self.last_trade_win:
+            fraction = min(fraction * 1.05, 0.15)
+
+        position_notional = balance * fraction
+        return min(position_notional, balance * self.max_position_cap)
 
     def get_expected_move_percent(self, entry_price, resistance, atr_value, breakout):
         if entry_price <= 0:
