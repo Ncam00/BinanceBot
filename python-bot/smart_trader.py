@@ -1711,40 +1711,37 @@ Reason: {reason}
 
     def check_scale_in(self, position, data):
         if not position:
-            return False
+            return None
 
         price = data['close']
         resistance = data['resistance']
         volume = data['volume']
         avg_volume = data['avg_volume']
-        avg_entry = position.get('avg_entry', position.get('entry_price', 0))
 
         if price > resistance * 0.998 and volume > avg_volume * 1.1:
-            if price > avg_entry:
+            if price > position['avg_entry']:
                 return {
                     'add_size': 0.7,
                 }
 
-        return False
+        return None
 
-    def check_exit(self, position, data, candles_in_trade):
+    def check_exit(self, position, data, candles):
         price = data['close']
-        entry = position.get('avg_entry', position['entry_price'])
-        pnl = (price - entry) / max(entry, 1e-9)
+        entry = position['avg_entry']
+        pnl = (price - entry) / entry
 
         if pnl > 0.01:
             position['stop_loss'] = entry
 
-        if candles_in_trade >= self.time_exit_candles and pnl <= 0:
+        if candles >= 3 and pnl <= 0:
             return 'EXIT'
 
-        position_type = position.get('type')
-        if position_type == 'A+':
-            if pnl >= 0.025:
-                return 'EXIT'
-        elif position_type == 'B+':
-            if pnl >= 0.012:
-                return 'EXIT'
+        if position['type'] == 'A+' and pnl >= 0.025:
+            return 'EXIT'
+
+        if position['type'] == 'B+' and pnl >= 0.012:
+            return 'EXIT'
 
         if pnl <= -0.015:
             return 'EXIT'
@@ -2143,7 +2140,7 @@ Reason: {reason}
             if exit_signal == 'EXIT':
                 if pnl_percent <= -1.5:
                     reason = 'HARD_STOP_LOSS'
-                elif candles_in_trade >= self.time_exit_candles and pnl_percent <= 0:
+                elif candles_in_trade >= 3 and pnl_percent <= 0:
                     reason = 'TIME_EXIT'
                 else:
                     reason = 'TAKE_PROFIT'

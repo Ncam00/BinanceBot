@@ -208,23 +208,35 @@ def test_check_scale_in():
     )
 
     assert decision == {'add_size': 0.7}
-    assert blocked is False
+    assert blocked is None
+
+
+def test_check_scale_in_no_position():
+    trader = SmartTrader.__new__(SmartTrader)
+
+    assert trader.check_scale_in(None, {
+        'close': 110.0,
+        'resistance': 110.0,
+        'volume': 120.0,
+        'avg_volume': 100.0,
+    }) is None
 
 
 def test_check_exit():
     trader = SmartTrader.__new__(SmartTrader)
-    trader.time_exit_candles = 3
 
     a_plus_position = {'avg_entry': 100.0, 'entry_price': 100.0, 'type': 'A+', 'stop_loss': 98.5}
     b_plus_position = {'avg_entry': 100.0, 'entry_price': 100.0, 'type': 'B+', 'stop_loss': 98.5}
     losing_position = {'avg_entry': 100.0, 'entry_price': 100.0, 'type': 'B+', 'stop_loss': 98.5}
     hard_stop_position = {'avg_entry': 100.0, 'entry_price': 100.0, 'type': 'A+', 'stop_loss': 98.5}
+    neutral_position = {'avg_entry': 100.0, 'entry_price': 100.0, 'type': 'B+', 'stop_loss': 98.5}
 
     assert trader.check_exit(a_plus_position, {'close': 102.6}, 1) == 'EXIT'
     assert abs(a_plus_position['stop_loss'] - 100.0) < 1e-9
     assert trader.check_exit(b_plus_position, {'close': 101.3}, 1) == 'EXIT'
     assert trader.check_exit(losing_position, {'close': 99.9}, 3) == 'EXIT'
     assert trader.check_exit(hard_stop_position, {'close': 98.4}, 1) == 'EXIT'
+    assert trader.check_exit(neutral_position, {'close': 100.4}, 1) is None
 
 
 def test_ema20_pullback_context():
@@ -494,6 +506,7 @@ if __name__ == '__main__':
     test_scout_scale_merge_math()
     test_position_scaling()
     test_check_scale_in()
+    test_check_scale_in_no_position()
     test_check_exit()
     test_ema20_pullback_context()
     test_market_filter_skipped_for_core_pairs()
