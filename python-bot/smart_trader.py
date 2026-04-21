@@ -709,7 +709,6 @@ class SmartTrader:
         context = self.level_context(data['price'], data['resistance'], data['support'])
         context['trend'] = data['ema_fast'] > data['ema_slow']
         context['trend_exists'] = data['ema20'] > data['ema50'] or context['trend']
-        context['trend_aligned'] = data['ema20'] > data['ema50'] and context['trend'] and data['price'] > data['ema20']
         context['higher_lows'] = self.detect_higher_lows(data['df'])
         context['ema_alignment'] = data['ema_fast'] > data['ema_slow']
         context['tightening_range'] = self.detect_tightening_range(data['df'])
@@ -722,6 +721,11 @@ class SmartTrader:
             data['bb']
         )
         context.update(continuation)
+        context['trend_aligned'] = (
+            data['ema20'] > data['ema50'] and
+            context['trend'] and
+            (data['price'] >= data['ema20'] or continuation['ema20_pullback_ready'])
+        )
         context['structure_ok'] = (
             context['higher_lows'] or
             continuation['continuation_ready'] or
@@ -1118,6 +1122,9 @@ Reason: {reason}
             return min(4, self.hard_max_trades)
         return min(2, self.hard_max_trades)
 
+    def should_skip_market_filter(self, symbol):
+        return symbol in ('BTCUSDT', 'ETHUSDT')
+
     def explain_skip(self, symbol, score, min_score, checks):
         print(f"\n[SKIPPED - {symbol}]")
         print(f"Score: {score} (min required: {min_score})")
@@ -1333,6 +1340,7 @@ Reason: {reason}
             'rsi': rsi,
         }
         state = self.get_symbol_state(symbol)
+        use_market_filter = not self.should_skip_market_filter(symbol)
         tolerance = 0.002
         compression_setup = context['scout']
         trade_score = context['score']
@@ -1560,7 +1568,7 @@ Reason: {reason}
         if signal['action'] == 'BUY':
             mtf_bullish_count = self.get_multi_timeframe_count(symbol)
             allow_breakout_override = signal.get('breakout') and volume_ratio >= 1.2
-            if not self.btc_is_healthy():
+            if use_market_filter and not self.btc_is_healthy():
                 signal = {
                     'action': 'HOLD',
                     'strength': 0,
@@ -2353,12 +2361,13 @@ Reason: {reason}
 
                 pair_snapshots = {}
                 for symbol in self.trading_pairs:
+                    use_market_filter = not self.should_skip_market_filter(symbol)
                     if any(p['symbol'] == symbol for p in self.open_positions):
                         print(f"X Skipping {symbol} due to existing open position")
                         continue
                     if len(self.open_positions) >= self.max_positions:
                         break
-                    if symbol not in ('BTCUSDT',) and not self.btc_is_healthy():
+                    if use_market_filter and not self.btc_is_healthy():
                         print(f"X Skipping {symbol} due to BTC filter")
                         continue
 
@@ -2403,8 +2412,9 @@ Reason: {reason}
                     score = self.get_trade_score(snapshot, context)
 
                     signal = self.analyze(symbol)
+                    use_market_filter = not self.should_skip_market_filter(symbol)
 
-                    if btc_bias == 'BEARISH' and signal.get('action') == 'BUY':
+                    if use_market_filter and btc_bias == 'BEARISH' and signal.get('action') == 'BUY':
                         self.debug_symbol_check(symbol, snapshot, context, score, 'BTC bearish blocked long')
                         signal = {
                             **signal,

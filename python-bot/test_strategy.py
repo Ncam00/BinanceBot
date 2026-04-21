@@ -183,7 +183,10 @@ def test_ema20_pullback_context():
     trader = SmartTrader.__new__(SmartTrader)
     df = pd.DataFrame({
         'low': [99.0, 100.0, 101.0, 101.4],
+        'high': [100.5, 101.5, 102.5, 102.1],
+        'open': [99.5, 100.5, 101.5, 101.8],
         'close': [100.0, 101.0, 102.0, 101.7],
+        'volume': [100.0, 110.0, 120.0, 130.0],
     })
     bb = {
         'upper': 104.0,
@@ -198,16 +201,149 @@ def test_ema20_pullback_context():
         bb=bb,
     )
 
-    assert context['trend_up'] is True
-    assert context['higher_lows'] is True
-    assert context['ema20_pullback_ready'] is True
-    assert context['continuation_ready'] is True
+    assert bool(context['trend_up'])
+    assert bool(trader.detect_higher_lows(df))
+    assert bool(context['ema20_pullback_ready'])
+    assert bool(context['continuation_ready'])
+
+    built_context = trader.build_context({
+        'df': df,
+        'price': 101.7,
+        'resistance': 104.0,
+        'support': 99.0,
+        'ema_fast': 101.9,
+        'ema_slow': 101.1,
+        'ema20': 101.5,
+        'ema50': 100.0,
+        'volume': 130.0,
+        'avg_volume': 120.0,
+        'atr': 1.5,
+        'rsi': 58.0,
+        'macd': {'macd': 1.2, 'signal': 1.0, 'prev_macd': 0.9},
+        'bb': bb,
+        'market_type': 'TRENDING',
+    })
+
+    assert bool(built_context['trend_aligned'])
+
+
+def test_market_filter_skipped_for_core_pairs():
+    trader = SmartTrader.__new__(SmartTrader)
+    assert bool(trader.should_skip_market_filter('BTCUSDT'))
+    assert bool(trader.should_skip_market_filter('ETHUSDT'))
+    assert not trader.should_skip_market_filter('SOLUSDT')
+
+
+class FakeAnalyzeMarketFilterTrader(SmartTrader):
+    def __init__(self):
+        self.daily_profit = 0.0
+        self.daily_profit_target = 20.0
+        self.symbol_state = {}
+        self.enable_micro_b_plus_test = False
+        self.only_a_plus_after_loss = False
+        self.daily_losing_trades = 0
+        self.min_adx_for_entry = 18
+        self.adx_trend_threshold = 25
+        self.min_expected_move_percent = 0.7
+        self.near_level_percent = 1.5
+
+    def get_candles(self, symbol, interval='15m', limit=100):
+        rows = []
+        for index in range(60):
+            rows.append({
+                'open': 100.0 + (index * 0.1),
+                'high': 101.0 + (index * 0.1),
+                'low': 99.0 + (index * 0.1),
+                'close': 100.2 + (index * 0.1),
+                'volume': 1000.0 + index,
+            })
+        return pd.DataFrame(rows)
+
+    def calculate_rsi(self, closes, period=14):
+        return 58.0
+
+    def calculate_macd(self, closes):
+        return {'macd': 1.2, 'signal': 1.0, 'histogram': 0.3, 'prev_histogram': 0.2, 'prev_macd': 0.9}
+
+    def calculate_ema(self, closes, period):
+        mapping = {7: 106.5, 18: 105.8, 20: 105.5, 50: 103.0}
+        return mapping[period]
+
+    def calculate_atr(self, df, period=14):
+        return 2.0
+
+    def calculate_adx(self, df, period=14):
+        return {'adx': 30.0, 'plus_di': 25.0, 'minus_di': 15.0}
+
+    def calculate_bollinger(self, closes, period=20, std_dev=2):
+        return {'upper': 112.0, 'prev_upper': 111.5, 'middle': 104.0, 'lower': 96.0, 'pb': 0.65, 'width': 0.04}
+
+    def bollinger_breakout_signal(self, df, bb):
+        return {'breakout': False, 'strong_breakout': False, 'volume_ratio': 1.0}
+
+    def get_volume_ratio(self, df):
+        return 1.05
+
+    def session_filter(self):
+        return True
+
+    def calculate_support_resistance(self, df):
+        return {'support': 100.0, 'resistance': 130.0, 'range': 30.0, 'mid_point': 115.0}
+
+    def calculate_levels(self, df, lookback=20):
+        return 130.0, 100.0
+
+    def build_context(self, data):
+        return {
+            'scout': False,
+            'score': 4,
+            'rising_volume': True,
+            'breakout': False,
+            'continuation_ready': True,
+            'market': 'TRENDING',
+            'trend_up': True,
+            'soft_pullback': False,
+            'ema20_pullback_ready': True,
+            'upper_band_ride': False,
+        }
+
+    def classify_setup_quality(self, data, context):
+        return 'A+'
+
+    def is_strong_breakout(self, data, context):
+        return False
+
+    def has_confirmation_candle(self, df, direction='bullish'):
+        return True
+
+    def get_multi_timeframe_count(self, symbol):
+        return 2
+
+    def btc_is_healthy(self):
+        return False
+
+    def valid_breakout_setup(self, price, rsi, macd_val, signal_val, prev_macd, ema):
+        return True
+
+
+def test_analyze_market_filter_skip_for_core_pairs():
+    trader = FakeAnalyzeMarketFilterTrader()
+
+    btc_signal = trader.analyze('BTCUSDT')
+    sol_signal = trader.analyze('SOLUSDT')
+
+    assert btc_signal['action'] == 'BUY'
+    assert 'EMA pullback entry' in btc_signal['reason']
+    assert sol_signal['action'] == 'HOLD'
+    assert sol_signal['reason'] == 'BTC dumping - entry blocked'
 
 
 if __name__ == '__main__':
     test_scout_scale_merge_math()
     test_position_scaling()
     test_ema20_pullback_context()
+    test_market_filter_skipped_for_core_pairs()
+    test_analyze_market_filter_skip_for_core_pairs()
 
     trader = SmartTrader()
     symbols = ['ETHUSDT', 'BTCUSDT']
