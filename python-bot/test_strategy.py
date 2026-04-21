@@ -294,6 +294,24 @@ def test_market_filter_skipped_for_core_pairs():
     assert not trader.should_skip_market_filter('SOLUSDT')
 
 
+def test_detect_range_market():
+    trader = SmartTrader.__new__(SmartTrader)
+    rows = []
+    for idx in range(30):
+        base = 100.0 + (idx * 0.01)
+        rows.append({
+            'open': base,
+            'high': base + 0.25,
+            'low': base - 0.25,
+            'close': base + 0.05,
+            'volume': 1000.0,
+        })
+    df = pd.DataFrame(rows)
+
+    assert bool(trader.detect_range_market(df, atr_current=0.45, atr_avg=0.6))
+    assert not trader.detect_range_market(df, atr_current=0.7, atr_avg=0.6)
+
+
 def test_check_entry():
     trader = SmartTrader.__new__(SmartTrader)
     pullback = trader.check_entry('BTCUSDT', {
@@ -490,6 +508,52 @@ class FakeAnalyzeEntryScoreTrader(FakeAnalyzeMarketFilterTrader):
         return True
 
 
+class FakeAnalyzeRangingWaitTrader(FakeAnalyzeMarketFilterTrader):
+    def btc_is_healthy(self):
+        return True
+
+    def detect_range_market(self, df, atr_current, atr_avg, lookback=20, max_range_pct=0.015, max_volatility_ratio=0.9):
+        return True
+
+
+class FakeAnalyzeRangingBreakoutTrader(FakeAnalyzeMarketFilterTrader):
+    def btc_is_healthy(self):
+        return True
+
+    def detect_range_market(self, df, atr_current, atr_avg, lookback=20, max_range_pct=0.015, max_volatility_ratio=0.9):
+        return True
+
+    def get_candles(self, symbol, interval='15m', limit=100):
+        rows = []
+        for index in range(60):
+            volume = 1000.0
+            if index == 58:
+                volume = 1400.0
+            rows.append({
+                'open': 100.0 + (index * 0.1),
+                'high': 101.0 + (index * 0.1),
+                'low': 99.0 + (index * 0.1),
+                'close': 100.2 + (index * 0.1),
+                'volume': volume,
+            })
+        return pd.DataFrame(rows)
+
+    def build_context(self, data):
+        return {
+            'scout': False,
+            'score': 4,
+            'rising_volume': True,
+            'breakout': True,
+            'continuation_ready': True,
+            'market': 'RANGING',
+            'trend_up': True,
+            'soft_pullback': False,
+            'ema20_pullback_ready': True,
+            'upper_band_ride': False,
+            'higher_lows': True,
+        }
+
+
 def test_analyze_entry_confirmation_score_gate():
     trader = FakeAnalyzeEntryScoreTrader()
 
@@ -502,6 +566,22 @@ def test_analyze_entry_confirmation_score_gate():
     assert sol_signal['reason'] == 'No valid setup (4/5 checks)'
 
 
+def test_analyze_waits_for_ranging_breakout_volume():
+    trader = FakeAnalyzeRangingWaitTrader()
+    btc_signal = trader.analyze('BTCUSDT')
+
+    assert btc_signal['action'] == 'HOLD'
+    assert btc_signal['reason'] == 'RANGING: waiting for breakout + volume'
+
+
+def test_analyze_allows_ranging_breakout_volume_entry():
+    trader = FakeAnalyzeRangingBreakoutTrader()
+    btc_signal = trader.analyze('BTCUSDT')
+
+    assert btc_signal['action'] == 'BUY'
+    assert btc_signal['entry_tier'] == 'A+'
+
+
 if __name__ == '__main__':
     test_scout_scale_merge_math()
     test_position_scaling()
@@ -510,9 +590,12 @@ if __name__ == '__main__':
     test_check_exit()
     test_ema20_pullback_context()
     test_market_filter_skipped_for_core_pairs()
+    test_detect_range_market()
     test_check_entry()
     test_analyze_market_filter_skip_for_core_pairs()
     test_analyze_entry_confirmation_score_gate()
+    test_analyze_waits_for_ranging_breakout_volume()
+    test_analyze_allows_ranging_breakout_volume_entry()
 
     trader = SmartTrader()
     symbols = ['ETHUSDT', 'BTCUSDT']

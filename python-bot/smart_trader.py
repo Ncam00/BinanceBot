@@ -470,6 +470,23 @@ class SmartTrader:
             return 'RANGING'
         return 'CHOPPY'
 
+    def detect_range_market(self, df, atr_current, atr_avg, lookback=20, max_range_pct=0.015, max_volatility_ratio=0.9):
+        if len(df) < lookback:
+            return False
+        if np.isnan(atr_avg) or atr_avg <= 0:
+            return False
+
+        recent = df.iloc[-lookback:]
+        range_high = recent['high'].max()
+        range_low = recent['low'].min()
+        range_mid = (range_high + range_low) / 2
+        if range_mid <= 0:
+            return False
+
+        price_range = (range_high - range_low) / range_mid
+        volatility_low = atr_current <= (atr_avg * max_volatility_ratio)
+        return price_range < max_range_pct and volatility_low
+
     # ════════════════════════════════════════════════════════════════════
     # STRATEGY SIGNALS
     # ════════════════════════════════════════════════════════════════════
@@ -1348,6 +1365,9 @@ Reason: {reason}
 
         market_type = self.get_market_type(adx['adx'])
         market_mode = market_type
+        if self.detect_range_market(analysis_df, atr_current, atr_avg):
+            market_type = 'RANGING'
+            market_mode = 'RANGING'
         in_active_session = self.session_filter()
         if not in_active_session:
             print(f"{symbol} outside main session -> allowing reduced-risk trade")
@@ -1457,6 +1477,7 @@ Reason: {reason}
         zone = self.get_trade_zone(price, support, resistance)
         breakout = context['breakout'] or strong_breakout or bollinger_standard_breakout or early_breakout
         context['breakout'] = breakout
+        breakout_with_volume = breakout and analysis_df['volume'].iloc[-1] > (avg_volume * 1.1)
         score = trade_score
         scout = context['scout']
         continuation_ready = context.get('continuation_ready', False)
@@ -1482,15 +1503,22 @@ Reason: {reason}
         # Entry decision always runs before filters.
         print(f"{symbol} reached entry evaluation")
         if market_type == 'RANGING':
-            ranging_signal = self.ranging_trade(price, rsi, support, resistance, volume_ratio)
-            if ranging_signal['action'] == 'BUY' and quality_tier == 'A+':
-                entry_type = 'RANGING'
-                entry_reason = ranging_signal['reason']
-                entry_strength = ranging_signal['strength']
-            elif ranging_signal['action'] == 'BUY' and quality_tier == 'B+':
-                entry_type = 'RANGING'
-                entry_reason = f"RANGING SCALP B+: {ranging_signal['reason']}"
-                entry_strength = 0.60
+            if breakout_with_volume and entry_decision and entry_decision['entry_type'] == 'pullback':
+                entry_type = 'A+'
+                entry_reason = 'RANGING BREAKOUT: EMA20 pullback with breakout + volume confirmation'
+                entry_strength = 0.82
+            elif breakout_with_volume and entry_decision and entry_decision['entry_type'] == 'breakout':
+                entry_type = 'A+'
+                entry_reason = 'RANGING BREAKOUT: resistance break with volume confirmation'
+                entry_strength = 0.85
+            elif breakout_with_volume and entry_decision and entry_decision['entry_type'] == 'scout':
+                entry_type = 'SCOUT'
+                entry_reason = 'RANGING BREAKOUT SCOUT: compression + higher lows + volume'
+                entry_strength = 0.62
+            else:
+                entry_type = None
+                entry_reason = 'RANGING: waiting for breakout + volume'
+                entry_strength = 0.0
         elif entry_decision and entry_decision['entry_type'] == 'pullback':
             entry_type = 'A+'
             entry_reason = 'TREND A+: EMA20 pullback within 0.3%'
