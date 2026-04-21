@@ -1,4 +1,5 @@
 from smart_trader import SmartTrader
+import pandas as pd
 
 
 def print_signal(symbol, signal):
@@ -178,9 +179,35 @@ def test_position_scaling():
     assert 100.0 < avg_entry < 105.0
 
 
+def test_ema20_pullback_context():
+    trader = SmartTrader.__new__(SmartTrader)
+    df = pd.DataFrame({
+        'low': [99.0, 100.0, 101.0, 101.4],
+        'close': [100.0, 101.0, 102.0, 101.7],
+    })
+    bb = {
+        'upper': 104.0,
+        'middle': 100.5,
+    }
+
+    context = trader.get_trend_continuation_context(
+        df=df,
+        price=101.7,
+        ema20=101.5,
+        ema50=100.0,
+        bb=bb,
+    )
+
+    assert context['trend_up'] is True
+    assert context['higher_lows'] is True
+    assert context['ema20_pullback_ready'] is True
+    assert context['continuation_ready'] is True
+
+
 if __name__ == '__main__':
     test_scout_scale_merge_math()
     test_position_scaling()
+    test_ema20_pullback_context()
 
     trader = SmartTrader()
     symbols = ['ETHUSDT', 'BTCUSDT']

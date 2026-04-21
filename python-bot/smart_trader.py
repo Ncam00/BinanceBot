@@ -675,18 +675,20 @@ class SmartTrader:
         return recent_volume > prior_volume
 
     def get_trend_continuation_context(self, df, price, ema20, ema50, bb):
-        trend_up = ema20 > ema50 and price > ema20
+        trend_up = ema20 > ema50
         higher_lows = self.detect_higher_lows(df)
         low_near_ema20 = abs(df['low'].iloc[-1] - ema20) / max(ema20, 1e-9) <= 0.004
         soft_pullback = price >= ema20 and low_near_ema20
+        ema20_pullback_ready = trend_up and price <= ema20 * 1.003 and price >= ema20 * 0.995
         upper_band_ride = (
             price >= bb['upper'] * 0.985 and
             df['close'].iloc[-3:].min() >= bb['middle']
         )
-        continuation_ready = trend_up and higher_lows and (soft_pullback or upper_band_ride)
+        continuation_ready = trend_up and higher_lows and (soft_pullback or ema20_pullback_ready or upper_band_ride)
         return {
             'trend_up': trend_up,
             'soft_pullback': soft_pullback,
+            'ema20_pullback_ready': ema20_pullback_ready,
             'upper_band_ride': upper_band_ride,
             'continuation_ready': continuation_ready,
         }
@@ -1438,14 +1440,24 @@ Reason: {reason}
             entry_strength = 0.75
         elif market_type == 'TRENDING' and quality_tier == 'A+' and continuation_ready:
             entry_type = 'A+'
-            continuation_trigger = 'soft EMA20 pullback' if context.get('soft_pullback') else 'upper band ride'
+            if context.get('soft_pullback'):
+                continuation_trigger = 'soft EMA20 pullback'
+            elif context.get('ema20_pullback_ready'):
+                continuation_trigger = 'EMA20 pullback within 0.3%'
+            else:
+                continuation_trigger = 'upper band ride'
             entry_reason = (
                 f'TREND A+: EMA pullback entry with clean structure and {continuation_trigger}'
             )
             entry_strength = 0.82
         elif market_type == 'TRENDING' and quality_tier == 'B+' and continuation_ready:
             entry_type = 'B+'
-            continuation_trigger = 'soft EMA20 pullback' if context.get('soft_pullback') else 'upper band ride'
+            if context.get('soft_pullback'):
+                continuation_trigger = 'soft EMA20 pullback'
+            elif context.get('ema20_pullback_ready'):
+                continuation_trigger = 'EMA20 pullback within 0.3%'
+            else:
+                continuation_trigger = 'upper band ride'
             entry_reason = (
                 f'TREND CONTINUATION B+: controlled EMA pullback with {continuation_trigger}'
             )
@@ -1616,6 +1628,7 @@ Reason: {reason}
         signal['ema50'] = ema50
         signal['trend_up'] = context.get('trend_up', False)
         signal['soft_pullback'] = context.get('soft_pullback', False)
+        signal['ema20_pullback_ready'] = context.get('ema20_pullback_ready', False)
         signal['upper_band_ride'] = context.get('upper_band_ride', False)
 
         if signal['action'] == 'BUY':
