@@ -41,7 +41,7 @@ class SmartTrader:
         # TRADING PAIRS
         # ════════════════════════════════════════════════════════════════════
         self.trading_pairs = [
-            'BTCUSDT', 'ETHUSDT'
+            'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'
         ]
         self.max_positions = 1
 
@@ -50,18 +50,18 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         self.stop_loss_percent = 1.5
         self.take_profit_percent = 2.5
-        self.position_size_percent = 15
-        self.max_position_cap = 0.25
+        self.position_size_percent = 10
+        self.max_position_cap = 0.15
 
         # ════════════════════════════════════════════════════════════════════
         # DAILY / WEEKLY LIMITS
         # ════════════════════════════════════════════════════════════════════
-        self.daily_profit_target = 20.00
-        self.max_daily_loss = 4.00
-        self.max_weekly_loss = 20.00
-        self.max_trades_per_day = 5
-        self.hard_max_trades = 5
-        self.trade_cooldown_minutes = 30
+        self.daily_profit_target = 5.00
+        self.max_daily_loss = 7.00
+        self.max_weekly_loss = 25.00
+        self.max_trades_per_day = 3
+        self.hard_max_trades = 3
+        self.trade_cooldown_minutes = 20
         self.max_consecutive_losses = 2
         self.only_a_plus_after_loss = True
 
@@ -105,7 +105,7 @@ class SmartTrader:
         self.adx_range_threshold = 20
         self.adx_trend_threshold = 25
         self.min_adx_for_entry = 18           # Relaxed: allow more trades while avoiding garbage
-        self.enable_micro_b_plus_test = True
+        self.enable_micro_b_plus_test = False
 
         # ════════════════════════════════════════════════════════════════════
         # SESSION SETTINGS (NZ TIME)
