@@ -328,7 +328,7 @@ def test_check_entry():
         'compression': False,
         'higher_lows': True,
     }, 'NEUTRAL', None)
-    blocked_mtf = trader.check_entry('BTCUSDT', {
+    trend_pullback_only = trader.check_entry('BTCUSDT', {
         'close': 100.2,
         'ema20': 100.0,
         'volume': 100.0,
@@ -339,16 +339,30 @@ def test_check_entry():
         'compression': False,
         'higher_lows': True,
     }, 'BULLISH', None)
+    relaxed_pullback = trader.check_entry('BTCUSDT', {
+        'close': 100.2,
+        'ema20': 100.0,
+        'volume': 100.0,
+        'avg_volume': 100.0,
+        'resistance': 110.0,
+        'trend_up': False,
+        'mtf_bullish': 2,
+        'compression': False,
+        'higher_lows': False,
+    }, 'BEARISH', None)
 
     assert pullback['entry_type'] == 'pullback'
     assert pullback['type'] == 'A+'
     assert breakout['entry_type'] == 'breakout'
     assert breakout['type'] == 'A+'
+    assert relaxed_pullback['entry_type'] == 'pullback'
+    assert relaxed_pullback['type'] == 'A+'
+    assert trend_pullback_only['entry_type'] == 'pullback'
+    assert trend_pullback_only['type'] == 'A+'
     assert scout['entry_type'] == 'scout'
     assert scout['type'] == 'B+'
     assert scout['size'] == 0.3
     assert blocked_market is None
-    assert blocked_mtf is None
 
 
 class FakeAnalyzeMarketFilterTrader(SmartTrader):

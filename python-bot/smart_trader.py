@@ -1251,32 +1251,39 @@ Reason: {reason}
         compression = data['compression']
         higher_lows = data['higher_lows']
 
+        score = 0
+        entry_type = None
+
         use_market_filter = symbol not in ['BTCUSDT', 'ETHUSDT']
         if use_market_filter and btc_bias != 'BULLISH':
             return None
 
-        if mtf_bullish < 2:
-            return None
+        if trend_up:
+            score += 1
 
-        if trend_up and price <= ema20 * 1.003:
-            return {
-                'type': 'A+',
-                'entry_type': 'pullback',
-                'size': 1.0,
-            }
+        if mtf_bullish >= 2:
+            score += 1
 
-        if price > resistance * 0.998 and volume > avg_volume * 1.1:
-            return {
-                'type': 'A+',
-                'entry_type': 'breakout',
-                'size': 1.0,
-            }
+        if price <= ema20 * 1.003:
+            score += 1
+            entry_type = 'pullback'
 
-        if compression and higher_lows and not position:
+        elif price > resistance * 0.998 and volume > avg_volume * 1.1:
+            score += 1
+            entry_type = 'breakout'
+
+        elif compression and higher_lows and not position:
             return {
                 'type': 'B+',
                 'entry_type': 'scout',
                 'size': 0.3,
+            }
+
+        if score >= 2:
+            return {
+                'type': 'A+',
+                'entry_type': entry_type,
+                'size': 1.0,
             }
 
         return None
