@@ -234,11 +234,73 @@ def test_market_filter_skipped_for_core_pairs():
     assert not trader.should_skip_market_filter('SOLUSDT')
 
 
-def test_entry_confirmation_score():
+def test_check_entry():
     trader = SmartTrader.__new__(SmartTrader)
-    assert trader.get_entry_confirmation_score(2, 1.15, True) == 3
-    assert trader.get_entry_confirmation_score(2, 1.05, False) == 1
-    assert trader.get_entry_confirmation_score(1, 1.2, True) == 2
+    pullback = trader.check_entry('BTCUSDT', {
+        'close': 100.2,
+        'ema20': 100.0,
+        'volume': 100.0,
+        'avg_volume': 100.0,
+        'resistance': 110.0,
+        'trend_up': True,
+        'mtf_bullish': 2,
+        'compression': False,
+        'higher_lows': True,
+    }, 'BEARISH', None)
+    breakout = trader.check_entry('BTCUSDT', {
+        'close': 109.9,
+        'ema20': 100.0,
+        'volume': 120.0,
+        'avg_volume': 100.0,
+        'resistance': 110.0,
+        'trend_up': False,
+        'mtf_bullish': 2,
+        'compression': False,
+        'higher_lows': False,
+    }, 'BEARISH', None)
+    scout = trader.check_entry('ETHUSDT', {
+        'close': 100.0,
+        'ema20': 99.0,
+        'volume': 100.0,
+        'avg_volume': 100.0,
+        'resistance': 110.0,
+        'trend_up': False,
+        'mtf_bullish': 2,
+        'compression': True,
+        'higher_lows': True,
+    }, 'NEUTRAL', None)
+    blocked_market = trader.check_entry('SOLUSDT', {
+        'close': 100.2,
+        'ema20': 100.0,
+        'volume': 100.0,
+        'avg_volume': 100.0,
+        'resistance': 110.0,
+        'trend_up': True,
+        'mtf_bullish': 2,
+        'compression': False,
+        'higher_lows': True,
+    }, 'NEUTRAL', None)
+    blocked_mtf = trader.check_entry('BTCUSDT', {
+        'close': 100.2,
+        'ema20': 100.0,
+        'volume': 100.0,
+        'avg_volume': 100.0,
+        'resistance': 110.0,
+        'trend_up': True,
+        'mtf_bullish': 1,
+        'compression': False,
+        'higher_lows': True,
+    }, 'BULLISH', None)
+
+    assert pullback['entry_type'] == 'pullback'
+    assert pullback['type'] == 'A+'
+    assert breakout['entry_type'] == 'breakout'
+    assert breakout['type'] == 'A+'
+    assert scout['entry_type'] == 'scout'
+    assert scout['type'] == 'B+'
+    assert scout['size'] == 0.3
+    assert blocked_market is None
+    assert blocked_mtf is None
 
 
 class FakeAnalyzeMarketFilterTrader(SmartTrader):
@@ -246,6 +308,7 @@ class FakeAnalyzeMarketFilterTrader(SmartTrader):
         self.daily_profit = 0.0
         self.daily_profit_target = 20.0
         self.symbol_state = {}
+        self.open_positions = []
         self.enable_micro_b_plus_test = False
         self.only_a_plus_after_loss = False
         self.daily_losing_trades = 0
@@ -273,7 +336,7 @@ class FakeAnalyzeMarketFilterTrader(SmartTrader):
         return {'macd': 1.2, 'signal': 1.0, 'histogram': 0.3, 'prev_histogram': 0.2, 'prev_macd': 0.9}
 
     def calculate_ema(self, closes, period):
-        mapping = {7: 106.5, 18: 105.8, 20: 105.5, 50: 103.0}
+        mapping = {7: 106.5, 18: 105.8, 20: 106.1, 50: 103.0}
         return mapping[period]
 
     def calculate_atr(self, df, period=14):
@@ -329,6 +392,9 @@ class FakeAnalyzeMarketFilterTrader(SmartTrader):
     def btc_is_healthy(self):
         return False
 
+    def get_btc_bias(self):
+        return 'BEARISH'
+
     def valid_breakout_setup(self, price, rsi, macd_val, signal_val, prev_macd, ema):
         return True
 
@@ -340,9 +406,9 @@ def test_analyze_market_filter_skip_for_core_pairs():
     sol_signal = trader.analyze('SOLUSDT')
 
     assert btc_signal['action'] == 'BUY'
-    assert 'EMA pullback entry' in btc_signal['reason']
+    assert 'EMA20 pullback' in btc_signal['reason']
     assert sol_signal['action'] == 'HOLD'
-    assert sol_signal['reason'] == 'BTC dumping - entry blocked'
+    assert sol_signal['reason'] == 'No valid setup (4/5 checks)'
 
 
 class FakeAnalyzeEntryScoreTrader(FakeAnalyzeMarketFilterTrader):
@@ -357,10 +423,9 @@ def test_analyze_entry_confirmation_score_gate():
     sol_signal = trader.analyze('SOLUSDT')
 
     assert btc_signal['action'] == 'BUY'
-    assert btc_signal['entry_confirmation_score'] >= 2
+    assert btc_signal['entry_tier'] == 'A+'
     assert sol_signal['action'] == 'HOLD'
-    assert sol_signal['entry_confirmation_score'] == 1
-    assert sol_signal['reason'] == 'Entry confirmation too weak (1/3) - entry blocked'
+    assert sol_signal['reason'] == 'No valid setup (4/5 checks)'
 
 
 if __name__ == '__main__':
@@ -368,7 +433,7 @@ if __name__ == '__main__':
     test_position_scaling()
     test_ema20_pullback_context()
     test_market_filter_skipped_for_core_pairs()
-    test_entry_confirmation_score()
+    test_check_entry()
     test_analyze_market_filter_skip_for_core_pairs()
     test_analyze_entry_confirmation_score_gate()
 

@@ -1240,15 +1240,46 @@ Reason: {reason}
             return False
         return True
 
-    def get_entry_confirmation_score(self, mtf_bullish_count, volume_ratio, trend_up):
-        score = 0
-        if mtf_bullish_count >= 2:
-            score += 1
-        if volume_ratio > 1.1:
-            score += 1
-        if trend_up:
-            score += 1
-        return score
+    def check_entry(self, symbol, data, btc_bias, position):
+        price = data['close']
+        ema20 = data['ema20']
+        volume = data['volume']
+        avg_volume = data['avg_volume']
+        resistance = data['resistance']
+        trend_up = data['trend_up']
+        mtf_bullish = data['mtf_bullish']
+        compression = data['compression']
+        higher_lows = data['higher_lows']
+
+        use_market_filter = symbol not in ['BTCUSDT', 'ETHUSDT']
+        if use_market_filter and btc_bias != 'BULLISH':
+            return None
+
+        if mtf_bullish < 2:
+            return None
+
+        if trend_up and price <= ema20 * 1.003:
+            return {
+                'type': 'A+',
+                'entry_type': 'pullback',
+                'size': 1.0,
+            }
+
+        if price > resistance * 0.998 and volume > avg_volume * 1.1:
+            return {
+                'type': 'A+',
+                'entry_type': 'breakout',
+                'size': 1.0,
+            }
+
+        if compression and higher_lows and not position:
+            return {
+                'type': 'B+',
+                'entry_type': 'scout',
+                'size': 0.3,
+            }
+
+        return None
 
     # ════════════════════════════════════════════════════════════════════
     # BREAKOUT STATE MACHINE
@@ -1350,7 +1381,10 @@ Reason: {reason}
             'rsi': rsi,
         }
         state = self.get_symbol_state(symbol)
+        open_position = self.get_open_position(symbol)
         use_market_filter = not self.should_skip_market_filter(symbol)
+        btc_bias = self.get_btc_bias() if use_market_filter else 'BYPASS'
+        mtf_bullish_count = self.get_multi_timeframe_count(symbol)
         tolerance = 0.002
         compression_setup = context['scout']
         trade_score = context['score']
@@ -1421,6 +1455,22 @@ Reason: {reason}
         continuation_ready = context.get('continuation_ready', False)
         market = context['market']
         micro_b_test = False
+        entry_decision = self.check_entry(
+            symbol,
+            {
+                'close': price,
+                'ema20': ema20,
+                'volume': analysis_df['volume'].iloc[-1],
+                'avg_volume': avg_volume,
+                'resistance': resistance,
+                'trend_up': context.get('trend_up', False),
+                'mtf_bullish': mtf_bullish_count,
+                'compression': compression_setup,
+                'higher_lows': context.get('higher_lows', False),
+            },
+            btc_bias,
+            open_position,
+        )
 
         # Entry decision always runs before filters.
         print(f"{symbol} reached entry evaluation")
@@ -1434,55 +1484,17 @@ Reason: {reason}
                 entry_type = 'RANGING'
                 entry_reason = f"RANGING SCALP B+: {ranging_signal['reason']}"
                 entry_strength = 0.60
-        elif market_type == 'TRENDING' and early_breakout and quality_tier == 'A+':
+        elif entry_decision and entry_decision['entry_type'] == 'pullback':
             entry_type = 'A+'
-            entry_reason = 'EARLY BREAKOUT A+: price is within 0.2% of resistance with rising volume'
+            entry_reason = 'TREND A+: EMA20 pullback within 0.3%'
             entry_strength = 0.84
-        elif market_type == 'TRENDING' and early_breakout and quality_tier == 'B+':
-            entry_type = 'B+'
-            entry_reason = 'EARLY BREAKOUT B+: price is within 0.2% of resistance with rising volume'
-            entry_strength = 0.76
-        elif quality_tier == 'A+' and bollinger_strong_breakout:
+        elif entry_decision and entry_decision['entry_type'] == 'breakout':
             entry_type = 'A+'
-            entry_reason = (
-                f'BOLLINGER BREAKOUT A+: Close cleared upper band after squeeze '
-                f'(width={bb["width"]:.3f}, vol={bollinger_breakout["volume_ratio"]:.2f}x)'
-            )
+            entry_reason = 'BREAKOUT A+: price is within 0.2% of resistance with 1.1x volume'
             entry_strength = 0.85
-        elif quality_tier == 'B+' and bollinger_standard_breakout:
-            entry_type = 'B+'
-            entry_reason = (
-                f'BOLLINGER BREAKOUT B+: Close cleared upper band after squeeze '
-                f'(width={bb["width"]:.3f}, vol={bollinger_breakout["volume_ratio"]:.2f}x)'
-            )
-            entry_strength = 0.75
-        elif market_type == 'TRENDING' and quality_tier == 'A+' and continuation_ready:
-            entry_type = 'A+'
-            if context.get('soft_pullback'):
-                continuation_trigger = 'soft EMA20 pullback'
-            elif context.get('ema20_pullback_ready'):
-                continuation_trigger = 'EMA20 pullback within 0.3%'
-            else:
-                continuation_trigger = 'upper band ride'
-            entry_reason = (
-                f'TREND A+: EMA pullback entry with clean structure and {continuation_trigger}'
-            )
-            entry_strength = 0.82
-        elif market_type == 'TRENDING' and quality_tier == 'B+' and continuation_ready:
-            entry_type = 'B+'
-            if context.get('soft_pullback'):
-                continuation_trigger = 'soft EMA20 pullback'
-            elif context.get('ema20_pullback_ready'):
-                continuation_trigger = 'EMA20 pullback within 0.3%'
-            else:
-                continuation_trigger = 'upper band ride'
-            entry_reason = (
-                f'TREND CONTINUATION B+: controlled EMA pullback with {continuation_trigger}'
-            )
-            entry_strength = 0.78
-        elif market_type == 'TRENDING' and scout and context.get('higher_lows'):
+        elif entry_decision and entry_decision['entry_type'] == 'scout':
             entry_type = 'SCOUT'
-            entry_reason = 'TREND SCOUT: compression + higher lows before breakout'
+            entry_reason = 'SCOUT B+: compression + higher lows before breakout'
             entry_strength = 0.62
         elif market_type == 'CHOPPY' and scout:
             entry_type = 'SCOUT'
@@ -1576,13 +1588,6 @@ Reason: {reason}
 
         # ── Extra filters + ADDED: final validation gate ──────────────
         if signal['action'] == 'BUY':
-            mtf_bullish_count = self.get_multi_timeframe_count(symbol)
-            confirmation_score = self.get_entry_confirmation_score(
-                mtf_bullish_count,
-                volume_ratio,
-                context.get('trend_up', False),
-            )
-            allow_breakout_override = signal.get('breakout') and volume_ratio >= 1.1
             if use_market_filter and not self.btc_is_healthy():
                 signal = {
                     'action': 'HOLD',
@@ -1590,15 +1595,6 @@ Reason: {reason}
                     'reason': 'BTC dumping - entry blocked',
                     'score': trade_score,
                 }
-            elif confirmation_score < 2 and not allow_breakout_override:
-                signal = {
-                    'action': 'HOLD',
-                    'strength': 0,
-                    'reason': f'Entry confirmation too weak ({confirmation_score}/3) - entry blocked',
-                    'score': trade_score,
-                }
-            elif confirmation_score < 2 and allow_breakout_override:
-                print(f"   ENTRY OVERRIDE: breakout near resistance allows entry with confirmation score {confirmation_score}/3")
 
             # ADDED: Final setup validation (last gate before trade fires)
             if signal['action'] == 'BUY':
@@ -1645,11 +1641,7 @@ Reason: {reason}
         signal['bb_middle'] = bb['middle']
         signal['volume_ratio'] = volume_ratio
         signal['volume_spike'] = volume_ratio >= 1.2
-        signal['entry_confirmation_score'] = self.get_entry_confirmation_score(
-            self.get_multi_timeframe_count(symbol),
-            volume_ratio,
-            context.get('trend_up', False),
-        )
+        signal['mtf_bullish'] = mtf_bullish_count
         signal['strong_trend'] = market_mode == 'TRENDING' and market_type == 'TRENDING' and adx['adx'] >= self.adx_trend_threshold and ema_fast > ema_slow
         signal['early_breakout'] = early_breakout
         signal['ema20'] = ema20
