@@ -1639,6 +1639,9 @@ Reason: {reason}
         signal['atr_value'] = atr_current
         signal['bb_width'] = bb['width']
         signal['bb_middle'] = bb['middle']
+        signal['close_price'] = price
+        signal['volume'] = analysis_df['volume'].iloc[-1]
+        signal['avg_volume'] = avg_volume
         signal['volume_ratio'] = volume_ratio
         signal['volume_spike'] = volume_ratio >= 1.2
         signal['mtf_bullish'] = mtf_bullish_count
@@ -1699,6 +1702,48 @@ Reason: {reason}
                 return position
         return None
 
+    def check_scale_in(self, position, data):
+        if not position:
+            return False
+
+        price = data['close']
+        resistance = data['resistance']
+        volume = data['volume']
+        avg_volume = data['avg_volume']
+        avg_entry = position.get('avg_entry', position.get('entry_price', 0))
+
+        if price > resistance * 0.998 and volume > avg_volume * 1.1:
+            if price > avg_entry:
+                return {
+                    'add_size': 0.7,
+                }
+
+        return False
+
+    def check_exit(self, position, data, candles_in_trade):
+        price = data['close']
+        entry = position.get('avg_entry', position['entry_price'])
+        pnl = (price - entry) / max(entry, 1e-9)
+
+        if pnl > 0.01:
+            position['stop_loss'] = entry
+
+        if candles_in_trade >= self.time_exit_candles and pnl <= 0:
+            return 'EXIT'
+
+        position_type = position.get('type')
+        if position_type == 'A+':
+            if pnl >= 0.025:
+                return 'EXIT'
+        elif position_type == 'B+':
+            if pnl >= 0.012:
+                return 'EXIT'
+
+        if pnl <= -0.015:
+            return 'EXIT'
+
+        return None
+
     def should_scale_scout_position(self, position, signal):
         if not position or position.get('scaled_in'):
             return False
@@ -1712,9 +1757,13 @@ Reason: {reason}
             return False
         if signal.get('entry_tier') not in ('A+', 'B+'):
             return False
-        if signal.get('price', 0) <= position.get('entry_price', 0):
-            return False
-        return signal.get('breakout') or signal.get('early_breakout')
+        scale_decision = self.check_scale_in(position, {
+            'close': signal.get('close_price', signal.get('price', 0)),
+            'resistance': signal.get('resistance', 0),
+            'volume': signal.get('volume', 0),
+            'avg_volume': signal.get('avg_volume', 1),
+        })
+        return bool(scale_decision)
 
     def execute_scale_in(self, position, signal):
         if self.trade_lock:
@@ -1780,12 +1829,14 @@ Reason: {reason}
             position['allocated_notional'] = allocated_notional + (quantity * fill_price)
             position['target_position_notional'] = target_notional
             position['entry_price'] = weighted_entry
+            position['avg_entry'] = weighted_entry
             position['stop_loss'] = stop_loss
             position['tp1_price'] = tp1_price
             position['take_profit'] = take_profit
             position['risk_percent'] = profile['balance_fraction']
             position['rr_target'] = rr_target
             position['entry_type'] = profile['entry_type']
+            position['type'] = signal.get('entry_tier', position.get('type', 'B+'))
             position['fallback_trade'] = signal.get('fallback_trade', False)
             position['strong_trend'] = signal.get('strong_trend', False)
             position['atr_value'] = signal.get('atr_value', 0.0)
@@ -1890,12 +1941,14 @@ Reason: {reason}
                 'quantity': quantity,
                 'original_quantity': quantity,
                 'entry_price': fill_price,
+                'avg_entry': fill_price,
                 'stop_loss': stop_loss,
                 'tp1_price': tp1_price,
                 'take_profit': take_profit,
                 'risk_percent': profile['balance_fraction'],
                 'rr_target': rr_target,
                 'entry_type': profile['entry_type'],
+                'type': signal.get('entry_tier', 'B+' if signal.get('scout_trade') else 'A+'),
                 'fallback_trade': signal.get('fallback_trade', False),
                 'strong_trend': signal.get('strong_trend', False),
                 'atr_value': signal.get('atr_value', 0.0),
@@ -1973,12 +2026,13 @@ Reason: {reason}
 
             fill_price = float(order['fills'][0]['price'])
             exit_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
-            gross_pnl = (fill_price - position['entry_price']) * sell_quantity
+            avg_entry = position.get('avg_entry', position['entry_price'])
+            gross_pnl = (fill_price - avg_entry) * sell_quantity
             # Prorate entry fee by fraction of position being sold
             entry_fee_share = position.get('entry_fee', 0) * (sell_quantity / max(position['original_quantity'], 1e-9))
             total_fees = exit_fee + entry_fee_share
             pnl = gross_pnl - total_fees   # net PnL after fees
-            pnl_percent = ((fill_price / position['entry_price']) - 1) * 100
+            pnl_percent = ((fill_price / avg_entry) - 1) * 100
             position['realized_pnl'] = position.get('realized_pnl', 0.0) + pnl
 
             if pnl >= 0:
@@ -2009,7 +2063,7 @@ Reason: {reason}
             self._log_trade({
                 'id': position.get('trade_id'),
                 'pair': symbol,
-                'entry_price': position['entry_price'],
+                'entry_price': avg_entry,
                 'exit_price': fill_price,
                 'position_size': sell_quantity,
                 'stop_loss': position['stop_loss'],
@@ -2059,7 +2113,8 @@ Reason: {reason}
             if not current_price:
                 continue
 
-            pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
+            avg_entry = position.get('avg_entry', position['entry_price'])
+            pnl_percent = ((current_price - avg_entry) / avg_entry) * 100
 
             if not position.get('partial_taken'):
                 if self.should_exit_early(position, current_price):
@@ -2072,99 +2127,27 @@ Reason: {reason}
                 self.execute_scale_in(position, scale_signal)
                 continue
 
+            candles_in_trade = 0
+            if position.get('entry_time'):
+                elapsed_minutes = (datetime.now() - position['entry_time']).total_seconds() / 60
+                candles_in_trade = int(elapsed_minutes // max(self.primary_candle_minutes, 1))
+
+            exit_signal = self.check_exit(position, {'close': current_price}, candles_in_trade)
+            if exit_signal == 'EXIT':
+                if pnl_percent <= -1.5:
+                    reason = 'HARD_STOP_LOSS'
+                elif candles_in_trade >= self.time_exit_candles and pnl_percent <= 0:
+                    reason = 'TIME_EXIT'
+                else:
+                    reason = 'TAKE_PROFIT'
+                print(f"\n   {reason} {symbol} @ ${current_price:.4f}")
+                self.execute_sell(position, reason)
+                continue
+
             # 1. STOP LOSS (first - always)
             if current_price <= position['stop_loss']:
                 print(f"\n   STOP LOSS {symbol} @ ${current_price:.4f}")
                 self.execute_sell(position, 'STOP_LOSS')
-                continue
-
-            if not position.get('partial_taken') and pnl_percent < 0 and datetime.now() >= position.get('stale_exit_at', datetime.max):
-                print(f"\n   TIME EXIT {symbol} @ ${current_price:.4f} (3 candles and still losing)")
-                self.execute_sell(position, 'TIME_EXIT')
-                continue
-
-            # 2. BREAK-EVEN SHIELD: move SL to entry at 1% profit
-            if pnl_percent >= self.break_even_trigger and not position.get('be_active'):
-                position['stop_loss'] = position['entry_price']
-                position['be_active'] = True
-                print(f"   BREAK-EVEN: {symbol} SL moved to entry ${position['entry_price']:.4f}")
-                self.send_telegram(
-                    f"Break-Even Active\n{symbol}\nSL moved to entry\nProfit: +{pnl_percent:.2f}%"
-                )
-
-            if (
-                pnl_percent >= self.micro_profit_lock_trigger and
-                not position.get('partial_taken') and
-                position.get('entry_type') == 'a_plus'
-            ):
-                partial_qty = position['original_quantity'] * self.partial_tp_percent
-                result = self.execute_sell(position, 'MICRO_PROFIT_LOCK', quantity=partial_qty)
-                if result:
-                    position['partial_taken'] = True
-                    position['runner_active'] = True
-                    position['stop_loss'] = position['entry_price']
-                    print(f"   MICRO PROFIT LOCK {symbol} - secured 50%, SL at entry")
-                continue
-
-            # 3. TRAILING STOP: activates at 1.2% profit, trails 0.5%
-            if pnl_percent >= self.trailing_stop_activation:
-                if not position.get('trailing_stop_active'):
-                    position['trailing_stop_active'] = True
-                    position['highest_price'] = current_price
-                    if position.get('strong_trend') and position.get('atr_value', 0) > 0:
-                        position['trailing_stop_price'] = current_price - (position['atr_value'] * 0.5)
-                    else:
-                        position['trailing_stop_price'] = current_price * (1 - self.trailing_stop_distance / 100)
-                    print(f"   TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
-                    self.send_telegram(
-                        f"Trailing Stop Active\n{symbol}\n"
-                        f"Profit: +{pnl_percent:.2f}%\n"
-                        f"Trail: ${position['trailing_stop_price']:.4f}"
-                    )
-
-                if current_price > position.get('highest_price', 0):
-                    position['highest_price'] = current_price
-                    if position.get('strong_trend') and position.get('atr_value', 0) > 0:
-                        new_trail = current_price - (position['atr_value'] * 0.5)
-                    else:
-                        new_trail = current_price * (1 - self.trailing_stop_distance / 100)
-                    if new_trail > position.get('trailing_stop_price', 0):
-                        position['trailing_stop_price'] = new_trail
-                        print(f"   TRAILING STOP RAISED {symbol} @ ${new_trail:.4f}")
-
-                if position.get('trailing_stop_price') and current_price <= position['trailing_stop_price']:
-                    print(f"\n   TRAILING STOP HIT {symbol} @ ${current_price:.4f}")
-                    self.execute_sell(position, 'TRAILING_STOP')
-                    continue
-
-            # 4. RUNNER: after partial TP, exit if price returns to entry
-            if position.get('runner_active') and current_price <= position['entry_price']:
-                print(f"\n   RUNNER BREAKEVEN EXIT {symbol}")
-                self.execute_sell(position, 'BREAKEVEN_RUNNER')
-                continue
-
-            # 5. Fallback trades use a single TP instead of TP1/TP2 scaling.
-            if position.get('fallback_trade') and current_price >= position['take_profit']:
-                print(f"\n   FALLBACK TAKE PROFIT {symbol} @ ${current_price:.4f}")
-                self.execute_sell(position, 'FALLBACK_TAKE_PROFIT')
-                continue
-
-            # 6. TP1: take 50% off, let the rest run to TP2
-            tp1_target = position.get('tp1_price') or position['take_profit']
-            if not position.get('partial_taken') and current_price >= tp1_target:
-                partial_qty = position['original_quantity'] * self.partial_tp_percent
-                result = self.execute_sell(position, 'PARTIAL_TP1', quantity=partial_qty)
-                if result:
-                    position['partial_taken'] = True
-                    position['runner_active'] = True
-                    position['stop_loss'] = position['entry_price']
-                    print(f"   RUNNER ACTIVE {symbol} - 50% riding to TP2, SL at entry")
-                continue
-
-            # 7. TP2 runner exit
-            if position.get('partial_taken') and current_price >= position['take_profit']:
-                print(f"\n   TP2 HIT {symbol} @ ${current_price:.4f}")
-                self.execute_sell(position, 'TAKE_PROFIT_TP2')
                 continue
 
     # ════════════════════════════════════════════════════════════════════

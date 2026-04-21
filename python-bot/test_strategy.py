@@ -89,12 +89,14 @@ def test_scout_scale_merge_math():
         'quantity': 0.3,
         'original_quantity': 0.3,
         'entry_price': 100.0,
+        'avg_entry': 100.0,
         'stop_loss': 98.5,
         'tp1_price': None,
         'take_profit': 101.0,
         'risk_percent': 0.03,
         'rr_target': 1.0,
         'entry_type': 'scout',
+        'type': 'B+',
         'fallback_trade': False,
         'strong_trend': False,
         'atr_value': 2.0,
@@ -156,6 +158,8 @@ def test_scout_scale_merge_math():
     assert abs(result['target_position_notional'] - 100.0) < 1e-9
     assert abs(result['entry_price'] - expected_avg_entry) < 1e-9
     assert result['entry_type'] == 'a_plus'
+    assert abs(result['avg_entry'] - expected_avg_entry) < 1e-9
+    assert result['type'] == 'A+'
     assert result['scaled_in'] is True
     assert result['scale_in_count'] == 1
     assert abs(result['stop_loss'] - expected_stop) < 1e-9
@@ -177,6 +181,50 @@ def test_position_scaling():
 
     assert abs((scout_quantity * scout_price) + (scale_quantity * scale_price) - 100.0) < 1e-9
     assert 100.0 < avg_entry < 105.0
+
+def test_check_scale_in():
+    trader = SmartTrader.__new__(SmartTrader)
+    decision = trader.check_scale_in(
+        {
+            'avg_entry': 100.0,
+        },
+        {
+            'close': 110.0,
+            'resistance': 110.0,
+            'volume': 120.0,
+            'avg_volume': 100.0,
+        }
+    )
+    blocked = trader.check_scale_in(
+        {
+            'avg_entry': 112.0,
+        },
+        {
+            'close': 110.0,
+            'resistance': 110.0,
+            'volume': 120.0,
+            'avg_volume': 100.0,
+        }
+    )
+
+    assert decision == {'add_size': 0.7}
+    assert blocked is False
+
+
+def test_check_exit():
+    trader = SmartTrader.__new__(SmartTrader)
+    trader.time_exit_candles = 3
+
+    a_plus_position = {'avg_entry': 100.0, 'entry_price': 100.0, 'type': 'A+', 'stop_loss': 98.5}
+    b_plus_position = {'avg_entry': 100.0, 'entry_price': 100.0, 'type': 'B+', 'stop_loss': 98.5}
+    losing_position = {'avg_entry': 100.0, 'entry_price': 100.0, 'type': 'B+', 'stop_loss': 98.5}
+    hard_stop_position = {'avg_entry': 100.0, 'entry_price': 100.0, 'type': 'A+', 'stop_loss': 98.5}
+
+    assert trader.check_exit(a_plus_position, {'close': 102.6}, 1) == 'EXIT'
+    assert abs(a_plus_position['stop_loss'] - 100.0) < 1e-9
+    assert trader.check_exit(b_plus_position, {'close': 101.3}, 1) == 'EXIT'
+    assert trader.check_exit(losing_position, {'close': 99.9}, 3) == 'EXIT'
+    assert trader.check_exit(hard_stop_position, {'close': 98.4}, 1) == 'EXIT'
 
 
 def test_ema20_pullback_context():
@@ -431,6 +479,8 @@ def test_analyze_entry_confirmation_score_gate():
 if __name__ == '__main__':
     test_scout_scale_merge_math()
     test_position_scaling()
+    test_check_scale_in()
+    test_check_exit()
     test_ema20_pullback_context()
     test_market_filter_skipped_for_core_pairs()
     test_check_entry()
