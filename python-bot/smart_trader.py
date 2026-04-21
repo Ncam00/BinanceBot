@@ -1240,6 +1240,16 @@ Reason: {reason}
             return False
         return True
 
+    def get_entry_confirmation_score(self, mtf_bullish_count, volume_ratio, trend_up):
+        score = 0
+        if mtf_bullish_count >= 2:
+            score += 1
+        if volume_ratio > 1.1:
+            score += 1
+        if trend_up:
+            score += 1
+        return score
+
     # ════════════════════════════════════════════════════════════════════
     # BREAKOUT STATE MACHINE
     # ════════════════════════════════════════════════════════════════════
@@ -1567,7 +1577,12 @@ Reason: {reason}
         # ── Extra filters + ADDED: final validation gate ──────────────
         if signal['action'] == 'BUY':
             mtf_bullish_count = self.get_multi_timeframe_count(symbol)
-            allow_breakout_override = signal.get('breakout') and volume_ratio >= 1.2
+            confirmation_score = self.get_entry_confirmation_score(
+                mtf_bullish_count,
+                volume_ratio,
+                context.get('trend_up', False),
+            )
+            allow_breakout_override = signal.get('breakout') and volume_ratio >= 1.1
             if use_market_filter and not self.btc_is_healthy():
                 signal = {
                     'action': 'HOLD',
@@ -1575,15 +1590,15 @@ Reason: {reason}
                     'reason': 'BTC dumping - entry blocked',
                     'score': trade_score,
                 }
-            elif mtf_bullish_count < 2 and not allow_breakout_override:
+            elif confirmation_score < 2 and not allow_breakout_override:
                 signal = {
                     'action': 'HOLD',
                     'strength': 0,
-                    'reason': 'Timeframes not aligned - entry blocked',
+                    'reason': f'Entry confirmation too weak ({confirmation_score}/3) - entry blocked',
                     'score': trade_score,
                 }
-            elif mtf_bullish_count < 2 and allow_breakout_override:
-                print(f"   MTF OVERRIDE: breakout volume spike allows entry with {mtf_bullish_count}/3 bullish")
+            elif confirmation_score < 2 and allow_breakout_override:
+                print(f"   ENTRY OVERRIDE: breakout near resistance allows entry with confirmation score {confirmation_score}/3")
 
             # ADDED: Final setup validation (last gate before trade fires)
             if signal['action'] == 'BUY':
@@ -1630,6 +1645,11 @@ Reason: {reason}
         signal['bb_middle'] = bb['middle']
         signal['volume_ratio'] = volume_ratio
         signal['volume_spike'] = volume_ratio >= 1.2
+        signal['entry_confirmation_score'] = self.get_entry_confirmation_score(
+            self.get_multi_timeframe_count(symbol),
+            volume_ratio,
+            context.get('trend_up', False),
+        )
         signal['strong_trend'] = market_mode == 'TRENDING' and market_type == 'TRENDING' and adx['adx'] >= self.adx_trend_threshold and ema_fast > ema_slow
         signal['early_breakout'] = early_breakout
         signal['ema20'] = ema20

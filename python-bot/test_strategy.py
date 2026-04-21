@@ -234,6 +234,13 @@ def test_market_filter_skipped_for_core_pairs():
     assert not trader.should_skip_market_filter('SOLUSDT')
 
 
+def test_entry_confirmation_score():
+    trader = SmartTrader.__new__(SmartTrader)
+    assert trader.get_entry_confirmation_score(2, 1.15, True) == 3
+    assert trader.get_entry_confirmation_score(2, 1.05, False) == 1
+    assert trader.get_entry_confirmation_score(1, 1.2, True) == 2
+
+
 class FakeAnalyzeMarketFilterTrader(SmartTrader):
     def __init__(self):
         self.daily_profit = 0.0
@@ -317,7 +324,7 @@ class FakeAnalyzeMarketFilterTrader(SmartTrader):
         return True
 
     def get_multi_timeframe_count(self, symbol):
-        return 2
+        return 2 if symbol == 'BTCUSDT' else 1
 
     def btc_is_healthy(self):
         return False
@@ -338,12 +345,32 @@ def test_analyze_market_filter_skip_for_core_pairs():
     assert sol_signal['reason'] == 'BTC dumping - entry blocked'
 
 
+class FakeAnalyzeEntryScoreTrader(FakeAnalyzeMarketFilterTrader):
+    def btc_is_healthy(self):
+        return True
+
+
+def test_analyze_entry_confirmation_score_gate():
+    trader = FakeAnalyzeEntryScoreTrader()
+
+    btc_signal = trader.analyze('BTCUSDT')
+    sol_signal = trader.analyze('SOLUSDT')
+
+    assert btc_signal['action'] == 'BUY'
+    assert btc_signal['entry_confirmation_score'] >= 2
+    assert sol_signal['action'] == 'HOLD'
+    assert sol_signal['entry_confirmation_score'] == 1
+    assert sol_signal['reason'] == 'Entry confirmation too weak (1/3) - entry blocked'
+
+
 if __name__ == '__main__':
     test_scout_scale_merge_math()
     test_position_scaling()
     test_ema20_pullback_context()
     test_market_filter_skipped_for_core_pairs()
+    test_entry_confirmation_score()
     test_analyze_market_filter_skip_for_core_pairs()
+    test_analyze_entry_confirmation_score_gate()
 
     trader = SmartTrader()
     symbols = ['ETHUSDT', 'BTCUSDT']
