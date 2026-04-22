@@ -1952,14 +1952,20 @@ Reason: {reason}
                     signal['poc_confluence'] = True
                     signal['strength'] = min(signal['strength'] * 1.12, 1.0)
                     print(f"   POC CONFLUENCE: Near institutional support @ ${poc_price:.4f} — boosting")
-                # VAH filter: block at resistance in ranging markets
-                elif vah is not None and price > vah * 0.998 and market_type == 'RANGING':
+                # VAH filter: block at resistance in ranging markets (but allow breakouts)
+                elif vah is not None and price > vah * 0.998 and market_type == 'RANGING' and not breakout:
                     signal = {
                         'action': 'HOLD',
                         'strength': 0,
                         'reason': f'Price at POC value area high — resistance zone (${vah:.4f})',
                         'score': trade_score,
                     }
+
+            # ── VALUE AREA LOW (VAL) DETECTION ────────────────────────
+            if signal['action'] == 'BUY' and val is not None and abs(price - val) / price < 0.005:
+                print(f"   VOLUME CONFLUENCE: Price at Value Area Low — strong buy zone (${val:.4f})")
+                signal['volume_confluence'] = True
+                signal['strength'] = min(signal['strength'] * 1.10, 1.0)
 
             # ── BREAK OF STRUCTURE CONFIRMATION ────────────────────────
             if signal['action'] == 'BUY' and market_structure['break_of_structure']:
