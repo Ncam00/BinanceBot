@@ -96,7 +96,7 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend'):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend', recent_volumes=None):
         sig = self.get(pair)
 
         # ADX filter — skip choppy markets
@@ -145,6 +145,18 @@ class EntryEngine:
         confidence = self.get_confidence(price, resistance, volume, avg_volume, close, open_price, ma) if sig['active'] else 0
 
         # ── PHASE 1: CLASSIFY ────────────────────────────────────────────────
+        entry_type = None
+
+        # Squeeze: tight range + rising volume → anticipatory small entry
+        if not sig['active'] and entry_type is None:
+            tight_range = market_condition == 'range'
+            rising_volume = (
+                recent_volumes is not None and len(recent_volumes) >= 3 and
+                recent_volumes[-1] > recent_volumes[-2] > recent_volumes[-3]
+            )
+            if tight_range and rising_volume:
+                entry_type = 'SQUEEZE'
+
         if not sig['active'] and price_near_resistance and higher_lows_forming:
             scout_score = sum([
                 1,                              # near resistance
@@ -203,6 +215,10 @@ class EntryEngine:
                     entry_type = None
 
         # ── ACT ──────────────────────────────────────────────────────────────
+        if entry_type == 'SQUEEZE':
+            return {'action': 'CANDIDATE_SCOUT', 'pair': pair, 'level': resistance,
+                    'confidence': 2, 'price': price, 'trade_type': 'SCOUT'}
+
         if entry_type == 'SCOUT':
             return {'action': 'CANDIDATE_SCOUT', 'pair': pair, 'level': resistance,
                     'confidence': scout_score, 'price': price, 'trade_type': 'SCOUT'}
@@ -252,6 +268,7 @@ class EntryEngine:
                 ema20=data.get('ema20'),
                 support=data.get('support'),
                 market_condition=data.get('market_condition', 'trend'),
+                recent_volumes=data.get('recent_volumes'),
             )
             atr = data.get('atr', 0)
             atr_avg = data.get('atr_avg', 0)
@@ -693,6 +710,7 @@ class SmartTrader:
                 'atr':               atr_val,
                 'atr_avg':           atr_avg,
                 'lows':              df['low'].tolist()[-5:],
+                'recent_volumes':    volumes[-5:],
                 'bullish_timeframes': self.count_bullish_timeframes(symbol, price_now),
                 'market_condition':  market_condition,
             }
