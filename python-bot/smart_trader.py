@@ -136,6 +136,9 @@ class SmartTrader:
         self.last_trade_time = None
         self.last_reset_date = datetime.now().date()
         self.last_week_reset_key = self._get_week_key()
+        self.htf_cache = {}
+        self.htf_cache_time = {}
+        self.htf_cache_ttl = 14400  # 4 hours in seconds
 
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
@@ -1645,6 +1648,11 @@ Reason: {reason}
         Fetch weekly and daily candles to find major S/R levels.
         These are the levels institutions trade around.
         """
+        now = time.time()
+        if (symbol in self.htf_cache and
+                now - self.htf_cache_time.get(symbol, 0) < self.htf_cache_ttl):
+            return self.htf_cache[symbol]
+
         levels = {
             'weekly_high': None,
             'weekly_low': None,
@@ -1676,6 +1684,8 @@ Reason: {reason}
         except Exception as e:
             print(f"   HTF levels error {symbol}: {e}")
 
+        self.htf_cache[symbol] = levels
+        self.htf_cache_time[symbol] = now
         return levels
 
     def check_htf_proximity(self, price, levels, buffer_percent=0.003):
@@ -2660,6 +2670,28 @@ Reason: {reason}
         with open(log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(trade_data, ensure_ascii=True) + "\n")
 
+    def write_status(self):
+        status = {
+            'daily_profit': round(self.daily_profit, 2),
+            'daily_loss': round(self.daily_loss, 2),
+            'daily_trades': self.daily_trades,
+            'open_positions': len(self.open_positions),
+            'last_update': datetime.now().strftime('%H:%M:%S'),
+            'positions': [
+                {
+                    'symbol': p['symbol'],
+                    'entry': p['entry_price'],
+                    'pnl_pct': round(
+                        ((self.get_price(p['symbol']) or p['entry_price'])
+                         - p['entry_price']) / p['entry_price'] * 100, 2
+                    )
+                }
+                for p in self.open_positions
+            ]
+        }
+        with open('bot_status.json', 'w', encoding='utf-8') as f:
+            json.dump(status, f)
+
     # ════════════════════════════════════════════════════════════════════
     # POSITION MANAGEMENT
     # ════════════════════════════════════════════════════════════════════
@@ -2884,6 +2916,7 @@ Reason: {reason}
                     last_heartbeat = datetime.now()
 
                 self.check_positions()
+                self.write_status()
 
                 if len(self.open_positions) >= self.max_positions:
                     print("X Skipping scan due to open position limit")
