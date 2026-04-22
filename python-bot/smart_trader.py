@@ -173,6 +173,15 @@ class EntryEngine:
         if market_mode == 'CHOPPY' and entry_type == 'B+':
             entry_type = None
 
+        if entry_type in ('A+', 'B+'):
+            level = sig['level'] if sig['active'] else resistance
+            tp_pct = 0.03 if entry_type == 'A+' else 0.0125
+            tp_distance = level * tp_pct
+            price_moved = price - level
+            if price_moved > 0.8 * tp_distance:
+                print(f"Skipping {pair}: price already moved {price_moved:.2f} > 80% of TP distance ({tp_distance:.2f})")
+                entry_type = None
+
         # Range market: mean reversion only → block A+ breakouts
         if market_condition == 'range' and entry_type == 'A+':
             print(f"Skipping {pair}: range market — A+ breakout blocked, B+ only")
