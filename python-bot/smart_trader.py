@@ -1446,7 +1446,8 @@ class SmartTrader:
                             candle['close'].iloc[-1] > resistance
                         )
                         not_too_extended = current_price <= position['entry_price'] * 1.01
-                        if breakout_confirmed and not_too_extended:
+                        close_above_entry = candle['close'].iloc[-1] > position['entry_price']
+                        if breakout_confirmed and not_too_extended and close_above_entry:
                             balance  = self.get_balance()
                             add_qty  = round((balance * 0.10) / current_price, 6)
                             if add_qty * current_price >= 10:
