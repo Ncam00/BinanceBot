@@ -146,7 +146,13 @@ class EntryEngine:
 
         # ── PHASE 1: CLASSIFY ────────────────────────────────────────────────
         if not sig['active'] and price_near_resistance and higher_lows_forming:
-            entry_type = 'SCOUT'
+            scout_score = sum([
+                1,                              # near resistance
+                1,                              # higher lows
+                volume > avg_volume * 0.9,      # volume building
+                price > ma,                     # above trend
+            ])
+            entry_type = 'SCOUT' if scout_score >= 2 else None
         elif sig['active'] and breakout_confirmed and confidence >= 4:
             entry_type = 'A+'
         elif sig['active'] and breakout_confirmed and confidence >= 3:
@@ -198,7 +204,8 @@ class EntryEngine:
 
         # ── ACT ──────────────────────────────────────────────────────────────
         if entry_type == 'SCOUT':
-            return {'action': 'PRE_BREAKOUT', 'pair': pair, 'level': resistance}
+            return {'action': 'CANDIDATE_SCOUT', 'pair': pair, 'level': resistance,
+                    'confidence': scout_score, 'price': price, 'trade_type': 'SCOUT'}
 
         if entry_type == 'A+':
             return {'action': 'CANDIDATE', 'pair': pair, 'level': sig['level'],
@@ -258,7 +265,7 @@ class EntryEngine:
             if result['action'] == 'HOLD':
                 print(f"Skipping {pair} because: {result.get('reason', 'HOLD')}")
                 signals.append(result)
-            elif result['action'] in ('CANDIDATE', 'CANDIDATE_SMALL'):
+            elif result['action'] in ('CANDIDATE', 'CANDIDATE_SMALL', 'CANDIDATE_SCOUT'):
                 candidates.append(result)
             else:
                 signals.append(result)
@@ -1195,12 +1202,15 @@ class SmartTrader:
                 quantity = (balance * 0.15) / price
             elif trade_type == 'B+':
                 quantity = (balance * 0.07) / price
+            elif trade_type == 'SCOUT':
+                quantity = (balance * 0.05) / price   # 30% of intended; add 70% on confirmation
             elif small_position:
                 quantity = (balance * 0.05) / price
             else:
                 risk_percent = base_risk if strong_setup else base_risk * 0.5
                 quantity = self.calculate_position_size(balance, price, stop_loss_price, risk_percent)
-            print(f"   📐 {trade_type} setup → size {'15%' if trade_type == 'A+' else '7%' if trade_type == 'B+' else '5%'} of balance")
+            size_label = {'A+': '15%', 'B+': '7%', 'SCOUT': '5% (scout)'}
+            print(f"   📐 {trade_type} setup → size {size_label.get(trade_type, '5%')} of balance")
 
             if quantity == 0 or quantity * price < 10:
                 print(f"   ⚠️ Position size too small - skipping")
@@ -1250,6 +1260,8 @@ class SmartTrader:
                 'entry_fee': entry_fee,
                 'entry_slippage': fill_price - price,
                 'realized_pnl': 0.0,
+                'position_type': trade_type,
+                'added': False,
                 'partial_taken': False,
                 'runner_active': False,
                 'be_active': False,
@@ -1420,7 +1432,33 @@ class SmartTrader:
                 self.execute_sell(position, 'TIMEOUT')
                 continue
 
-            # 4. BREAK-EVEN SHIELD: move SL to entry at 1% profit
+            # 4. SCOUT ADD-ON: scale to full position when breakout confirms
+            if position.get('position_type') == 'SCOUT' and not position.get('added'):
+                try:
+                    candle = self.get_candles(symbol, '15m', 3)
+                    if candle is not None and len(candle) >= 2:
+                        vol     = candle['volume'].iloc[-1]
+                        avg_vol = candle['volume'].iloc[:-1].mean()
+                        resistance = position.get('entry_resistance', position['entry_price'] * 1.005)
+                        breakout_confirmed = (
+                            current_price > resistance and
+                            vol > avg_vol * 1.2 and
+                            candle['close'].iloc[-1] > resistance
+                        )
+                        not_too_extended = current_price <= position['entry_price'] * 1.01
+                        if breakout_confirmed and not_too_extended:
+                            balance  = self.get_balance()
+                            add_qty  = round((balance * 0.10) / current_price, 6)
+                            if add_qty * current_price >= 10:
+                                self.execute_trade(symbol, SIDE_BUY, add_qty, current_price)
+                                position['quantity'] += add_qty
+                                position['position_type'] = 'A+'
+                                position['added'] = True
+                                print(f"   ➕ SCOUT ADD-ON {symbol}: +{add_qty} @ ${current_price:.4f} → upgraded to A+")
+                except Exception as e:
+                    print(f"   ⚠️ Scout add-on error: {e}")
+
+            # 5. BREAK-EVEN SHIELD: move SL to entry at 1% profit
             if pnl_percent >= self.break_even_trigger and not position.get('be_active'):
                 position['stop_loss'] = position['entry_price']
                 position['be_active'] = True
