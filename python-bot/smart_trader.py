@@ -96,7 +96,7 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None):
         sig = self.get(pair)
 
         # ADX filter — skip choppy markets
@@ -169,6 +169,15 @@ class EntryEngine:
         if market_mode == 'CHOPPY' and entry_type == 'B+':
             entry_type = None
 
+        if entry_type in ('A+', 'B+') and support is not None:
+            range_size = resistance - support
+            if range_size > 0:
+                price_position = (price - support) / range_size
+                price_in_middle_of_range = 0.3 < price_position < 0.7
+                if price_in_middle_of_range:
+                    print(f"Skipping {pair}: price in middle of range ({price_position:.0%} of range)")
+                    entry_type = None
+
         # ── ACT ──────────────────────────────────────────────────────────────
         if entry_type == 'SCOUT':
             return {'action': 'PRE_BREAKOUT', 'pair': pair, 'level': resistance}
@@ -216,6 +225,7 @@ class EntryEngine:
                 atr_avg=data.get('atr_avg'),
                 bullish_timeframes=data.get('bullish_timeframes', 0),
                 ema20=data.get('ema20'),
+                support=data.get('support'),
             )
             atr = data.get('atr', 0)
             atr_avg = data.get('atr_avg', 0)
