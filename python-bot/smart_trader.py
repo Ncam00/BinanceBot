@@ -1348,6 +1348,100 @@ Reason: {reason}
         }
 
     # ════════════════════════════════════════════════════════════════════
+    # HIGHER TIMEFRAME LEVELS
+    # ════════════════════════════════════════════════════════════════════
+    def get_higher_timeframe_levels(self, symbol):
+        """
+        Fetch weekly and daily candles to find major S/R levels.
+        These are the levels institutions trade around.
+        """
+        levels = {
+            'weekly_high': None,
+            'weekly_low': None,
+            'daily_high': None,
+            'daily_low': None,
+            'prev_weekly_high': None,
+            'prev_weekly_low': None,
+            'prev_daily_high': None,
+            'prev_daily_low': None,
+        }
+
+        try:
+            # Daily — last 14 candles
+            daily_df = self.get_candles(symbol, '1d', 14)
+            if daily_df is not None and len(daily_df) >= 3:
+                levels['daily_high'] = daily_df['high'].iloc[-2]   # yesterday's high
+                levels['daily_low'] = daily_df['low'].iloc[-2]     # yesterday's low
+                levels['prev_daily_high'] = daily_df['high'].iloc[-3]
+                levels['prev_daily_low'] = daily_df['low'].iloc[-3]
+
+            # Weekly — last 4 candles
+            weekly_df = self.get_candles(symbol, '1w', 4)
+            if weekly_df is not None and len(weekly_df) >= 3:
+                levels['weekly_high'] = weekly_df['high'].iloc[-2]  # last week's high
+                levels['weekly_low'] = weekly_df['low'].iloc[-2]    # last week's low
+                levels['prev_weekly_high'] = weekly_df['high'].iloc[-3]
+                levels['prev_weekly_low'] = weekly_df['low'].iloc[-3]
+
+        except Exception as e:
+            print(f"   HTF levels error {symbol}: {e}")
+
+        return levels
+
+    def check_htf_proximity(self, price, levels, buffer_percent=0.003):
+        """
+        Check if price is near a higher timeframe level.
+        buffer_percent = 0.3% — within this = 'at the level'
+        Returns dict of which levels price is near and whether
+        it's a buy zone or sell zone.
+        """
+        result = {
+            'near_weekly_high': False,
+            'near_weekly_low': False,
+            'near_daily_high': False,
+            'near_daily_low': False,
+            'htf_buy_zone': False,
+            'htf_sell_zone': False,
+            'htf_context': 'NEUTRAL',
+            'closest_level': None,
+            'closest_distance_pct': None,
+        }
+
+        if not price or price <= 0:
+            return result
+
+        closest_dist = float('inf')
+        closest_name = None
+
+        for level_name, level_price in levels.items():
+            if level_price is None or level_price <= 0:
+                continue
+
+            dist_pct = abs(price - level_price) / price
+
+            if dist_pct < closest_dist:
+                closest_dist = dist_pct
+                closest_name = level_name
+
+            if dist_pct <= buffer_percent:
+                result[f'near_{level_name}'] = True
+
+                # Low levels = potential buy zones
+                if 'low' in level_name:
+                    result['htf_buy_zone'] = True
+                    result['htf_context'] = 'SUPPORT'
+
+                # High levels = potential sell/resistance zones
+                if 'high' in level_name:
+                    result['htf_sell_zone'] = True
+                    result['htf_context'] = 'RESISTANCE'
+
+        result['closest_level'] = closest_name
+        result['closest_distance_pct'] = round(closest_dist * 100, 3)
+
+        return result
+
+    # ════════════════════════════════════════════════════════════════════
     # MAIN ANALYSIS (LOCATION-BASED)
     # ════════════════════════════════════════════════════════════════════
     def analyze(self, symbol):
