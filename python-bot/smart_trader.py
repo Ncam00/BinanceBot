@@ -2284,7 +2284,7 @@ Reason: {reason}
     # ════════════════════════════════════════════════════════════════════
     def sync_existing_positions(self):
         print("\n   Syncing existing positions...")
-        known_entries = {'BTCUSDT': 72753.0}
+        known_entries = {}  # clear old 72753 entry — update this if you have open positions
         try:
             account = self.client.get_account()
             for balance in account['balances']:
