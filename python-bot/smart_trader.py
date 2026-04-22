@@ -96,7 +96,7 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend'):
         sig = self.get(pair)
 
         # ADX filter — skip choppy markets
@@ -169,6 +169,11 @@ class EntryEngine:
         if market_mode == 'CHOPPY' and entry_type == 'B+':
             entry_type = None
 
+        # Range market: mean reversion only → block A+ breakouts
+        if market_condition == 'range' and entry_type == 'A+':
+            print(f"Skipping {pair}: range market — A+ breakout blocked, B+ only")
+            entry_type = None
+
         if entry_type in ('A+', 'B+') and support is not None:
             range_size = resistance - support
             if range_size > 0:
@@ -226,6 +231,7 @@ class EntryEngine:
                 bullish_timeframes=data.get('bullish_timeframes', 0),
                 ema20=data.get('ema20'),
                 support=data.get('support'),
+                market_condition=data.get('market_condition', 'trend'),
             )
             atr = data.get('atr', 0)
             atr_avg = data.get('atr_avg', 0)
@@ -643,6 +649,13 @@ class SmartTrader:
             volumes = df['volume'].tolist()
             adx = self.calculate_adx(df)
             atr_series = df['high'] - df['low']   # simplified ATR proxy for avg
+            bb = self.calculate_bollinger(df['close'])
+            atr_val  = adx['atr']
+            atr_avg  = atr_series.rolling(14).mean().iloc[-1]
+            bb_width = bb['upper'] - bb['lower']
+            price_now = df['close'].iloc[-1]
+            bb_width_small = bb_width < price_now * 0.02   # BB < 2% of price
+            market_condition = 'range' if (atr_val < atr_avg * 0.8 and bb_width_small) else 'trend'
             market_data[symbol] = {
                 'price':      df['close'].iloc[-1],
                 'open':       df['open'].iloc[-1],
@@ -657,10 +670,11 @@ class SmartTrader:
                 'ma50':       self.get_ma(closes, 50),
                 'ema20':      self.calculate_ema(df['close'], 20),
                 'adx':        adx['adx'],
-                'atr':        adx['atr'],
-                'atr_avg':             atr_series.rolling(14).mean().iloc[-1],
-                'lows':                df['low'].tolist()[-5:],
-                'bullish_timeframes':  self.count_bullish_timeframes(symbol, df['close'].iloc[-1]),
+                'atr':               atr_val,
+                'atr_avg':           atr_avg,
+                'lows':              df['low'].tolist()[-5:],
+                'bullish_timeframes': self.count_bullish_timeframes(symbol, price_now),
+                'market_condition':  market_condition,
             }
         return market_data
 
