@@ -1414,7 +1414,13 @@ class SmartTrader:
                 self.execute_sell(position, 'TIMEOUT_LOSS')
                 continue
 
-            # 3. BREAK-EVEN SHIELD: move SL to entry at 1% profit
+            # 3. HARD TIMEOUT: close any trade still open after 4 candles (60 min)
+            if candles_open > 4:
+                print(f"\n   ⏱️ TIMEOUT {symbol}: {candles_open} candles open → closing (PNL {pnl_percent:.2f}%)")
+                self.execute_sell(position, 'TIMEOUT')
+                continue
+
+            # 4. BREAK-EVEN SHIELD: move SL to entry at 1% profit
             if pnl_percent >= self.break_even_trigger and not position.get('be_active'):
                 position['stop_loss'] = position['entry_price']
                 position['be_active'] = True
