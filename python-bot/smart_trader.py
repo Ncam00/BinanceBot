@@ -96,7 +96,7 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend', recent_volumes=None):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend', recent_volumes=None, range_high=None, is_range=False):
         sig = self.get(pair)
 
         # ADX filter — skip choppy markets
@@ -149,12 +149,17 @@ class EntryEngine:
 
         # Squeeze: tight range + rising volume → anticipatory small entry
         if not sig['active'] and entry_type is None:
-            tight_range = market_condition == 'range'
+            tight_range = market_condition == 'range' or is_range
             rising_volume = (
                 recent_volumes is not None and len(recent_volumes) >= 3 and
                 recent_volumes[-1] > recent_volumes[-2] > recent_volumes[-3]
             )
-            if tight_range and rising_volume:
+            range_breakout = (
+                range_high is not None and
+                close > range_high and
+                volume > avg_volume * 1.2
+            )
+            if tight_range and (rising_volume or range_breakout):
                 entry_type = 'SQUEEZE'
 
         if not sig['active'] and price_near_resistance and higher_lows_forming:
@@ -269,6 +274,8 @@ class EntryEngine:
                 support=data.get('support'),
                 market_condition=data.get('market_condition', 'trend'),
                 recent_volumes=data.get('recent_volumes'),
+                range_high=data.get('range_high'),
+                is_range=data.get('is_range', False),
             )
             atr = data.get('atr', 0)
             atr_avg = data.get('atr_avg', 0)
@@ -291,13 +298,14 @@ class EntryEngine:
             top_pair = max(candidates, key=lambda x: x['confidence'])
             self.get(top_pair['pair'])['active'] = False
             small = top_pair['action'] == 'CANDIDATE_SMALL'
-            top_atr = market_data.get(top_pair['pair'], {}).get('atr')
-            self.execute_trade(top_pair['pair'], top_pair['price'], small_position=small, atr=top_atr, trade_type=top_pair.get('trade_type', 'A+'))
+            top_atr       = market_data.get(top_pair['pair'], {}).get('atr')
+            top_range_high = market_data.get(top_pair['pair'], {}).get('range_high')
+            self.execute_trade(top_pair['pair'], top_pair['price'], small_position=small, atr=top_atr, trade_type=top_pair.get('trade_type', 'A+'), range_high=top_range_high)
             signals.append({**top_pair, 'action': 'BUY'})
 
         return signals
 
-    def execute_trade(self, pair, price, small_position=False, atr=None, trade_type='A+'):
+    def execute_trade(self, pair, price, small_position=False, atr=None, trade_type='A+', range_high=None):
         if not self.execute_fn:
             print(f"EXECUTING TRADE: {pair} at {price} ({trade_type}{'  small' if small_position else ''})")
             return
@@ -310,6 +318,7 @@ class EntryEngine:
             'small_position': small_position,
             'atr': atr,
             'trade_type': trade_type,
+            'range_high': range_high,
         }
         self.execute_fn(pair, signal)
 
@@ -692,6 +701,11 @@ class SmartTrader:
             bb_width = bb['upper'] - bb['lower']
             price_now = df['close'].iloc[-1]
             bb_width_small = bb_width < price_now * 0.02   # BB < 2% of price
+            range_high    = df['high'].rolling(20).max().iloc[-1]
+            range_low     = df['low'].rolling(20).min().iloc[-1]
+            range_size    = range_high - range_low
+            volatility_low = atr_val < atr_avg
+            is_range      = (range_size < price_now * 0.03) and volatility_low
             market_condition = 'range' if (atr_val < atr_avg * 0.8 and bb_width_small) else 'trend'
             market_data[symbol] = {
                 'price':      df['close'].iloc[-1],
@@ -713,6 +727,8 @@ class SmartTrader:
                 'recent_volumes':    volumes[-5:],
                 'bullish_timeframes': self.count_bullish_timeframes(symbol, price_now),
                 'market_condition':  market_condition,
+                'range_high':        range_high,
+                'is_range':          is_range,
             }
         return market_data
 
@@ -1280,6 +1296,7 @@ class SmartTrader:
                 'realized_pnl': 0.0,
                 'position_type': trade_type,
                 'added': False,
+                'range_high': signal.get('range_high'),
                 'tp1': fill_price * 1.010,
                 'tp2': fill_price * 1.020,
                 'tp3': fill_price * 1.025,
