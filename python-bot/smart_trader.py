@@ -1348,6 +1348,83 @@ Reason: {reason}
             'swing_lows': [s['price'] for s in swing_lows[-3:]],
         }
 
+    # ════════════════════════════════════════════════════════════════════
+    # CANDLESTICK PATTERN DETECTION
+    # ════════════════════════════════════════════════════════════════════
+    def detect_candle_patterns(self, df):
+        """
+        Detect high-probability candlestick patterns.
+        Uses last 3 candles only — recent patterns matter most.
+        
+        Returns:
+            patterns: dict with True/False for each pattern detected
+        """
+        if len(df) < 3:
+            return {}
+
+        c = df.iloc[-1]   # current
+        p = df.iloc[-2]   # previous
+        pp = df.iloc[-3]  # two back
+
+        c_body = abs(c['close'] - c['open'])
+        p_body = abs(p['close'] - p['open'])
+        c_range = c['high'] - c['low']
+        p_range = p['high'] - p['low']
+
+        c_bull = c['close'] > c['open']
+        p_bull = p['close'] > p['open']
+
+        patterns = {
+            'hammer': False,
+            'shooting_star': False,
+            'bullish_engulfing': False,
+            'bearish_engulfing': False,
+            'doji': False,
+            'morning_star': False,
+        }
+
+        if c_range > 0:
+            lower_wick = (min(c['open'], c['close']) - c['low']) / c_range
+            upper_wick = (c['high'] - max(c['open'], c['close'])) / c_range
+            body_ratio = c_body / c_range
+
+            # Hammer: small body, long lower wick, at support
+            if (lower_wick >= 0.6 and upper_wick <= 0.1
+                    and body_ratio <= 0.3):
+                patterns['hammer'] = True
+
+            # Shooting star: small body, long upper wick, at resistance
+            if (upper_wick >= 0.6 and lower_wick <= 0.1
+                    and body_ratio <= 0.3):
+                patterns['shooting_star'] = True
+
+            # Doji: very small body
+            if body_ratio <= 0.1:
+                patterns['doji'] = True
+
+        # Bullish engulfing: current green candle body fully wraps previous red
+        if (c_bull and not p_bull and
+                c['open'] < p['close'] and
+                c['close'] > p['open']):
+            patterns['bullish_engulfing'] = True
+
+        # Bearish engulfing: current red candle body fully wraps previous green
+        if (not c_bull and p_bull and
+                c['open'] > p['close'] and
+                c['close'] < p['open']):
+            patterns['bearish_engulfing'] = True
+
+        # Morning star: red candle, small doji/body, green candle
+        pp_bear = pp['close'] < pp['open']
+        pp_body = abs(pp['close'] - pp['open'])
+        if (pp_bear and
+                p_body < pp_body * 0.3 and
+                c_bull and
+                c['close'] > (pp['open'] + pp['close']) / 2):
+            patterns['morning_star'] = True
+
+        return patterns
+
     def check_entry(self, symbol, data, btc_bias, position):
         price = data['close']
         ema20 = data['ema20']
@@ -1681,6 +1758,12 @@ Reason: {reason}
         print(f"   {symbol} Structure: {market_structure['structure']} | "
               f"BOS: {market_structure['break_of_structure']}")
         
+        # ── CANDLESTICK PATTERN DETECTION ─────────────────────────
+        candle_patterns = self.detect_candle_patterns(analysis_df)
+        active_patterns = [p for p, detected in candle_patterns.items() if detected]
+        if active_patterns:
+            print(f"   {symbol} Patterns: {', '.join(active_patterns)}")
+        
         # ── VOLUME PROFILE & POINT OF CONTROL ──────────────────────
         poc_price, vah, val = self.get_volume_poc(analysis_df, lookback=48)
         if poc_price:
@@ -1944,6 +2027,21 @@ Reason: {reason}
                     'score': trade_score,
                 }
 
+            # ── CANDLESTICK PATTERN CONFIRMATION ────────────────────────
+            if signal['action'] == 'BUY':
+                # Bullish patterns boost
+                if candle_patterns.get('bullish_engulfing') or candle_patterns.get('morning_star'):
+                    signal['bullish_pattern'] = True
+                    signal['strength'] = min(signal['strength'] * 1.08, 1.0)
+                    pattern_list = [p for p in ['bullish_engulfing', 'morning_star'] if candle_patterns.get(p)]
+                    print(f"   BULLISH PATTERN: {', '.join(pattern_list)} — boosting entry")
+                
+                # Hammer at support = strong buy
+                if candle_patterns.get('hammer') and market_structure['structure'] == 'BULLISH':
+                    signal['hammer_at_support'] = True
+                    signal['strength'] = min(signal['strength'] * 1.12, 1.0)
+                    print(f"   HAMMER AT SUPPORT: Strong reversal signal")
+
             # ── VOLUME POC FILTER (Institutional Levels) ──────────────────
             if signal['action'] == 'BUY' and poc_price is not None:
                 dist_to_poc_pct = abs(price - poc_price) / price
@@ -2039,6 +2137,12 @@ Reason: {reason}
         signal['poc_price'] = poc_price
         signal['vah'] = vah
         signal['val'] = val
+        signal['candle_patterns'] = candle_patterns
+        signal['hammer'] = candle_patterns.get('hammer', False)
+        signal['bullish_engulfing'] = candle_patterns.get('bullish_engulfing', False)
+        signal['morning_star'] = candle_patterns.get('morning_star', False)
+        signal['shooting_star'] = candle_patterns.get('shooting_star', False)
+        signal['doji'] = candle_patterns.get('doji', False)
 
         if signal['action'] == 'BUY':
             expected_move = self.get_expected_move_percent(entry_price, resistance, atr_current, breakout)
