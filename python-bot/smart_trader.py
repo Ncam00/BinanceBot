@@ -1543,6 +1543,8 @@ Reason: {reason}
         if symbol not in self.symbol_state:
             self.symbol_state[symbol] = {
                 'waiting_for_retest': False,
+                'breakout_detected': False,
+                'retest_pending': False,
                 'breakout_level': None,
                 'breakout_direction': None,
                 'retest_candles': 0,
@@ -1552,6 +1554,8 @@ Reason: {reason}
     def reset_breakout_state(self, symbol):
         self.symbol_state[symbol] = {
             'waiting_for_retest': False,
+            'breakout_detected': False,
+            'retest_pending': False,
             'breakout_level': None,
             'breakout_direction': None,
             'retest_candles': 0
@@ -1881,6 +1885,8 @@ Reason: {reason}
         volume_now = analysis_df['volume'].iloc[-1]
         if market_type == 'TRENDING' and price > resistance and volume_now > avg_volume * 1.2 and not state['waiting_for_retest'] and not compression_setup and not strong_breakout and trade_score < 3:
             state['waiting_for_retest'] = True
+            state['breakout_detected'] = True
+            state['retest_pending'] = True
             state['breakout_level'] = resistance
             state['breakout_direction'] = 'LONG'
             state['retest_candles'] = 0
@@ -1910,8 +1916,10 @@ Reason: {reason}
                         strong_breakout = True
                         support_override = state['breakout_level']
                         clear_breakout_wait = True
+                        state['retest_pending'] = False
                         entry_reason = f"BREAKOUT PULLBACK: Continuation confirmed @ ${state['breakout_level']:.4f}"
                     else:
+                        state['retest_pending'] = True
                         retest_reason = 'Pullback zone reached - waiting for continuation candle'
                 else:
                     retest_reason = f"Watching retest at ${state['breakout_level']:.4f}"
@@ -2728,15 +2736,28 @@ Reason: {reason}
                 print(f"   BREAK-EVEN: {symbol} SL moved to entry")
                 self.send_telegram(f"Break-Even Active\n{symbol}\n+{pnl_percent:.2f}%")
 
-            # 4. TIME EXIT — no profit after 3 candles (45 min)
+            # 4. SMART TIME EXIT — tiered by candles elapsed
             candles_in_trade = 0
             if position.get('entry_time'):
                 elapsed = (datetime.now() - position['entry_time']).total_seconds() / 60
                 candles_in_trade = int(elapsed // self.primary_candle_minutes)
 
+            # Tier 1: gone wrong fast — exit if down > 1% within first candle
+            if candles_in_trade <= 1 and pnl_percent < -1.0:
+                print(f"\n   TIME EXIT (fast) {symbol} @ ${current_price:.4f} ({pnl_percent:.2f}% in {candles_in_trade} candle)")
+                self.execute_sell(position, 'TIME_EXIT_FAST')
+                continue
+
+            # Tier 2: stagnant — no profit after 3 candles (45 min)
             if candles_in_trade >= self.time_exit_candles and pnl_percent <= 0:
-                print(f"\n   TIME EXIT {symbol} @ ${current_price:.4f} ({candles_in_trade} candles, no profit)")
+                print(f"\n   TIME EXIT (stagnant) {symbol} @ ${current_price:.4f} ({candles_in_trade} candles, {pnl_percent:.2f}%)")
                 self.execute_sell(position, 'TIME_EXIT')
+                continue
+
+            # Tier 3: slow mover — barely profitable after 6 candles (90 min)
+            if candles_in_trade >= self.time_exit_candles * 2 and pnl_percent < 0.5:
+                print(f"\n   TIME EXIT (slow) {symbol} @ ${current_price:.4f} ({candles_in_trade} candles, only {pnl_percent:.2f}%)")
+                self.execute_sell(position, 'TIME_EXIT_SLOW')
                 continue
 
             # 5. SOFT EXIT — losing + weak momentum

@@ -21,8 +21,8 @@ client = Client(
 )
 
 TRADING_PAIRS = [
-    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
-    'AVAXUSDT', 'LINKUSDT', 'ADAUSDT', 'DOTUSDT', 'FETUSDT', 'NEARUSDT'
+    'BTCUSDT', 'ETHUSDT',
+    
 ]
 
 DASHBOARD_HTML = """
