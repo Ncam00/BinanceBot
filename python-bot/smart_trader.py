@@ -1429,7 +1429,25 @@ class SmartTrader:
                     f"🛡️ Break-Even Active\n{symbol}\nSL moved to entry"
                 )
 
-            # 3. TRAILING STOP: activates at 1.5% profit, trails 0.8%
+            # 5. RSI OVERBOUGHT EXIT: take profit when RSI rolls over from overbought
+            try:
+                rsi_df = self.get_candles(symbol, '15m', 20)
+                if rsi_df is not None and len(rsi_df) >= 16:
+                    rsi_series = (100 - (100 / (1 + (
+                        rsi_df['close'].diff().where(lambda d: d > 0, 0).rolling(14).mean() /
+                        (-rsi_df['close'].diff().where(lambda d: d < 0, 0)).rolling(14).mean()
+                    )))).dropna()
+                    if len(rsi_series) >= 2:
+                        current_rsi = rsi_series.iloc[-1]
+                        prev_rsi    = rsi_series.iloc[-2]
+                        if prev_rsi >= 70 and current_rsi < prev_rsi and pnl_percent > 0:
+                            print(f"\n   📉 RSI OVERBOUGHT EXIT {symbol}: RSI {prev_rsi:.1f}→{current_rsi:.1f}, PNL +{pnl_percent:.2f}%")
+                            self.execute_sell(position, 'RSI_OVERBOUGHT')
+                            continue
+            except Exception:
+                pass
+
+            # 6. TRAILING STOP: activates at 1.5% profit, trails 0.8%
             if pnl_percent >= self.trailing_stop_activation:
                 if not position.get('trailing_stop_active'):
                     position['trailing_stop_active'] = True
