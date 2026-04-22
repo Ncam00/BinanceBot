@@ -1278,6 +1278,76 @@ Reason: {reason}
             return False
         return True
 
+    def detect_market_structure(self, df, lookback=20):
+        """
+        Identify swing highs and lows to determine market structure.
+        
+        Returns:
+            structure: 'BULLISH' (HH+HL), 'BEARISH' (LH+LL), or 'NEUTRAL'
+            last_swing_high: price of most recent swing high
+            last_swing_low: price of most recent swing low
+            break_of_structure: True if price just broke a swing high/low
+        """
+        if len(df) < lookback:
+            return {
+                'structure': 'NEUTRAL',
+                'last_swing_high': None,
+                'last_swing_low': None,
+                'break_of_structure': False,
+                'swing_highs': [],
+                'swing_lows': [],
+            }
+
+        highs = df['high'].values
+        lows = df['low'].values
+        closes = df['close'].values
+
+        swing_highs = []
+        swing_lows = []
+
+        # Find swing points using 2-candle lookback on each side
+        for i in range(2, len(highs) - 2):
+            if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and
+                    highs[i] > highs[i+1] and highs[i] > highs[i+2]):
+                swing_highs.append({'price': highs[i], 'index': i})
+
+            if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and
+                    lows[i] < lows[i+1] and lows[i] < lows[i+2]):
+                swing_lows.append({'price': lows[i], 'index': i})
+
+        structure = 'NEUTRAL'
+        break_of_structure = False
+
+        if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+            # Check last 2 swing highs and lows
+            hh = swing_highs[-1]['price'] > swing_highs[-2]['price']  # higher high
+            hl = swing_lows[-1]['price'] > swing_lows[-2]['price']    # higher low
+            lh = swing_highs[-1]['price'] < swing_highs[-2]['price']  # lower high
+            ll = swing_lows[-1]['price'] < swing_lows[-2]['price']    # lower low
+
+            if hh and hl:
+                structure = 'BULLISH'
+            elif lh and ll:
+                structure = 'BEARISH'
+
+            # Break of structure: price closed above last swing high (bullish BOS)
+            current_price = closes[-1]
+            if (structure == 'BULLISH' and
+                    current_price > swing_highs[-1]['price']):
+                break_of_structure = True
+
+        last_swing_high = swing_highs[-1]['price'] if swing_highs else None
+        last_swing_low = swing_lows[-1]['price'] if swing_lows else None
+
+        return {
+            'structure': structure,
+            'last_swing_high': last_swing_high,
+            'last_swing_low': last_swing_low,
+            'break_of_structure': break_of_structure,
+            'swing_highs': [s['price'] for s in swing_highs[-3:]],
+            'swing_lows': [s['price'] for s in swing_lows[-3:]],
+        }
+
     def check_entry(self, symbol, data, btc_bias, position):
         price = data['close']
         ema20 = data['ema20']
@@ -1522,6 +1592,12 @@ Reason: {reason}
             'session_mode': session_mode,
         }
         context = self.build_context(context_data)
+        
+        # ── MARKET STRUCTURE ANALYSIS ─────────────────────────────
+        market_structure = self.detect_market_structure(analysis_df)
+        print(f"   {symbol} Structure: {market_structure['structure']} | "
+              f"BOS: {market_structure['break_of_structure']}")
+        
         trade_data = {
             'open': analysis_df['open'].iloc[-1],
             'close': price,
@@ -1770,6 +1846,21 @@ Reason: {reason}
                 signal['strength'] = min(signal['strength'] * 1.1, 1.0)
                 print(f"   HTF CONFLUENCE: Near {htf_context['closest_level']} — boosting signal")
 
+            # ── MARKET STRUCTURE FILTER ────────────────────────────────
+            if signal['action'] == 'BUY' and market_structure['structure'] == 'BEARISH':
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': 'Bearish market structure — no longs',
+                    'score': trade_score,
+                }
+
+            # ── BREAK OF STRUCTURE CONFIRMATION ────────────────────────
+            if signal['action'] == 'BUY' and market_structure['break_of_structure']:
+                signal['bos_confirmed'] = True
+                signal['strength'] = min(signal['strength'] * 1.15, 1.0)
+                print(f"   BREAK OF STRUCTURE confirmed — strong entry signal")
+
             # ADDED: Final setup validation (last gate before trade fires)
             if signal['action'] == 'BUY':
                 entry_type = signal.get('entry_type', 'PULLBACK')
@@ -1829,6 +1920,10 @@ Reason: {reason}
         signal['upper_band_ride'] = context.get('upper_band_ride', False)
         signal['htf_levels'] = htf_levels
         signal['htf_context'] = htf_context
+        signal['market_structure'] = market_structure['structure']
+        signal['break_of_structure'] = market_structure['break_of_structure']
+        signal['swing_highs'] = market_structure['swing_highs']
+        signal['swing_lows'] = market_structure['swing_lows']
 
         if signal['action'] == 'BUY':
             expected_move = self.get_expected_move_percent(entry_price, resistance, atr_current, breakout)
