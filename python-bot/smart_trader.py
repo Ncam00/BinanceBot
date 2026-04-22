@@ -1878,7 +1878,8 @@ Reason: {reason}
         retest_reason = None
 
         # Track breakout state without blocking the tier decision path.
-        if market_type == 'TRENDING' and price > resistance and not state['waiting_for_retest'] and not compression_setup and not strong_breakout and trade_score < 3:
+        volume_now = analysis_df['volume'].iloc[-1]
+        if market_type == 'TRENDING' and price > resistance and volume_now > avg_volume * 1.2 and not state['waiting_for_retest'] and not compression_setup and not strong_breakout and trade_score < 3:
             state['waiting_for_retest'] = True
             state['breakout_level'] = resistance
             state['breakout_direction'] = 'LONG'
@@ -1898,17 +1899,20 @@ Reason: {reason}
                     self.reset_breakout_state(symbol)
                     retest_reason = 'Breakout retest expired (10 candles)'
 
+                pullback_zone = state['breakout_level'] * 0.995  # wait for 0.5% retrace below breakout
                 if state['breakout_direction'] == 'LONG' and \
-                   price <= state['breakout_level'] * (1 + tolerance):
+                   price <= pullback_zone:
                     current_open = df['open'].iloc[-1]
                     current_close = df['close'].iloc[-1]
-                    if current_close > current_open and rsi > 50:
+                    previous_close = df['close'].iloc[-2]
+                    volume_confirm = analysis_df['volume'].iloc[-1] > avg_volume
+                    if current_close > current_open and current_close > previous_close and volume_confirm and rsi > 50:
                         strong_breakout = True
                         support_override = state['breakout_level']
                         clear_breakout_wait = True
-                        entry_reason = f"BREAKOUT BUY: Retest confirmed @ ${state['breakout_level']:.4f}"
+                        entry_reason = f"BREAKOUT PULLBACK: Continuation confirmed @ ${state['breakout_level']:.4f}"
                     else:
-                        retest_reason = 'Retest touched - waiting for confirmation candle'
+                        retest_reason = 'Pullback zone reached - waiting for continuation candle'
                 else:
                     retest_reason = f"Watching retest at ${state['breakout_level']:.4f}"
 
@@ -2737,10 +2741,14 @@ Reason: {reason}
 
             # 5. SOFT EXIT — losing + weak momentum
             if pnl_percent < -0.4 and not position.get('partial_taken'):
-                if self.should_exit_early(position, current_price):
-                    print(f"\n   SOFT EXIT {symbol} (weak momentum + loss)")
-                    self.execute_sell(position, 'SOFT_EXIT_NO_MOMENTUM')
-                    continue
+                # Only check momentum every 3rd cycle (save API calls)
+                last_momentum_check = position.get('last_momentum_check', 0)
+                if time.time() - last_momentum_check > 30:  # check every 30s max
+                    position['last_momentum_check'] = time.time()
+                    if self.should_exit_early(position, current_price):
+                        print(f"\n   SOFT EXIT {symbol} (weak momentum + loss)")
+                        self.execute_sell(position, 'SOFT_EXIT_NO_MOMENTUM')
+                        continue
 
             # NOTE: Scale-in removed from here — was causing rate limit issues
             # Scale-in only happens in main scan loop now
@@ -2848,11 +2856,13 @@ Reason: {reason}
                     'quantity': amount,
                     'original_quantity': amount,
                     'entry_price': entry_price,
+                    'avg_entry': entry_price,
                     'stop_loss': stop_loss,
                     'take_profit': take_profit,
                     'risk_percent': self.stop_loss_percent / 100,
                     'rr_target': 2.0,
                     'entry_type': 'synced',
+                    'type': 'A+',
                     'entry_reason': 'Imported on startup',
                     'market_condition': 'unknown',
                     'entry_time': datetime.now(),
@@ -2865,6 +2875,8 @@ Reason: {reason}
                     'trailing_stop_active': False,
                     'highest_price': current_price,
                     'trailing_stop_price': None,
+                    'scaled_in': False,
+                    'scale_in_count': 0,
                     'timestamp': datetime.now(),
                     'signal': {}
                 }

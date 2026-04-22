@@ -139,7 +139,7 @@ DASHBOARD_HTML = """
 <body>
     <div class="header">
         <h1>🚀 Smart Trader V2</h1>
-        <div class="subtitle">Location-Based Trading | Max 2 Trades/Day | $5 Target</div>
+        <div class="subtitle">Location-Based Trading | Max 3 Trades/Day | $5 Target</div>
     </div>
     
     <div class="stats-grid">
@@ -149,7 +149,7 @@ DASHBOARD_HTML = """
         </div>
         <div class="stat-card trades">
             <div class="label">Trades Today</div>
-            <div class="value">{{ trades_today }}/2</div>
+            <div class="value">{{ trades_today }}/3</div>
         </div>
         <div class="stat-card profit">
             <div class="label">Daily Profit</div>
@@ -202,7 +202,7 @@ DASHBOARD_HTML = """
     </div>
     
     <div class="timestamp">
-        Last updated: {{ timestamp }} | Auto-refresh every 10s
+        Bot last updated: {{ last_update }} | Dashboard: {{ timestamp }}
     </div>
 </body>
 </html>
@@ -210,19 +210,28 @@ DASHBOARD_HTML = """
 
 @app.route('/')
 def dashboard():
-    # Get balance
+    # Read live bot status
+    bot_status = {}
+    try:
+        with open('bot_status.json', 'r', encoding='utf-8') as f:
+            bot_status = json.load(f)
+    except Exception:
+        pass
+
+    # Get balance from Binance
     try:
         account = client.get_account()
-        balance = float([a['free'] for a in account['balances'] if a['asset'] == 'USDT'][0])
-    except:
+        balance = float([a['free'] for a in account['balances']
+                        if a['asset'] == 'USDT'][0])
+    except Exception:
         balance = 0
-    
+
     # Get coin data
     coins = []
     try:
         tickers = client.get_ticker()
         ticker_map = {t['symbol']: t for t in tickers}
-        
+
         for symbol in TRADING_PAIRS:
             if symbol in ticker_map:
                 t = ticker_map[symbol]
@@ -233,14 +242,15 @@ def dashboard():
                 })
     except Exception as e:
         print(f"Error: {e}")
-    
+
     return render_template_string(
         DASHBOARD_HTML,
         balance=balance,
-        trades_today=0,
-        daily_profit=0.0,
-        open_positions=0,
+        trades_today=bot_status.get('daily_trades', 0),
+        daily_profit=bot_status.get('daily_profit', 0.0),
+        open_positions=bot_status.get('open_positions', 0),
         coins=coins,
+        last_update=bot_status.get('last_update', 'Bot not running'),
         timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     )
 
