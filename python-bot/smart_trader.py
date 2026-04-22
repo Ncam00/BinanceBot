@@ -1494,6 +1494,14 @@ Reason: {reason}
         support = sr['support']
         resistance = sr['resistance']
         recent_resistance, recent_support = self.calculate_levels(analysis_df)
+
+        # ── HIGHER TIMEFRAME LEVEL ANALYSIS ───────────────────────────
+        htf_levels = self.get_higher_timeframe_levels(symbol)
+        htf_context = self.check_htf_proximity(price, htf_levels)
+        print(f"   {symbol} HTF: {htf_context['htf_context']} | "
+              f"Closest: {htf_context['closest_level']} "
+              f"({htf_context['closest_distance_pct']}% away)")
+
         context_data = {
             'df': analysis_df,
             'price': price,
@@ -1746,6 +1754,22 @@ Reason: {reason}
                     'score': trade_score,
                 }
 
+            # ── HTF CONFLUENCE FILTER ──────────────────────────────────
+            if signal['action'] == 'BUY' and htf_context['htf_sell_zone']:
+                signal = {
+                    'action': 'HOLD',
+                    'strength': 0,
+                    'reason': f"HTF resistance overhead - blocked "
+                              f"({htf_context['closest_level']})",
+                    'score': trade_score,
+                }
+
+            # ── HTF CONFLUENCE BOOST ───────────────────────────────────
+            if signal['action'] == 'BUY' and htf_context['htf_buy_zone']:
+                signal['htf_confluence'] = True
+                signal['strength'] = min(signal['strength'] * 1.1, 1.0)
+                print(f"   HTF CONFLUENCE: Near {htf_context['closest_level']} — boosting signal")
+
             # ADDED: Final setup validation (last gate before trade fires)
             if signal['action'] == 'BUY':
                 entry_type = signal.get('entry_type', 'PULLBACK')
@@ -1803,6 +1827,8 @@ Reason: {reason}
         signal['soft_pullback'] = context.get('soft_pullback', False)
         signal['ema20_pullback_ready'] = context.get('ema20_pullback_ready', False)
         signal['upper_band_ride'] = context.get('upper_band_ride', False)
+        signal['htf_levels'] = htf_levels
+        signal['htf_context'] = htf_context
 
         if signal['action'] == 'BUY':
             expected_move = self.get_expected_move_percent(entry_price, resistance, atr_current, breakout)
