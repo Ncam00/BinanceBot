@@ -1418,6 +1418,89 @@ Reason: {reason}
         }
 
     # ════════════════════════════════════════════════════════════════════
+    # VOLUME PROFILE & POINT OF CONTROL
+    # ════════════════════════════════════════════════════════════════════
+    def get_volume_poc(self, df, lookback=48, buckets=20):
+        """
+        Simplified Volume Profile — finds the price level with
+        the most trading volume over the lookback period.
+        
+        POC = Point of Control = where most volume traded
+        Price gravitates back to POC in ranging markets.
+        
+        Returns:
+            poc_price: Price level with highest volume concentration
+            vah: Value Area High (top of 70% volume zone)
+            val: Value Area Low (bottom of 70% volume zone)
+        """
+        if len(df) < lookback:
+            return None, None, None
+
+        recent = df.iloc[-lookback:].copy()
+
+        price_min = recent['low'].min()
+        price_max = recent['high'].max()
+
+        if price_max <= price_min:
+            return None, None, None
+
+        bucket_size = (price_max - price_min) / buckets
+        volume_by_level = {}
+
+        for _, row in recent.iterrows():
+            # Distribute candle volume across its price range
+            candle_low = row['low']
+            candle_high = row['high']
+            candle_volume = row['volume']
+            candle_range = candle_high - candle_low
+
+            if candle_range == 0:
+                continue
+
+            for b in range(buckets):
+                bucket_low = price_min + (b * bucket_size)
+                bucket_high = bucket_low + bucket_size
+
+                # Overlap between candle and bucket
+                overlap_low = max(candle_low, bucket_low)
+                overlap_high = min(candle_high, bucket_high)
+
+                if overlap_high > overlap_low:
+                    overlap_pct = (overlap_high - overlap_low) / candle_range
+                    bucket_mid = (bucket_low + bucket_high) / 2
+                    volume_by_level[bucket_mid] = (
+                        volume_by_level.get(bucket_mid, 0) +
+                        candle_volume * overlap_pct
+                    )
+
+        if not volume_by_level:
+            return None, None, None
+
+        poc_price = max(volume_by_level, key=volume_by_level.get)
+
+        # Value area: top 70% of volume (above and below POC)
+        total_volume = sum(volume_by_level.values())
+        target_volume = total_volume * 0.70
+        sorted_levels = sorted(
+            volume_by_level.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        accumulated = 0
+        value_area_prices = []
+        for level_price, vol in sorted_levels:
+            accumulated += vol
+            value_area_prices.append(level_price)
+            if accumulated >= target_volume:
+                break
+
+        vah = max(value_area_prices) if value_area_prices else poc_price
+        val = min(value_area_prices) if value_area_prices else poc_price
+
+        return poc_price, vah, val  # Point of Control, Value Area High, Value Area Low
+
+    # ════════════════════════════════════════════════════════════════════
     # HIGHER TIMEFRAME LEVELS
     # ════════════════════════════════════════════════════════════════════
     def get_higher_timeframe_levels(self, symbol):
@@ -1597,6 +1680,12 @@ Reason: {reason}
         market_structure = self.detect_market_structure(analysis_df)
         print(f"   {symbol} Structure: {market_structure['structure']} | "
               f"BOS: {market_structure['break_of_structure']}")
+        
+        # ── VOLUME PROFILE & POINT OF CONTROL ──────────────────────
+        poc_price, vah, val = self.get_volume_poc(analysis_df, lookback=48)
+        if poc_price:
+            dist_to_poc = ((price - poc_price) / price) * 100
+            print(f"   {symbol} POC: ${poc_price:.4f} | VAH: ${vah:.4f} | VAL: ${val:.4f} | Distance: {dist_to_poc:.2f}%")
         
         trade_data = {
             'open': analysis_df['open'].iloc[-1],
@@ -1855,6 +1944,23 @@ Reason: {reason}
                     'score': trade_score,
                 }
 
+            # ── VOLUME POC FILTER (Institutional Levels) ──────────────────
+            if signal['action'] == 'BUY' and poc_price is not None:
+                dist_to_poc_pct = abs(price - poc_price) / price
+                # POC boost: within 0.5% = strong institutional support
+                if dist_to_poc_pct <= 0.005 and market_type == 'RANGING':
+                    signal['poc_confluence'] = True
+                    signal['strength'] = min(signal['strength'] * 1.12, 1.0)
+                    print(f"   POC CONFLUENCE: Near institutional support @ ${poc_price:.4f} — boosting")
+                # VAH filter: block at resistance in ranging markets
+                elif vah is not None and price > vah * 0.998 and market_type == 'RANGING':
+                    signal = {
+                        'action': 'HOLD',
+                        'strength': 0,
+                        'reason': f'Price at POC value area high — resistance zone (${vah:.4f})',
+                        'score': trade_score,
+                    }
+
             # ── BREAK OF STRUCTURE CONFIRMATION ────────────────────────
             if signal['action'] == 'BUY' and market_structure['break_of_structure']:
                 signal['bos_confirmed'] = True
@@ -1924,6 +2030,9 @@ Reason: {reason}
         signal['break_of_structure'] = market_structure['break_of_structure']
         signal['swing_highs'] = market_structure['swing_highs']
         signal['swing_lows'] = market_structure['swing_lows']
+        signal['poc_price'] = poc_price
+        signal['vah'] = vah
+        signal['val'] = val
 
         if signal['action'] == 'BUY':
             expected_move = self.get_expected_move_percent(entry_price, resistance, atr_current, breakout)
