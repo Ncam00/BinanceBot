@@ -1425,6 +1425,66 @@ Reason: {reason}
 
         return patterns
 
+    def calculate_confluence_score(self, signal, htf_context,
+                                   market_structure, candle_patterns,
+                                   poc, vah, val):
+        """
+        Count how many independent factors align with the signal.
+        More confluences = higher conviction = larger position size.
+
+        Score 0-2: weak, skip or tiny size
+        Score 3-4: decent, normal size
+        Score 5+:  strong, full size
+        """
+        score = 0
+        reasons = []
+
+        price = signal.get('price', 0)
+
+        # 1. HTF support nearby
+        if htf_context.get('htf_buy_zone'):
+            score += 2
+            reasons.append('HTF support')
+
+        # 2. Bullish market structure
+        if market_structure.get('structure') == 'BULLISH':
+            score += 1
+            reasons.append('Bullish structure HH/HL')
+
+        # 3. Break of structure
+        if market_structure.get('break_of_structure'):
+            score += 1
+            reasons.append('Break of structure')
+
+        # 4. Volume confluence (near VAL or POC)
+        if val and price and abs(price - val) / price < 0.005:
+            score += 1
+            reasons.append('At Value Area Low')
+        elif poc and price and abs(price - poc) / price < 0.003:
+            score += 1
+            reasons.append('At Point of Control')
+
+        # 5. Bullish candle pattern
+        bullish = [
+            k for k, v in (candle_patterns or {}).items()
+            if v and k in ('hammer', 'bullish_engulfing', 'morning_star')
+        ]
+        if bullish:
+            score += 1
+            reasons.append(f'Pattern: {bullish[0]}')
+
+        # 6. MTF alignment
+        if signal.get('mtf_bullish', 0) >= 3:
+            score += 1
+            reasons.append('All timeframes bullish')
+
+        # 7. Volume spike
+        if signal.get('volume_spike'):
+            score += 1
+            reasons.append('Volume spike')
+
+        return score, reasons
+
     def check_entry(self, symbol, data, btc_bias, position):
         price = data['close']
         ema20 = data['ema20']
@@ -2143,6 +2203,17 @@ Reason: {reason}
         signal['morning_star'] = candle_patterns.get('morning_star', False)
         signal['shooting_star'] = candle_patterns.get('shooting_star', False)
         signal['doji'] = candle_patterns.get('doji', False)
+        confluence_score, confluence_reasons = self.calculate_confluence_score(
+            signal,
+            htf_context,
+            market_structure,
+            candle_patterns,
+            poc_price,
+            vah,
+            val,
+        )
+        signal['confluence_score'] = confluence_score
+        signal['confluence_reasons'] = confluence_reasons
 
         if signal['action'] == 'BUY':
             expected_move = self.get_expected_move_percent(entry_price, resistance, atr_current, breakout)
