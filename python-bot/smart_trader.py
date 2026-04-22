@@ -1280,6 +1280,12 @@ class SmartTrader:
                 'realized_pnl': 0.0,
                 'position_type': trade_type,
                 'added': False,
+                'tp1': fill_price * 1.010,
+                'tp2': fill_price * 1.020,
+                'tp3': fill_price * 1.025,
+                'tp1_hit': False,
+                'tp2_hit': False,
+                'runner_trailing': 0.0,
                 'partial_taken': False,
                 'runner_active': False,
                 'be_active': False,
@@ -1545,27 +1551,32 @@ class SmartTrader:
             if trade_in_profit and breakout_continues and not position.get('scaled_in'):
                 self.add_small_position(position, current_price)
 
-            # 5. RUNNER: after partial TP, exit if price returns to entry
-            if position.get('runner_active') and current_price <= position['entry_price']:
-                print(f"\n   ⚖️ BREAKEVEN RUNNER EXIT {symbol}")
-                self.execute_sell(position, 'BREAKEVEN_RUNNER')
-                continue
-
-            # 5. PARTIAL TP at 2.5%: sell 70%, let 30% run
-            if not position.get('partial_taken') and current_price >= position['take_profit']:
-                partial_qty = position['original_quantity'] * self.partial_tp_percent
-                result = self.execute_sell(position, 'PARTIAL_TAKE_PROFIT', quantity=partial_qty)
+            # 8. TP1 (+1%): sell 50%, move SL to break-even
+            if not position.get('tp1_hit') and current_price >= position['tp1']:
+                qty = position['original_quantity'] * 0.5
+                result = self.execute_sell(position, 'TP1', quantity=qty)
                 if result:
-                    position['partial_taken'] = True
-                    position['runner_active'] = True
+                    position['tp1_hit'] = True
                     position['stop_loss'] = position['entry_price']
-                    print(f"   🏃 Runner active {symbol} - SL at entry")
+                    print(f"   🎯 TP1 {symbol} +1% → sold 50%, SL moved to entry")
                 continue
 
-            # 6. TAKE PROFIT (full, if partial not triggered)
-            if current_price >= position['take_profit'] and position.get('partial_taken'):
-                print(f"\n   🎯 TAKE PROFIT RUNNER {symbol} @ ${current_price:.4f}")
-                self.execute_sell(position, 'TAKE_PROFIT_RUNNER')
+            # 9. TP2 (+2%): sell another 30% (80% total closed)
+            if position.get('tp1_hit') and not position.get('tp2_hit') and current_price >= position['tp2']:
+                qty = position['original_quantity'] * 0.3
+                result = self.execute_sell(position, 'TP2', quantity=qty)
+                if result:
+                    position['tp2_hit'] = True
+                    position['runner_trailing'] = current_price * 0.995
+                    print(f"   🎯 TP2 {symbol} +2% → sold 30%, runner trailing @ ${position['runner_trailing']:.4f}")
+                continue
+
+            # 10. RUNNER (last 20%): trail at price * 0.995, sell all when hit
+            if position.get('tp2_hit'):
+                position['runner_trailing'] = max(position['runner_trailing'], current_price * 0.995)
+                if current_price <= position['runner_trailing']:
+                    print(f"\n   🏁 RUNNER EXIT {symbol} @ ${current_price:.4f}")
+                    self.execute_sell(position, 'RUNNER_TRAIL')
                 continue
 
     # ════════════════════════════════════════════════════════════════════
