@@ -110,8 +110,12 @@ class EntryEngine:
         if market_mode == 'ACTIVE' and volume < avg_volume:
             return None
 
-        # State machine: detect new breakout
+        # State machine: detect new breakout (volume must confirm)
         if not sig['active'] and price > resistance:
+            breakout_confirmed = volume > avg_volume * 1.5
+            if not breakout_confirmed:
+                print(f"Skipping {pair}: unconfirmed breakout (volume {volume:.0f} < 1.5x avg {avg_volume:.0f})")
+                return None
             self.activate(pair, resistance, direction='LONG')
             return {'action': 'BREAKOUT_WAIT', 'pair': pair, 'level': resistance}
 
