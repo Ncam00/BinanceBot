@@ -2157,7 +2157,6 @@ Reason: {reason}
 
     # ════════════════════════════════════════════════════════════════════
     # POSITION MANAGEMENT
-    # FIXED: Stop loss is now check #1 (safety first)
     # ════════════════════════════════════════════════════════════════════
     def check_positions(self):
         for position in self.open_positions[:]:
@@ -2169,39 +2168,45 @@ Reason: {reason}
             avg_entry = position.get('avg_entry', position['entry_price'])
             pnl_percent = ((current_price - avg_entry) / avg_entry) * 100
 
-            if not position.get('partial_taken'):
-                if self.should_exit_early(position, current_price):
-                    print(f"\n   EARLY EXIT {symbol} @ ${current_price:.4f} (weak momentum + loss)")
-                    self.execute_sell(position, 'SOFT_EXIT_NO_MOMENTUM')
-                    continue
-
-            scale_signal = self.analyze(symbol)
-            if self.should_scale_scout_position(position, scale_signal):
-                self.execute_scale_in(position, scale_signal)
-                continue
-
-            candles_in_trade = 0
-            if position.get('entry_time'):
-                elapsed_minutes = (datetime.now() - position['entry_time']).total_seconds() / 60
-                candles_in_trade = int(elapsed_minutes // max(self.primary_candle_minutes, 1))
-
-            exit_signal = self.check_exit(position, {'close': current_price}, candles_in_trade)
-            if exit_signal == 'EXIT':
-                if pnl_percent <= -1.5:
-                    reason = 'HARD_STOP_LOSS'
-                elif candles_in_trade >= 3 and pnl_percent <= 0:
-                    reason = 'TIME_EXIT'
-                else:
-                    reason = 'TAKE_PROFIT'
-                print(f"\n   {reason} {symbol} @ ${current_price:.4f}")
-                self.execute_sell(position, reason)
-                continue
-
-            # 1. STOP LOSS (first - always)
+            # 1. STOP LOSS — always first
             if current_price <= position['stop_loss']:
                 print(f"\n   STOP LOSS {symbol} @ ${current_price:.4f}")
                 self.execute_sell(position, 'STOP_LOSS')
                 continue
+
+            # 2. TAKE PROFIT
+            if current_price >= position['take_profit']:
+                print(f"\n   TAKE PROFIT {symbol} @ ${current_price:.4f}")
+                self.execute_sell(position, 'TAKE_PROFIT')
+                continue
+
+            # 3. BREAK-EVEN SHIELD: move SL to entry at 1% profit
+            if pnl_percent >= 1.0 and not position.get('be_active'):
+                position['stop_loss'] = avg_entry
+                position['be_active'] = True
+                print(f"   BREAK-EVEN: {symbol} SL moved to entry")
+                self.send_telegram(f"Break-Even Active\n{symbol}\n+{pnl_percent:.2f}%")
+
+            # 4. TIME EXIT — no profit after 3 candles (45 min)
+            candles_in_trade = 0
+            if position.get('entry_time'):
+                elapsed = (datetime.now() - position['entry_time']).total_seconds() / 60
+                candles_in_trade = int(elapsed // self.primary_candle_minutes)
+
+            if candles_in_trade >= self.time_exit_candles and pnl_percent <= 0:
+                print(f"\n   TIME EXIT {symbol} @ ${current_price:.4f} ({candles_in_trade} candles, no profit)")
+                self.execute_sell(position, 'TIME_EXIT')
+                continue
+
+            # 5. SOFT EXIT — losing + weak momentum
+            if pnl_percent < -0.4 and not position.get('partial_taken'):
+                if self.should_exit_early(position, current_price):
+                    print(f"\n   SOFT EXIT {symbol} (weak momentum + loss)")
+                    self.execute_sell(position, 'SOFT_EXIT_NO_MOMENTUM')
+                    continue
+
+            # NOTE: Scale-in removed from here — was causing rate limit issues
+            # Scale-in only happens in main scan loop now
 
     # ════════════════════════════════════════════════════════════════════
     # CIRCUIT BREAKER
