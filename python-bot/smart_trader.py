@@ -27,6 +27,7 @@ import json
 from datetime import datetime
 from binance.client import Client
 from binance.enums import *
+from binance.helpers import round_step_size
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
@@ -1354,7 +1355,7 @@ class SmartTrader:
                 sell_quantity = quantity * 0.999
             exit_time = datetime.now()
             step_size, precision = self.get_symbol_precision(symbol)
-            sell_quantity = round(sell_quantity, precision)
+            sell_quantity = round_step_size(sell_quantity, step_size)
 
             if sell_quantity <= 0:
                 print(f"   ⚠️ Sell quantity too small for {symbol}")
