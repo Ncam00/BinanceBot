@@ -675,6 +675,12 @@ class SmartTrader:
 
     # ════════════════════════════════════════════════════════════════════
     def count_bullish_timeframes(self, symbol, price):
+        if not hasattr(self, 'htf_cache'):
+            self.htf_cache = {}
+        cache_key = symbol
+        cached = self.htf_cache.get(cache_key)
+        if cached and time.time() - cached['ts'] < 300:
+            return cached['count']
         count = 0
         for interval in ('15m', '1h', '4h'):
             df = self.get_candles(symbol, interval, 55)
@@ -683,6 +689,7 @@ class SmartTrader:
             ma50 = df['close'].rolling(50).mean().iloc[-1]
             if price > ma50:
                 count += 1
+        self.htf_cache[cache_key] = {'count': count, 'ts': time.time()}
         return count
 
     # ════════════════════════════════════════════════════════════════════
