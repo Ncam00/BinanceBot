@@ -674,6 +674,23 @@ class SmartTrader:
         return body > 0 and (body / candle_range) > 0.3
 
     # ════════════════════════════════════════════════════════════════════
+    def get_higher_timeframe_levels(self, symbol):
+        if not hasattr(self, 'htf_cache'):
+            self.htf_cache = {}
+        cached = self.htf_cache.get(symbol)
+        if cached and time.time() - cached.get('ts', 0) < 300:
+            return cached
+        levels = {'symbol': symbol, 'ts': time.time()}
+        for interval in ('1h', '4h'):
+            df = self.get_candles(symbol, interval, 100)
+            if df is None or len(df) < 50:
+                continue
+            sr = self.calculate_support_resistance(df)
+            levels[f'{interval}_resistance'] = sr['resistance']
+            levels[f'{interval}_support']    = sr['support']
+        self.htf_cache[symbol] = levels
+        return levels
+
     def count_bullish_timeframes(self, symbol, price):
         if not hasattr(self, 'htf_cache'):
             self.htf_cache = {}
