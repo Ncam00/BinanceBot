@@ -1474,6 +1474,8 @@ class SmartTrader:
                 continue
 
             # 4. SCOUT ADD-ON: scale to full position when breakout confirms
+            if position.get('position_type') == 'SCOUT':
+                print(f"   [SCOUT] {symbol} | position_open: True | already_added: {position.get('added', False)}")
             if position.get('position_type') == 'SCOUT' and not position.get('added'):
                 try:
                     candle = self.get_candles(symbol, '15m', 3)
