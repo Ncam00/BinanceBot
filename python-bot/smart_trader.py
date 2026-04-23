@@ -418,6 +418,7 @@ class SmartTrader:
         self.consecutive_losses = 0
         self.pause_until = None               # time.time() timestamp when pause expires
         self.open_positions = []
+        self.position_open = {}
         self.trade_history = []
         self.entry_engine = EntryEngine(self.trading_pairs, execute_fn=self.execute_buy)
         self.trade_lock = False
@@ -1316,6 +1317,7 @@ class SmartTrader:
             }
 
             self.open_positions.append(position)
+            self.position_open[symbol] = True
             self.last_trade_time = time.time()
             self.daily_trades += 1
 
@@ -1387,6 +1389,7 @@ class SmartTrader:
             if remaining_quantity <= 0:
                 self.open_positions = [p for p in self.open_positions
                                        if p['trade_id'] != position['trade_id']]
+                self.position_open[symbol] = False
             else:
                 position['quantity'] = remaining_quantity
 
@@ -1436,6 +1439,7 @@ class SmartTrader:
                 print(f"   ⚠️ {symbol} insufficient balance — forcing position reset")
                 self.open_positions = [p for p in self.open_positions
                                        if p['trade_id'] != position['trade_id']]
+                self.position_open[symbol] = False
             else:
                 print(f"   ❌ Sell failed: {e}")
             return None
@@ -1860,7 +1864,7 @@ class SmartTrader:
                     continue
                 if amount * current_price < 10:
                     continue
-                if any(p['symbol'] == symbol for p in self.open_positions):
+                if self.position_open.get(symbol, False):
                     continue
                 entry_price = known_entries.get(symbol, current_price)
                 stop_loss = entry_price * (1 - self.stop_loss_percent / 100)
@@ -1892,6 +1896,7 @@ class SmartTrader:
                     'signal': {}
                 }
                 self.open_positions.append(position)
+                self.position_open[symbol] = True
                 pnl = (current_price - entry_price) * amount
                 print(f"   ✅ Synced: {amount:.8f} {asset} @ ${entry_price:.2f} | P&L: ${pnl:.2f}")
         except Exception as e:
@@ -1977,7 +1982,7 @@ class SmartTrader:
 
                 for symbol in self.trading_pairs:
                     # Skip if already in this symbol
-                    if any(p['symbol'] == symbol for p in self.open_positions):
+                    if self.position_open.get(symbol, False):
                         continue
 
                     # Position cap re-check
