@@ -41,7 +41,7 @@ class SmartTrader:
         # TRADING PAIRS
         # ════════════════════════════════════════════════════════════════════
         self.trading_pairs = [
-            'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'
+            'BTCUSDT', 'ETHUSDT'
         ]
         self.max_positions = 1
 
