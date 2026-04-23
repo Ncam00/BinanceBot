@@ -1432,7 +1432,12 @@ class SmartTrader:
             return {'pnl': pnl, 'pnl_percent': pnl_percent}
 
         except Exception as e:
-            print(f"   ❌ Sell failed: {e}")
+            if 'insufficient balance' in str(e).lower():
+                print(f"   ⚠️ {symbol} insufficient balance — forcing position reset")
+                self.open_positions = [p for p in self.open_positions
+                                       if p['trade_id'] != position['trade_id']]
+            else:
+                print(f"   ❌ Sell failed: {e}")
             return None
 
     def log_trade(self, result):
