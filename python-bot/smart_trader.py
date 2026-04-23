@@ -1346,6 +1346,7 @@ class SmartTrader:
         try:
             symbol = position['symbol']
             sell_quantity = position['quantity'] if quantity is None else quantity
+            sell_quantity = sell_quantity * 0.999  # leave buffer for fees
             exit_time = datetime.now()
             step_size, precision = self.get_symbol_precision(symbol)
             sell_quantity = round(sell_quantity, precision)
