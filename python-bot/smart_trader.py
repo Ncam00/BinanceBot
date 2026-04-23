@@ -677,10 +677,9 @@ class SmartTrader:
     def get_higher_timeframe_levels(self, symbol):
         if not hasattr(self, 'htf_cache'):
             self.htf_cache = {}
-        cached = self.htf_cache.get(symbol)
-        if cached and time.time() - cached.get('ts', 0) < 300:
-            return cached
-        levels = {'symbol': symbol, 'ts': time.time()}
+        if symbol in self.htf_cache:
+            return self.htf_cache[symbol]
+        levels = {'symbol': symbol}
         for interval in ('1h', '4h'):
             df = self.get_candles(symbol, interval, 100)
             if df is None or len(df) < 50:
