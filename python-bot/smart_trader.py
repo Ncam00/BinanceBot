@@ -1345,8 +1345,13 @@ class SmartTrader:
     def execute_sell(self, position, reason='SIGNAL', quantity=None):
         try:
             symbol = position['symbol']
-            sell_quantity = position['quantity'] if quantity is None else quantity
-            sell_quantity = sell_quantity * 0.999  # leave buffer for fees
+            if quantity is None:
+                asset = symbol.replace('USDT', '')
+                balance = self.client.get_asset_balance(asset=asset)
+                free_balance = float(balance['free'])
+                sell_quantity = free_balance * 0.999
+            else:
+                sell_quantity = quantity * 0.999
             exit_time = datetime.now()
             step_size, precision = self.get_symbol_precision(symbol)
             sell_quantity = round(sell_quantity, precision)
