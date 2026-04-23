@@ -419,6 +419,7 @@ class SmartTrader:
         self.pause_until = None               # time.time() timestamp when pause expires
         self.open_positions = []
         self.position_open = {}
+        self.htf_cache = {}
         self.trade_history = []
         self.entry_engine = EntryEngine(self.trading_pairs, execute_fn=self.execute_buy)
         self.trade_lock = False
