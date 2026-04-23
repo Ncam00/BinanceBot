@@ -1,25 +1,68 @@
+import pandas as pd
+import numpy as np
+import time
+from binance.client import Client
+from binance.enums import *
+
 # ==============================
 # CONFIG
 # ==============================
 
+API_KEY = ""
+API_SECRET = ""
+
 TRADING_PAIRS = ["BTCUSDT", "ETHUSDT"]
 
-ATR_SL_MULTIPLIER = 1.5
-ATR_TP_MULTIPLIER = 2.0
+POSITION_SIZE_PCT = 0.10
 TRAILING_STOP = 0.992
 TIME_EXIT_CANDLES = 10
 
+ATR_SL_MULTIPLIER = 1.5
+ATR_TP_MULTIPLIER = 2.0
+
+client = Client(API_KEY, API_SECRET)
+
+
+# ==============================
+# HELPER FUNCTIONS
+# ==============================
+
+def get_balance(asset):
+    balance = client.get_asset_balance(asset=asset)
+    return float(balance["free"])
+
+
+def round_qty(symbol, qty):
+    info = client.get_symbol_info(symbol)
+    step_size = float([f for f in info["filters"] if f["filterType"] == "LOT_SIZE"][0]["stepSize"])
+    return round(qty - (qty % step_size), 8)
+
+
+def get_klines(symbol, interval="5m", limit=100):
+    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+
+    df = pd.DataFrame(klines, columns=[
+        "time","open","high","low","close","volume",
+        "close_time","qav","trades","tb_base","tb_quote","ignore"
+    ])
+
+    df["close"] = df["close"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
+    df["volume"] = df["volume"].astype(float)
+
+    return df
+
+
+# ==============================
+# BOT
+# ==============================
 
 class SmartTrader:
 
     def __init__(self):
         self.positions = {}
-        self.trades_today = 0
-        self.htf_cache = {}
 
-    # ==============================
-    # ANALYSIS
-    # ==============================
     def analyze_market(self, df):
         close = df['close']
 
@@ -28,56 +71,107 @@ class SmartTrader:
 
         trend = ema_fast.iloc[-1] > ema_slow.iloc[-1]
         momentum = close.iloc[-1] > close.iloc[-3]
-        volume_spike = df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.2
+        volume = df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.2
 
-        return {
-            "trend": trend,
-            "momentum": momentum,
-            "volume": volume_spike
-        }
-
-    # ==============================
-    # ENTRY
-    # ==============================
-    def check_entry(self, symbol, df):
-
-        if symbol in self.positions:
-            return
-
-        signal = self.analyze_market(df)
-        score = sum(signal.values())
-
-        # SCOUT
-        if score >= 2:
-            self.enter_trade(symbol, df, size=0.3, tag="SCOUT")
-
-        # A+
-        if score == 3:
-            self.enter_trade(symbol, df, size=0.7, tag="A_PLUS")
+        return trend, momentum, volume
 
     def enter_trade(self, symbol, df, size, tag):
 
+        usdt_balance = get_balance("USDT")
+        trade_value = usdt_balance * POSITION_SIZE_PCT * size
+
         price = df['close'].iloc[-1]
-        atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
+        qty = trade_value / price
+        qty = round_qty(symbol, qty)
 
-        sl = price - (atr * ATR_SL_MULTIPLIER)
-        tp = price + (atr * ATR_TP_MULTIPLIER)
+        if qty <= 0:
+            return
 
-        self.positions[symbol] = {
-            "entry": price,
-            "sl": sl,
-            "tp": tp,
-            "size": size,
-            "tag": tag,
-            "candles": 0,
-            "max_price": price
-        }
+        try:
+            client.create_order(
+                symbol=symbol,
+                side=SIDE_BUY,
+                type=ORDER_TYPE_MARKET,
+                quantity=qty
+            )
 
-        print(f"ENTER {symbol} | {tag} | Entry: {price} | SL: {sl} | TP: {tp}")
+            atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
 
-    # ==============================
-    # EXIT
-    # ==============================
+            self.positions[symbol] = {
+                "entry": price,
+                "qty": qty,
+                "sl": price - atr * ATR_SL_MULTIPLIER,
+                "tp": price + atr * ATR_TP_MULTIPLIER,
+                "max_price": price,
+                "candles": 0,
+                "added": False
+            }
+
+            print(f"BUY {symbol} | {tag} | Qty: {qty}")
+
+        except Exception as e:
+            print(f"BUY ERROR {symbol}: {e}")
+
+    def add_position(self, symbol, df):
+
+        pos = self.positions[symbol]
+
+        if pos["added"]:
+            return
+
+        price = df['close'].iloc[-1]
+
+        if price <= pos["entry"]:
+            return
+
+        usdt_balance = get_balance("USDT")
+        trade_value = usdt_balance * POSITION_SIZE_PCT * 0.7
+
+        qty = trade_value / price
+        qty = round_qty(symbol, qty)
+
+        try:
+            client.create_order(
+                symbol=symbol,
+                side=SIDE_BUY,
+                type=ORDER_TYPE_MARKET,
+                quantity=qty
+            )
+
+            pos["qty"] += qty
+            pos["added"] = True
+
+            print(f"ADD {symbol} | Qty: {qty}")
+
+        except Exception as e:
+            print(f"ADD ERROR: {e}")
+
+    def exit_trade(self, symbol):
+
+        asset = symbol.replace("USDT", "")
+        balance = get_balance(asset)
+
+        qty = round_qty(symbol, balance * 0.999)
+
+        if qty <= 0:
+            self.positions.pop(symbol, None)
+            return
+
+        try:
+            client.create_order(
+                symbol=symbol,
+                side=SIDE_SELL,
+                type=ORDER_TYPE_MARKET,
+                quantity=qty
+            )
+
+            print(f"SELL {symbol}")
+            self.positions.pop(symbol, None)
+
+        except Exception as e:
+            print(f"SELL ERROR: {e}")
+            self.positions.pop(symbol, None)
+
     def manage_trade(self, symbol, df):
 
         if symbol not in self.positions:
@@ -88,41 +182,62 @@ class SmartTrader:
 
         pos["candles"] += 1
 
-        # STOP LOSS
         if price <= pos["sl"]:
-            print(f"STOP LOSS HIT {symbol}")
-            del self.positions[symbol]
+            print(f"STOP LOSS {symbol}")
+            self.exit_trade(symbol)
             return
 
-        # TAKE PROFIT
         if price >= pos["tp"]:
             print(f"TAKE PROFIT {symbol}")
-            del self.positions[symbol]
+            self.exit_trade(symbol)
             return
 
-        # TRAILING
         if price > pos["max_price"]:
             pos["max_price"] = price
 
-        trailing_sl = pos["max_price"] * TRAILING_STOP
+        trailing = pos["max_price"] * TRAILING_STOP
 
-        if price <= trailing_sl:
+        if price <= trailing:
             print(f"TRAILING EXIT {symbol}")
-            del self.positions[symbol]
+            self.exit_trade(symbol)
             return
 
-        # TIME EXIT
         if pos["candles"] >= TIME_EXIT_CANDLES:
             print(f"TIME EXIT {symbol}")
-            del self.positions[symbol]
+            self.exit_trade(symbol)
 
-    # ==============================
-    # LOOP
-    # ==============================
-    def run(self, data):
+    def run(self):
 
         for symbol in TRADING_PAIRS:
-            df = data[symbol]
 
-            self.check_entry(symbol, df)
-            self.manage_trade(symbol, df)
+            df = get_klines(symbol)
+
+            trend, momentum, volume = self.analyze_market(df)
+            score = sum([trend, momentum, volume])
+
+            if symbol not in self.positions:
+                if score >= 2:
+                    self.enter_trade(symbol, df, 0.3, "SCOUT")
+
+            else:
+                if score == 3:
+                    self.add_position(symbol, df)
+
+                self.manage_trade(symbol, df)
+
+
+# ==============================
+# MAIN LOOP
+# ==============================
+
+if __name__ == "__main__":
+
+    trader = SmartTrader()
+
+    while True:
+        try:
+            trader.run()
+            time.sleep(60)
+        except Exception as e:
+            print(f"ERROR: {e}")
+            time.sleep(10)
