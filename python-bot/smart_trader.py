@@ -1542,16 +1542,16 @@ class SmartTrader:
             position['realized_pnl'] = total_trade_pnl
 
             # Update single profit/loss tracker
-            if pnl >= 0:
+            self.stats['total_trades'] += 1
+            self.stats['total_pnl']    += pnl
+            if pnl > 0:
                 self.daily_profit += pnl
                 self.stats['wins'] += 1
             else:
                 self.daily_loss += abs(pnl)
                 self.stats['losses'] += 1
-            self.stats['total_pnl']    += pnl
-            self.stats['total_trades'] += 1
-            self.stats['best_trade']   = max(self.stats['best_trade'], pnl)
-            self.stats['worst_trade']  = min(self.stats['worst_trade'], pnl)
+            self.stats['best_trade']  = max(self.stats['best_trade'], pnl)
+            self.stats['worst_trade'] = min(self.stats['worst_trade'], pnl)
             self.weekly_pnl += pnl
 
             # Remove or reduce position
