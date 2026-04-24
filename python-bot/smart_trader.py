@@ -1417,13 +1417,25 @@ class SmartTrader:
             print(f"   🔒 TRADE LOCK - skipping duplicate {symbol}")
             return None
 
-        # Never re-enter an already open position
-        if self.position_open.get(symbol, False):
-            print(f"   ⛔ {symbol} already open — skipping re-entry")
+        # Never re-enter if any position is already open
+        if self.open_positions:
+            print(f"   ⛔ Position already open — skipping {symbol}")
+            return None
+
+        # Daily trade cap
+        if self.daily_trades >= MAX_TRADES_PER_DAY:
+            print(f"   🛑 Max trades reached ({self.daily_trades}/{MAX_TRADES_PER_DAY})")
+            return None
+
+        # Global 15-minute cooldown (any symbol)
+        now = time.time()
+        last_any = max(self.last_trade_time.values()) if self.last_trade_time else 0
+        if now - last_any < 900:
+            remaining = 900 - (now - last_any)
+            print(f"   ⏳ Global cooldown: {remaining:.0f}s remaining")
             return None
 
         # Per-symbol 15-minute cooldown
-        now = time.time()
         if symbol in self.last_trade_time and now - self.last_trade_time[symbol] < 900:
             remaining = 900 - (now - self.last_trade_time[symbol])
             print(f"   ⏳ {symbol} cooldown: {remaining:.0f}s remaining")
