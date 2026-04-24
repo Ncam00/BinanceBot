@@ -36,10 +36,11 @@ import pytz
 
 load_dotenv()
 
-TRADING_PAIRS      = ['BTCUSDT', 'ETHUSDT']
-TRAILING_STOP      = 0.992
-MAX_TRADES_PER_DAY = 3
-MAX_SLIPPAGE       = 0.002  # 0.2% — reject fills worse than this
+TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT']
+TRAILING_STOP         = 0.992
+MAX_TRADES_PER_DAY    = 3
+MAX_SLIPPAGE          = 0.002  # 0.2% — reject fills worse than this
+MIN_VOLUME_MULTIPLIER = 1.1    # minimum volume vs avg to confirm signal
 
 
 class EntryEngine:
@@ -158,7 +159,7 @@ class EntryEngine:
             trend_ok = (ema9 is not None and ema21 is not None and ema9 > ema21)
             if (is_range and range_high is not None and
                     close > range_high * 1.001 and
-                    volume > avg_volume * 1.2 and trend_ok):
+                    volume > avg_volume * MIN_VOLUME_MULTIPLIER and trend_ok):
                 entry_type = 'BREAKOUT'
 
         # SCOUT_RANGE: range market + score >= 2 → small mean-reversion entry
@@ -177,7 +178,7 @@ class EntryEngine:
             range_breakout = (
                 range_high is not None and
                 close > range_high and
-                volume > avg_volume * 1.2
+                volume > avg_volume * MIN_VOLUME_MULTIPLIER
             )
             if tight_range and (rising_volume or range_breakout):
                 entry_type = 'SQUEEZE'
@@ -305,7 +306,7 @@ class EntryEngine:
             # Phase 1: mark breakout level
             if (is_range and range_high is not None and
                     close > range_high * 1.001 and
-                    volume > avg_volume * 1.2 and trend_ok):
+                    volume > avg_volume * MIN_VOLUME_MULTIPLIER and trend_ok):
                 if symbol not in self.breakout_levels:
                     self.breakout_levels[symbol] = range_high
                     print(f"   🔴 BREAKOUT DETECTED {symbol} @ {range_high:.4f} — waiting for pullback")
@@ -724,7 +725,7 @@ class SmartTrader:
         volume     = df['volume'].iloc[-1]
         avg_volume = df['volume'].rolling(20).mean().iloc[-1]
         breakout       = close > range_high * 1.001  # small buffer avoids fake breakouts
-        volume_confirm = volume > avg_volume * 1.2
+        volume_confirm = volume > avg_volume * MIN_VOLUME_MULTIPLIER
         return breakout and volume_confirm
 
     def detect_range(self, df):
@@ -1681,7 +1682,7 @@ class SmartTrader:
                         resistance = position.get('entry_resistance', position['entry_price'] * 1.005)
                         breakout_confirmed = (
                             current_price > resistance and
-                            vol > avg_vol * 1.2 and
+                            vol > avg_vol * MIN_VOLUME_MULTIPLIER and
                             candle['close'].iloc[-1] > resistance
                         )
                         not_too_extended = current_price <= position['entry_price'] * 1.01
