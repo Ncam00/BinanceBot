@@ -1553,6 +1553,12 @@ class SmartTrader:
             self.stats['best_trade']  = max(self.stats['best_trade'], pnl)
             self.stats['worst_trade'] = min(self.stats['worst_trade'], pnl)
             self.weekly_pnl += pnl
+            print(f"\n   📊 STATS UPDATE"
+                  f"\n   Win Rate:  {self.get_win_rate():.2f}%"
+                  f"\n   Total PnL: ${self.stats['total_pnl']:.2f}"
+                  f"\n   Trades:    {self.stats['total_trades']}"
+                  f"\n   Best:      ${self.stats['best_trade']:.2f}"
+                  f"\n   Worst:     ${self.stats['worst_trade']:.2f}")
 
             # Remove or reduce position
             remaining_quantity = round(position['quantity'] - sell_quantity, precision)
