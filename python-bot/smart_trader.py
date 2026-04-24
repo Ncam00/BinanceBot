@@ -21,6 +21,7 @@ Key Features:
 Pairs: BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, BNBUSDT
 """
 
+import logging
 import os
 import time
 import json
@@ -36,13 +37,21 @@ import pytz
 
 load_dotenv()
 
+os.makedirs("logs", exist_ok=True)
+logging.basicConfig(
+    filename="logs/trades.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(message)s"
+)
+
 TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT']
 TRAILING_STOP         = 0.985
 MAX_TRADES_PER_DAY    = 3
 MAX_SLIPPAGE          = 0.002  # 0.2% — reject fills worse than this
 MIN_VOLUME_MULTIPLIER = 1.1    # minimum volume vs avg to confirm signal
 POSITION_SIZE_PCT     = 0.12   # ~12% of balance per trade (~$50 on $400)
-TIME_EXIT_CANDLES     = 10     # exit if no TP1 hit after this many candles
+RISK_PER_TRADE        = 0.01   # 1% of balance risked per trade
+TIME_EXIT_CANDLES     = 15     # exit if no TP1 hit after this many candles
 PARTIAL_TP_RATIO      = 0.5    # 50% of position closes at TP1
 BREAKEVEN_BUFFER      = 0.001  # move SL to entry + 0.1% after partial TP
 ATR_SL_MULTIPLIER     = 1.5    # stop loss = entry - ATR * 1.5
@@ -1495,7 +1504,7 @@ class SmartTrader:
             if sl_distance <= 0:
                 print(f"   ⚠️ Invalid SL distance for {symbol} — skipping")
                 return None
-            risk_amount = balance * 0.01
+            risk_amount = balance * RISK_PER_TRADE
             quantity = risk_amount / sl_distance
             print(f"   📐 {trade_type} | Risk: ${risk_amount:.2f} | SL dist: ${sl_distance:.4f} | Qty: {quantity:.5f}")
 
@@ -1612,6 +1621,7 @@ class SmartTrader:
                    f"R:R target: {rr_target}")
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
+            logging.info(f"ENTER {symbol} | Entry: {fill_price} | SL: {stop_loss} | TP: {take_profit} | Size: {quantity}")
 
             return position
 
@@ -1757,6 +1767,12 @@ class SmartTrader:
             result = self.execute_sell(position, reason)
         return result
 
+    def calculate_profit(self, entry, price, size):
+        gross    = (price - entry) * size
+        fees     = (entry * size * FEE_RATE) + (price * size * FEE_RATE)
+        slippage = price * size * SLIPPAGE_RATE
+        return gross - fees - slippage
+
     def log_trade(self, result):
         self.trade_history.append(result)
 
@@ -1849,12 +1865,10 @@ class SmartTrader:
 
             # FULL TP
             if current_price >= pos['tp']:
-                gross    = (current_price - pos['entry']) * pos['size']
-                fees     = (pos['entry'] * pos['size'] * FEE_RATE) + (current_price * pos['size'] * FEE_RATE)
-                slippage = current_price * pos['size'] * SLIPPAGE_RATE
-                profit   = gross - fees - slippage
+                profit = self.calculate_profit(pos['entry'], current_price, pos['size'])
                 self.daily_pnl += profit
                 print(f"   🎯 FULL TP {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
+                logging.info(f"FULL TP {symbol} | Entry: {pos['entry']} | Exit: {current_price} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}")
                 self.execute_sell(open_pos, 'TP_FULL')
                 self.positions.pop(symbol, None)
                 continue
@@ -1864,24 +1878,20 @@ class SmartTrader:
                 partial_size = pos['size'] * PARTIAL_TP_RATIO
                 pos['remaining_size'] -= partial_size
                 pos['partial_taken'] = True
-                gross    = (current_price - pos['entry']) * partial_size
-                fees     = (pos['entry'] * partial_size * FEE_RATE) + (current_price * partial_size * FEE_RATE)
-                slippage = current_price * partial_size * SLIPPAGE_RATE
-                profit   = gross - fees - slippage
+                profit = self.calculate_profit(pos['entry'], current_price, partial_size)
                 self.daily_pnl += profit
                 pos['sl'] = pos['entry']
                 print(f"   🟢 PARTIAL TP {symbol} | Closed: {partial_size:.4f} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
+                logging.info(f"PARTIAL TP {symbol} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}")
                 self.execute_sell(open_pos, 'TP1', quantity=partial_size)
                 continue
 
             # STOP LOSS
             if current_price <= pos['sl']:
-                gross    = (current_price - pos['entry']) * pos['remaining_size']
-                fees     = (pos['entry'] * pos['remaining_size'] * FEE_RATE) + (current_price * pos['remaining_size'] * FEE_RATE)
-                slippage = current_price * pos['remaining_size'] * SLIPPAGE_RATE
-                profit   = gross - fees - slippage
+                profit = self.calculate_profit(pos['entry'], current_price, pos['remaining_size'])
                 self.daily_pnl += profit
                 print(f"   🔴 STOP LOSS {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
+                logging.info(f"STOP LOSS {symbol} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}")
                 self.execute_sell(open_pos, 'STOP_LOSS')
                 self.positions.pop(symbol, None)
                 continue
@@ -1893,12 +1903,10 @@ class SmartTrader:
             # RUNNER EXIT
             trailing_sl = pos['max_price'] * TRAILING_STOP
             if current_price <= trailing_sl:
-                gross    = (current_price - pos['entry']) * pos['remaining_size']
-                fees     = (pos['entry'] * pos['remaining_size'] * FEE_RATE) + (current_price * pos['remaining_size'] * FEE_RATE)
-                slippage = current_price * pos['remaining_size'] * SLIPPAGE_RATE
-                profit   = gross - fees - slippage
+                profit = self.calculate_profit(pos['entry'], current_price, pos['remaining_size'])
                 self.daily_pnl += profit
                 print(f"   🏁 RUNNER EXIT {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
+                logging.info(f"RUNNER EXIT {symbol} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}")
                 self.execute_sell(open_pos, 'TRAILING_STOP')
                 self.positions.pop(symbol, None)
                 continue
