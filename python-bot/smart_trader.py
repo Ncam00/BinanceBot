@@ -1615,28 +1615,38 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # EXECUTE SELL
     # ════════════════════════════════════════════════════════════════════
+    def format_quantity(self, symbol, qty):
+        if symbol == 'BTCUSDT':
+            return round(qty, 5)
+        elif symbol == 'ETHUSDT':
+            return round(qty, 4)
+        else:
+            return round(qty, 5)
+
+    def get_available_quantity(self, symbol):
+        asset = symbol.replace('USDT', '')
+        balance = self.client.get_asset_balance(asset=asset)
+        if balance is None:
+            return 0
+        return float(balance['free'])
+
     def execute_sell(self, position, reason='SIGNAL', quantity=None):
         try:
             symbol = position['symbol']
             if quantity is None:
-                asset = symbol.replace('USDT', '')
-                balance = self.client.get_asset_balance(asset=asset)
-                free_balance = float(balance['free'])
+                free_balance = self.get_available_quantity(symbol)
                 sell_quantity = free_balance * 0.999
             else:
                 sell_quantity = quantity * 0.999
             exit_time = datetime.now()
-            step_size, precision = self.get_symbol_precision(symbol)
-            sell_quantity = round_step_size(sell_quantity, step_size)
+            sell_quantity = self.format_quantity(symbol, sell_quantity)
 
             if sell_quantity <= 0:
                 print(f"   ⚠️ Sell quantity too small for {symbol}")
                 return None
 
-            order = self.client.create_order(
+            order = self.client.order_market_sell(
                 symbol=symbol,
-                side=SIDE_SELL,
-                type=ORDER_TYPE_MARKET,
                 quantity=sell_quantity
             )
 
@@ -1667,7 +1677,8 @@ class SmartTrader:
                   f"\n   Worst:     ${self.stats['worst_trade']:.2f}")
 
             # Remove or reduce position
-            remaining_quantity = round(position['quantity'] - sell_quantity, precision)
+            qty_precision = 4 if symbol == 'ETHUSDT' else 5
+            remaining_quantity = round(position['quantity'] - sell_quantity, qty_precision)
             if remaining_quantity <= 0:
                 self.open_positions = [p for p in self.open_positions
                                        if p['trade_id'] != position['trade_id']]
@@ -1726,6 +1737,14 @@ class SmartTrader:
             else:
                 print(f"   ❌ Sell failed: {e}")
             return None
+
+    def safe_exit(self, position, reason='SIGNAL'):
+        result = self.execute_sell(position, reason)
+        if result is None:
+            print(f"   ⚠️ Retrying sell for {position['symbol']}...")
+            time.sleep(2)
+            result = self.execute_sell(position, reason)
+        return result
 
     def log_trade(self, result):
         self.trade_history.append(result)
