@@ -148,11 +148,12 @@ class EntryEngine:
         # ── PHASE 1: CLASSIFY ────────────────────────────────────────────────
         entry_type = None
 
-        # BREAKOUT: range detected + candle just closed above range_high with volume
+        # BREAKOUT: range + confirmed candle close above range_high + EMA trend aligned
         if not sig['active'] and entry_type is None and not self.position_open.get(pair, False):
+            trend_ok = (ema9 is not None and ema21 is not None and ema9 > ema21)
             if (is_range and range_high is not None and prev_close is not None and
                     prev_close <= range_high and close > range_high and
-                    volume > avg_volume * 1.2):
+                    volume > avg_volume * 1.2 and trend_ok):
                 entry_type = 'BREAKOUT'
 
         # SCOUT_RANGE: range market + score >= 2 → small mean-reversion entry
@@ -206,12 +207,6 @@ class EntryEngine:
             print(f"Skipping weak B+ setup (MTF misaligned: {bullish_timeframes}/3 bullish)")
             entry_type = None
         # SCOUT = allow regardless
-
-        if entry_type == 'BREAKOUT' and ema9 is not None and ema21 is not None:
-            trend_ok = ema9 > ema21
-            if not trend_ok:
-                print(f"Skipping {pair}: BREAKOUT blocked — EMA9 ({ema9:.4f}) below EMA21 ({ema21:.4f})")
-                entry_type = None
 
         if entry_type in ('A+', 'B+') and ema20 is not None:
             trend_up = ema20 > ma
