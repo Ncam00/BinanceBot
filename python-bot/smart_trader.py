@@ -43,6 +43,8 @@ MAX_SLIPPAGE          = 0.002  # 0.2% — reject fills worse than this
 MIN_VOLUME_MULTIPLIER = 1.1    # minimum volume vs avg to confirm signal
 POSITION_SIZE_PCT     = 0.12   # ~12% of balance per trade (~$50 on $400)
 TIME_EXIT_CANDLES     = 10     # exit if no TP1 hit after this many candles
+PARTIAL_TP_RATIO      = 0.5    # 50% of position closes at TP1
+BREAKEVEN_BUFFER      = 0.001  # move SL to entry + 0.1% after partial TP
 
 
 class EntryEngine:
@@ -1528,6 +1530,7 @@ class SmartTrader:
                 'symbol': symbol,
                 'quantity': quantity,
                 'original_quantity': quantity,
+                'remaining_size': quantity,
                 'entry_price': fill_price,
                 'entry_resistance': signal.get('resistance', fill_price),
                 'stop_loss': stop_loss,
@@ -1860,14 +1863,15 @@ class SmartTrader:
             if trade_in_profit and breakout_continues and not position.get('scaled_in'):
                 self.add_small_position(position, current_price)
 
-            # 8. TP1 (+1%): sell 50%, move SL to break-even
+            # 8. TP1: sell PARTIAL_TP_RATIO, move SL to entry + BREAKEVEN_BUFFER
             if not position.get('tp1_hit') and current_price >= position['tp1']:
-                qty = position['original_quantity'] * 0.5
+                qty = position['original_quantity'] * PARTIAL_TP_RATIO
                 result = self.execute_sell(position, 'TP1', quantity=qty)
                 if result:
                     position['tp1_hit'] = True
-                    position['stop_loss'] = position['entry_price']
-                    print(f"   🎯 TP1 {symbol} +1% → sold 50%, SL moved to entry")
+                    position['remaining_size'] = position.get('remaining_size', position['original_quantity']) * (1 - PARTIAL_TP_RATIO)
+                    position['stop_loss'] = position['entry_price'] * (1 + BREAKEVEN_BUFFER)
+                    print(f"   🎯 TP1 {symbol} → sold {PARTIAL_TP_RATIO:.0%}, SL → breakeven+{BREAKEVEN_BUFFER:.1%}")
                 continue
 
             # 9. TP2 (+2%): sell another 30% (80% total closed)
