@@ -148,6 +148,13 @@ class EntryEngine:
         # ── PHASE 1: CLASSIFY ────────────────────────────────────────────────
         entry_type = None
 
+        # BREAKOUT: range detected + candle just closed above range_high with volume
+        if not sig['active'] and entry_type is None and not self.position_open.get(pair, False):
+            if (is_range and range_high is not None and prev_close is not None and
+                    prev_close <= range_high and close > range_high and
+                    volume > avg_volume * 1.2):
+                entry_type = 'BREAKOUT'
+
         # SCOUT_RANGE: range market + score >= 2 → small mean-reversion entry
         if not sig['active'] and entry_type is None and is_range:
             range_score = self.get_confidence(price, resistance, volume, avg_volume, close, open_price, ma)
@@ -234,6 +241,10 @@ class EntryEngine:
                     entry_type = None
 
         # ── ACT ──────────────────────────────────────────────────────────────
+        if entry_type == 'BREAKOUT':
+            return {'action': 'CANDIDATE', 'pair': pair, 'level': range_high,
+                    'confidence': 4, 'price': price, 'trade_type': 'BREAKOUT'}
+
         if entry_type == 'SCOUT_RANGE':
             return {'action': 'CANDIDATE_SCOUT', 'pair': pair, 'level': resistance,
                     'confidence': range_score, 'price': price, 'trade_type': 'SCOUT_RANGE'}
@@ -652,6 +663,18 @@ class SmartTrader:
         breakout       = prev_close <= range_high and close > range_high
         volume_confirm = volume > avg_volume * 1.2
         return breakout and volume_confirm
+
+    def detect_range(self, df):
+        if len(df) < 20:
+            return False, None, None
+        range_high = df['high'].rolling(20).max().iloc[-1]
+        range_low  = df['low'].rolling(20).min().iloc[-1]
+        price_now  = df['close'].iloc[-1]
+        atr        = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
+        atr_avg    = (df['high'] - df['low']).rolling(28).mean().iloc[-1]
+        range_size = range_high - range_low
+        is_range   = (range_size < price_now * 0.03) and (atr < atr_avg)
+        return is_range, range_high, range_low
 
     # SUPPORT / RESISTANCE
     # ════════════════════════════════════════════════════════════════════
@@ -1299,7 +1322,7 @@ class SmartTrader:
             base_risk = self.adjust_risk(base_risk)
             trade_type = signal.get('trade_type', 'A+')
             small_position = signal.get('small_position', False)
-            if trade_type == 'A+':
+            if trade_type in ('A+', 'BREAKOUT'):
                 quantity = (balance * 0.15) / price
             elif trade_type == 'B+':
                 quantity = (balance * 0.07) / price
