@@ -187,7 +187,9 @@ class EntryEngine:
             entry_type = 'SCOUT' if scout_score >= 2 else None
         elif sig['active'] and breakout_confirmed and confidence >= 4:
             entry_type = 'A+'
-        elif sig['active'] and breakout_confirmed and confidence >= 3:
+        elif sig['active'] and breakout_confirmed and confidence == 3:
+            entry_type = 'A+'
+        elif sig['active'] and breakout_confirmed and confidence == 2:
             entry_type = 'B+'
         else:
             entry_type = None
