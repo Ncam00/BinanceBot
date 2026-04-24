@@ -440,7 +440,7 @@ class SmartTrader:
         self.trade_history = []
         self.entry_engine = EntryEngine(self.trading_pairs, execute_fn=self.execute_buy)
         self.trade_lock = False
-        self.last_trade_time = None
+        self.last_trade_time = {}
         self.last_reset_date = datetime.now().date()
         self.last_week_reset_key = self._get_week_key()
         self.daily_start_balance = None       # Set on first balance fetch of the day
@@ -1261,6 +1261,19 @@ class SmartTrader:
         if self.trade_lock:
             print(f"   🔒 TRADE LOCK - skipping duplicate {symbol}")
             return None
+
+        # Never re-enter an already open position
+        if self.position_open.get(symbol, False):
+            print(f"   ⛔ {symbol} already open — skipping re-entry")
+            return None
+
+        # Per-symbol 15-minute cooldown
+        now = time.time()
+        if symbol in self.last_trade_time and now - self.last_trade_time[symbol] < 900:
+            remaining = 900 - (now - self.last_trade_time[symbol])
+            print(f"   ⏳ {symbol} cooldown: {remaining:.0f}s remaining")
+            return None
+
         self.trade_lock = True
         try:
             strong_setup = signal.get('strength', 0) >= self.strong_setup_threshold
@@ -1370,7 +1383,7 @@ class SmartTrader:
 
             self.open_positions.append(position)
             self.position_open[symbol] = True
-            self.last_trade_time = time.time()
+            self.last_trade_time[symbol] = time.time()
             self.daily_trades += 1
 
             if signal.get('clear_breakout_wait'):
@@ -1704,7 +1717,7 @@ class SmartTrader:
             self.daily_loss = 0.0
             self.daily_loss_ratio = 0.0
             self.consecutive_losses = 0
-            self.last_trade_time = None
+            self.last_trade_time = {}
             self.last_reset_date = today
             self.daily_start_balance = self.get_balance()
             self.send_telegram(
@@ -1881,9 +1894,10 @@ class SmartTrader:
         if self.daily_trades >= self.hard_max_trades:
             return False, f"🛑 MAX TRADES: {self.daily_trades}/{self.hard_max_trades}"
 
-        # Cooldown
-        if self.last_trade_time and time.time() - self.last_trade_time < 300:
-            remaining = 300 - (time.time() - self.last_trade_time)
+        # Cooldown (global: 300s since any trade)
+        last_any = max(self.last_trade_time.values()) if self.last_trade_time else None
+        if last_any and time.time() - last_any < 300:
+            remaining = 300 - (time.time() - last_any)
             return False, f"⏳ COOLDOWN: {remaining:.0f}s remaining"
 
         # Session trade limit
