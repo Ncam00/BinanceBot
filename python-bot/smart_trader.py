@@ -37,7 +37,7 @@ import pytz
 load_dotenv()
 
 TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT']
-TRAILING_STOP         = 0.992
+TRAILING_STOP         = 0.985
 MAX_TRADES_PER_DAY    = 3
 MAX_SLIPPAGE          = 0.002  # 0.2% — reject fills worse than this
 MIN_VOLUME_MULTIPLIER = 1.1    # minimum volume vs avg to confirm signal
@@ -1839,6 +1839,7 @@ class SmartTrader:
                 continue
 
             pnl_percent = ((current_price - position['entry_price']) / position['entry_price']) * 100
+            profit = (current_price - position['entry_price']) * position['quantity']
 
             # 1. STOP LOSS
             if current_price <= position['stop_loss']:
