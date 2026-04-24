@@ -41,6 +41,8 @@ TRAILING_STOP         = 0.992
 MAX_TRADES_PER_DAY    = 3
 MAX_SLIPPAGE          = 0.002  # 0.2% — reject fills worse than this
 MIN_VOLUME_MULTIPLIER = 1.1    # minimum volume vs avg to confirm signal
+POSITION_SIZE_PCT     = 0.12   # ~12% of balance per trade (~$50 on $400)
+TIME_EXIT_CANDLES     = 10     # exit if no TP1 hit after this many candles
 
 
 class EntryEngine:
@@ -1389,13 +1391,13 @@ class SmartTrader:
             trade_type = signal.get('trade_type', 'A+')
             small_position = signal.get('small_position', False)
             if trade_type in ('A+', 'BREAKOUT', 'PULLBACK_ENTRY'):
-                quantity = (balance * 0.15) / price
+                quantity = (balance * POSITION_SIZE_PCT * 0.70) / price
             elif trade_type == 'B+':
-                quantity = (balance * 0.07) / price
+                quantity = (balance * POSITION_SIZE_PCT * 0.50) / price
             elif trade_type in ('SCOUT', 'SCOUT_RANGE'):
-                quantity = (balance * 0.05) / price   # 30% of intended; add 70% on confirmation
+                quantity = (balance * POSITION_SIZE_PCT * 0.30) / price
             elif small_position:
-                quantity = (balance * 0.05) / price
+                quantity = (balance * POSITION_SIZE_PCT * 0.30) / price
             else:
                 risk_percent = base_risk if strong_setup else base_risk * 0.5
                 quantity = self.calculate_position_size(balance, price, stop_loss_price, risk_percent)
@@ -1464,7 +1466,7 @@ class SmartTrader:
                 'position_type': trade_type,
                 'added': False,
                 'range_high': signal.get('range_high'),
-                'tp1': fill_price * 1.010,
+                'tp1': fill_price + (take_profit - fill_price) * 0.5,
                 'tp2': fill_price * 1.020,
                 'tp3': fill_price * 1.025,
                 'tp1_hit': False,
@@ -1472,6 +1474,7 @@ class SmartTrader:
                 'runner_trailing': 0.0,
                 'partial_taken': False,
                 'runner_active': False,
+                'candle_count': 0,
                 'be_active': False,
                 'trailing_stop_active': False,
                 'highest_price': fill_price,
@@ -1659,6 +1662,14 @@ class SmartTrader:
 
             # 2. KILL BAD TRADES: exit if still losing after 3 candles (45 min)
             candles_open = int((datetime.now() - position['entry_time']).total_seconds() / (15 * 60))
+            position['candle_count'] = candles_open
+
+            # TIME EXIT: no momentum after TIME_EXIT_CANDLES and TP1 not hit
+            if candles_open >= TIME_EXIT_CANDLES and not position.get('tp1_hit'):
+                print(f"\n   ⏱️ TIME EXIT {symbol}: {candles_open} candles, no momentum")
+                self.execute_sell(position, 'TIME_EXIT')
+                continue
+
             if candles_open > 3 and pnl_percent < 0:
                 print(f"\n   ⚡ KILL BAD TRADE {symbol}: {candles_open} candles open, PNL {pnl_percent:.2f}%")
                 self.execute_sell(position, 'TIMEOUT_LOSS')
@@ -1732,8 +1743,8 @@ class SmartTrader:
                 if current_price > position.get('highest_price', 0):
                     position['highest_price'] = current_price
 
-                # looser trail after partial TP (let winner run)
-                trail_mult = 0.990 if position.get('tp1_hit') else self.trailing_stop_multiplier
+                # tighter trail AFTER profit locked; looser before TP1
+                trail_mult = 0.995 if position.get('tp1_hit') else 0.990
 
                 if not position.get('trailing_stop_active'):
                     position['trailing_stop_active'] = True
