@@ -1489,13 +1489,13 @@ class SmartTrader:
             base_risk = self.adjust_risk(base_risk)
             trade_type = signal.get('trade_type', 'A+')
             small_position = signal.get('small_position', False)
-            if trade_type == 'BREAKOUT_STRONG':
-                quantity = (balance * POSITION_SIZE_PCT * 0.60) / price
+            if trade_type in ('BREAKOUT_STRONG', 'A+_BREAKOUT'):
+                quantity = (balance * POSITION_SIZE_PCT * 0.70) / price
             elif trade_type in ('A+', 'BREAKOUT', 'PULLBACK_ENTRY'):
                 quantity = (balance * POSITION_SIZE_PCT * 0.50) / price
             elif trade_type in ('B+', 'PULLBACK'):
                 quantity = (balance * POSITION_SIZE_PCT * 0.40) / price
-            elif trade_type in ('SCOUT', 'SCOUT_RANGE'):
+            elif trade_type in ('SCOUT', 'SCOUT_RANGE', 'SCOUT_BREAKOUT'):
                 quantity = (balance * POSITION_SIZE_PCT * 0.30) / price
             elif small_position:
                 quantity = (balance * POSITION_SIZE_PCT * 0.30) / price
@@ -1744,6 +1744,64 @@ class SmartTrader:
         log_path = os.path.join(os.path.dirname(__file__), 'trade_log.jsonl')
         with open(log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(trade_data, ensure_ascii=True) + "\n")
+
+    # ════════════════════════════════════════════════════════════════════
+    # UNIFIED ENTRY CHECK
+    # ════════════════════════════════════════════════════════════════════
+    def check_entry(self, symbol, df):
+        # ── HARD GUARDS ──────────────────────────────────────────────────
+        if self.open_positions:
+            return
+        if self.daily_trades >= MAX_TRADES_PER_DAY:
+            return
+        last_any = max(self.last_trade_time.values()) if self.last_trade_time else 0
+        if time.time() - last_any < 900:
+            return
+
+        # ── CORE DATA ────────────────────────────────────────────────────
+        close  = df['close']
+        high   = df['high']
+        low    = df['low']
+        volume = df['volume']
+        price  = close.iloc[-1]
+
+        # ── TREND ────────────────────────────────────────────────────────
+        ema_fast = close.ewm(span=9).mean()
+        ema_slow = close.ewm(span=21).mean()
+        trend    = ema_fast.iloc[-1] > ema_slow.iloc[-1]
+
+        # ── MOMENTUM ─────────────────────────────────────────────────────
+        momentum = close.iloc[-1] > close.iloc[-3]
+
+        # ── VOLUME ───────────────────────────────────────────────────────
+        avg_vol      = volume.rolling(20).mean().iloc[-1]
+        volume_spike = volume.iloc[-1] > avg_vol * MIN_VOLUME_MULTIPLIER
+
+        # ── BREAKOUT ─────────────────────────────────────────────────────
+        recent_high = high.rolling(20).max().iloc[-2]
+        breakout    = price > recent_high
+
+        # ── VOLATILITY EXPANSION ─────────────────────────────────────────
+        atr                 = (high - low).rolling(14).mean()
+        volatility_expanding = len(atr) >= 6 and atr.iloc[-1] > atr.iloc[-5]
+
+        # ── REGIME FILTER ────────────────────────────────────────────────
+        trend_strength = abs(ema_fast.iloc[-1] - ema_slow.iloc[-1])
+        is_trending    = trend_strength > price * 0.0015
+
+        # ── SCORE ────────────────────────────────────────────────────────
+        score = sum([trend, momentum, volume_spike, breakout,
+                     volatility_expanding, is_trending])
+
+        # ── ENTRY ────────────────────────────────────────────────────────
+        top_atr = atr.iloc[-1]
+        if score >= 5:
+            print(f"   ⭐ A+ BREAKOUT {symbol} score={score}/6 @ {price:.4f}")
+            self.execute_trade(symbol, price, atr=top_atr, trade_type='A+_BREAKOUT')
+            return
+        if score >= 4:
+            print(f"   🔍 SCOUT BREAKOUT {symbol} score={score}/6 @ {price:.4f}")
+            self.execute_trade(symbol, price, atr=top_atr, trade_type='SCOUT_BREAKOUT')
 
     # ════════════════════════════════════════════════════════════════════
     # POSITION MANAGEMENT (single unified exit system)
@@ -2294,6 +2352,11 @@ class SmartTrader:
                     if symbol not in ('BTCUSDT',) and not self.btc_is_healthy():
                         print(f"   ⚠️ {symbol} skipped - BTC filter")
                         continue
+
+                    # Unified entry check (score-based)
+                    df_entry = self.get_candles(symbol, '15m', 60)
+                    if df_entry is not None and len(df_entry) >= 32:
+                        self.check_entry(symbol, df_entry)
 
                     signal = self.analyze(symbol)
 
