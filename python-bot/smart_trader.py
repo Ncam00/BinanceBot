@@ -592,6 +592,8 @@ class SmartTrader:
         self.pause_until = None               # time.time() timestamp when pause expires
         self.open_positions = []
         self.position_open = {}
+        self.positions = {}        # symbol → {entry, sl, tp, size, remaining_size, partial_taken, tag, candles, max_price}
+        self.daily_pnl = 0.0
         self.htf_cache = {}
         self.breakout_levels = {}
         self.trade_history = []
@@ -1595,6 +1597,17 @@ class SmartTrader:
             self.open_positions.append(position)
             self.position_open[symbol] = True
             self.last_trade_time[symbol] = time.time()
+            self.positions[symbol] = {
+                'entry':          fill_price,
+                'sl':             stop_loss,
+                'tp':             take_profit,
+                'size':           quantity,
+                'remaining_size': quantity,
+                'partial_taken':  False,
+                'tag':            trade_type,
+                'candles':        0,
+                'max_price':      fill_price,
+            }
             self.daily_trades += 1
 
             if signal.get('clear_breakout_wait'):
@@ -1690,6 +1703,7 @@ class SmartTrader:
                                        if p['trade_id'] != position['trade_id']]
                 self.position_open[symbol] = False
                 self.last_exit_price[symbol] = fill_price
+                self.positions.pop(symbol, None)
             else:
                 position['quantity'] = remaining_quantity
 
@@ -1740,6 +1754,7 @@ class SmartTrader:
                 self.open_positions = [p for p in self.open_positions
                                        if p['trade_id'] != position['trade_id']]
                 self.position_open[symbol] = False
+                self.positions.pop(symbol, None)
             else:
                 print(f"   ❌ Sell failed: {e}")
             return None
@@ -1832,6 +1847,61 @@ class SmartTrader:
     # POSITION MANAGEMENT (single unified exit system)
     # ════════════════════════════════════════════════════════════════════
     def check_positions(self):
+        # ── NEW: self.positions exit loop ────────────────────────────────
+        for symbol, pos in list(self.positions.items()):
+            current_price = self.get_price(symbol)
+            if not current_price:
+                continue
+            open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
+            if open_pos is None:
+                self.positions.pop(symbol, None)
+                continue
+
+            # FULL TP
+            if current_price >= pos['tp']:
+                profit = (current_price - pos['entry']) * pos['size']
+                self.daily_pnl += profit
+                print(f"   🎯 FULL TP {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
+                self.execute_sell(open_pos, 'TP_FULL')
+                self.positions.pop(symbol, None)
+                continue
+
+            # PARTIAL TP: take 50%, move SL to breakeven
+            if not pos['partial_taken'] and current_price >= pos['tp']:
+                partial_size = pos['size'] * PARTIAL_TP_RATIO
+                pos['remaining_size'] -= partial_size
+                pos['partial_taken'] = True
+                profit = (current_price - pos['entry']) * partial_size
+                self.daily_pnl += profit
+                pos['sl'] = pos['entry']
+                print(f"   🟢 PARTIAL TP {symbol} | Closed: {partial_size:.4f} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
+                self.execute_sell(open_pos, 'TP1', quantity=partial_size)
+                continue
+
+            # STOP LOSS
+            if current_price <= pos['sl']:
+                profit = (current_price - pos['entry']) * pos['remaining_size']
+                self.daily_pnl += profit
+                print(f"   🔴 STOP LOSS {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
+                self.execute_sell(open_pos, 'STOP_LOSS')
+                self.positions.pop(symbol, None)
+                continue
+
+            # UPDATE MAX PRICE
+            if current_price > pos['max_price']:
+                pos['max_price'] = current_price
+
+            # RUNNER EXIT
+            trailing_sl = pos['max_price'] * TRAILING_STOP
+            if current_price <= trailing_sl:
+                profit = (current_price - pos['entry']) * pos['remaining_size']
+                self.daily_pnl += profit
+                print(f"   🏁 RUNNER EXIT {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
+                self.execute_sell(open_pos, 'TRAILING_STOP')
+                self.positions.pop(symbol, None)
+                continue
+        # ── END new loop ─────────────────────────────────────────────────
+
         for position in self.open_positions[:]:
             symbol = position['symbol']
             current_price = self.get_price(symbol)
@@ -2034,6 +2104,7 @@ class SmartTrader:
             self.daily_trades = 0
             self.daily_profit = 0.0
             self.daily_loss = 0.0
+            self.daily_pnl = 0.0
             self.daily_loss_ratio = 0.0
             self.consecutive_losses = 0
             self.last_trade_time = {}
