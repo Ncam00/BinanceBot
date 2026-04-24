@@ -155,8 +155,8 @@ class EntryEngine:
         # BREAKOUT: range + confirmed candle close above range_high + EMA trend aligned
         if not sig['active'] and entry_type is None and not self.position_open.get(pair, False):
             trend_ok = (ema9 is not None and ema21 is not None and ema9 > ema21)
-            if (is_range and range_high is not None and prev_close is not None and
-                    prev_close <= range_high and close > range_high and
+            if (is_range and range_high is not None and
+                    close > range_high * 1.001 and
                     volume > avg_volume * 1.2 and trend_ok):
                 entry_type = 'BREAKOUT'
 
@@ -664,10 +664,9 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     def detect_breakout(self, df, range_high):
         close      = df['close'].iloc[-1]
-        prev_close = df['close'].iloc[-2]
         volume     = df['volume'].iloc[-1]
         avg_volume = df['volume'].rolling(20).mean().iloc[-1]
-        breakout       = prev_close <= range_high and close > range_high
+        breakout       = close > range_high * 1.001  # small buffer avoids fake breakouts
         volume_confirm = volume > avg_volume * 1.2
         return breakout and volume_confirm
 
