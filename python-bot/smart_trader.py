@@ -97,7 +97,7 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend', recent_volumes=None, range_high=None, is_range=False):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend', recent_volumes=None, range_high=None, is_range=False, ema9=None, ema21=None):
         sig = self.get(pair)
 
         # ADX filter — skip choppy markets
@@ -207,6 +207,12 @@ class EntryEngine:
             entry_type = None
         # SCOUT = allow regardless
 
+        if entry_type == 'BREAKOUT' and ema9 is not None and ema21 is not None:
+            trend_ok = ema9 > ema21
+            if not trend_ok:
+                print(f"Skipping {pair}: BREAKOUT blocked — EMA9 ({ema9:.4f}) below EMA21 ({ema21:.4f})")
+                entry_type = None
+
         if entry_type in ('A+', 'B+') and ema20 is not None:
             trend_up = ema20 > ma
             ema_entry_ok = price <= ema20 * 1.002
@@ -305,6 +311,8 @@ class EntryEngine:
                 recent_volumes=data.get('recent_volumes'),
                 range_high=data.get('range_high'),
                 is_range=data.get('is_range', False),
+                ema9=data.get('ema9'),
+                ema21=data.get('ema21'),
             )
             atr = data.get('atr', 0)
             atr_avg = data.get('atr_avg', 0)
@@ -797,6 +805,8 @@ class SmartTrader:
                 'support':    sr['support'],
                 'ma50':       self.get_ma(closes, 50),
                 'ema20':      self.calculate_ema(df['close'], 20),
+                'ema9':       df['close'].ewm(span=9).mean().iloc[-1],
+                'ema21':      df['close'].ewm(span=21).mean().iloc[-1],
                 'adx':        adx['adx'],
                 'atr':               atr_val,
                 'atr_avg':           atr_avg,
