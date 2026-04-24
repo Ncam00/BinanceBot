@@ -36,6 +36,10 @@ import pytz
 
 load_dotenv()
 
+TRADING_PAIRS      = ['BTCUSDT', 'ETHUSDT']
+TRAILING_STOP      = 0.992
+MAX_TRADES_PER_DAY = 3
+
 
 class EntryEngine:
     MAX_RETEST_CANDLES = 25
@@ -370,9 +374,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # TRADING PAIRS
         # ════════════════════════════════════════════════════════════════════
-        self.trading_pairs = [
-            'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT', 'BNBUSDT'
-        ]
+        self.trading_pairs = TRADING_PAIRS
         self.max_positions = 1  # One position at a time - quality over quantity
 
         # ════════════════════════════════════════════════════════════════════
@@ -390,8 +392,8 @@ class SmartTrader:
         self.daily_profit_target = 5.00       # Stop new trades at $5 profit
         self.max_daily_loss = 7.00            # Stop trading at $7 loss
         self.max_weekly_loss = 20.00          # Stop trading at $20 loss this week
-        self.max_trades_per_day = 3           # Absolute max trades per day
-        self.hard_max_trades = 3              # Cannot be bypassed
+        self.max_trades_per_day = MAX_TRADES_PER_DAY
+        self.hard_max_trades = MAX_TRADES_PER_DAY
         self.trade_cooldown_seconds = 300     # 5 min between trades
         self.max_consecutive_losses = 4       # Pause trading after 4 losses in a row
         self.loss_streak_pause_hours = 2      # Hours to pause after hitting streak limit
@@ -408,8 +410,8 @@ class SmartTrader:
         # EXIT MANAGEMENT
         # ════════════════════════════════════════════════════════════════════
         self.break_even_trigger = 1.2         # Move SL to entry at 1.2% profit
-        self.trailing_stop_activation = 1.5   # Activate trailing stop at 1.5% profit
-        self.trailing_stop_distance = 0.8     # Trail 0.8% below peak
+        self.trailing_stop_activation = 1.5
+        self.trailing_stop_multiplier = TRAILING_STOP  # runner trail multiplier (0.992 = 0.8% below peak)
         self.partial_tp_percent = 0.70        # Sell 70% at first TP, let 30% run
 
         # ════════════════════════════════════════════════════════════════════
@@ -1645,7 +1647,7 @@ class SmartTrader:
                 if not position.get('trailing_stop_active'):
                     position['trailing_stop_active'] = True
                     position['highest_price'] = current_price
-                    position['trailing_stop_price'] = current_price * (1 - self.trailing_stop_distance / 100)
+                    position['trailing_stop_price'] = current_price * self.trailing_stop_multiplier
                     print(f"   🔒 TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
                     self.send_telegram(
                         f"🔒 Trailing Stop Active\n{symbol}\n"
@@ -1661,7 +1663,7 @@ class SmartTrader:
                     if strong_trend and atr:
                         new_trail = current_price - atr * 0.8
                     else:
-                        new_trail = current_price * (1 - self.trailing_stop_distance / 100)
+                        new_trail = current_price * self.trailing_stop_multiplier
                     locked = self.trailing_stop(current_price, position['entry_price'])
                     if locked:
                         new_trail = max(new_trail, locked)
@@ -1697,13 +1699,13 @@ class SmartTrader:
                 result = self.execute_sell(position, 'TP2', quantity=qty)
                 if result:
                     position['tp2_hit'] = True
-                    position['runner_trailing'] = current_price * 0.992
+                    position['runner_trailing'] = current_price * self.trailing_stop_multiplier
                     print(f"   🎯 TP2 {symbol} +2% → sold 30%, runner trailing @ ${position['runner_trailing']:.4f}")
                 continue
 
             # 10. RUNNER (last 20%): trail at price * 0.992, sell all when hit
             if position.get('tp2_hit'):
-                position['runner_trailing'] = max(position['runner_trailing'], current_price * 0.992)
+                position['runner_trailing'] = max(position['runner_trailing'], current_price * self.trailing_stop_multiplier)
                 if current_price <= position['runner_trailing']:
                     print(f"\n   🏁 RUNNER EXIT {symbol} @ ${current_price:.4f}")
                     self.execute_sell(position, 'RUNNER_TRAIL')
