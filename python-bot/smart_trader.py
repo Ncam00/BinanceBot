@@ -1487,27 +1487,15 @@ class SmartTrader:
             max_sl = price * 0.97
             stop_loss_price = max(structure_sl, max_sl)
 
-            # Risk % by session and setup quality
-            session, _ = self.get_market_session()
-            base_risk = 0.01 if session == 'asia' else 0.015
-            base_risk = self.adjust_risk(base_risk)
+            # Risk-based position sizing: risk 1% of balance per trade
             trade_type = signal.get('trade_type', 'A+')
-            small_position = signal.get('small_position', False)
-            if trade_type in ('BREAKOUT_STRONG', 'A+_BREAKOUT'):
-                quantity = (balance * POSITION_SIZE_PCT * 0.70) / price
-            elif trade_type in ('A+', 'BREAKOUT', 'PULLBACK_ENTRY'):
-                quantity = (balance * POSITION_SIZE_PCT * 0.50) / price
-            elif trade_type in ('B+', 'PULLBACK'):
-                quantity = (balance * POSITION_SIZE_PCT * 0.40) / price
-            elif trade_type in ('SCOUT', 'SCOUT_RANGE', 'SCOUT_BREAKOUT'):
-                quantity = (balance * POSITION_SIZE_PCT * 0.30) / price
-            elif small_position:
-                quantity = (balance * POSITION_SIZE_PCT * 0.30) / price
-            else:
-                risk_percent = base_risk if strong_setup else base_risk * 0.5
-                quantity = self.calculate_position_size(balance, price, stop_loss_price, risk_percent)
-            size_label = {'A+': '15%', 'B+': '7%', 'SCOUT': '5% (scout)'}
-            print(f"   📐 {trade_type} setup → size {size_label.get(trade_type, '5%')} of balance")
+            sl_distance = price - stop_loss_price
+            if sl_distance <= 0:
+                print(f"   ⚠️ Invalid SL distance for {symbol} — skipping")
+                return None
+            risk_amount = balance * 0.01
+            quantity = risk_amount / sl_distance
+            print(f"   📐 {trade_type} | Risk: ${risk_amount:.2f} | SL dist: ${sl_distance:.4f} | Qty: {quantity:.5f}")
 
             if quantity == 0 or quantity * price < 10:
                 print(f"   ⚠️ Position size too small - skipping")
