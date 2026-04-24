@@ -148,6 +148,12 @@ class EntryEngine:
         # ── PHASE 1: CLASSIFY ────────────────────────────────────────────────
         entry_type = None
 
+        # SCOUT_RANGE: range market + score >= 2 → small mean-reversion entry
+        if not sig['active'] and entry_type is None and is_range:
+            range_score = self.get_confidence(price, resistance, volume, avg_volume, close, open_price, ma)
+            if range_score >= 2:
+                entry_type = 'SCOUT_RANGE'
+
         # Squeeze: tight range + rising volume → anticipatory small entry
         if not sig['active'] and entry_type is None:
             tight_range = market_condition == 'range' or is_range
@@ -221,6 +227,10 @@ class EntryEngine:
                     entry_type = None
 
         # ── ACT ──────────────────────────────────────────────────────────────
+        if entry_type == 'SCOUT_RANGE':
+            return {'action': 'CANDIDATE_SCOUT', 'pair': pair, 'level': resistance,
+                    'confidence': range_score, 'price': price, 'trade_type': 'SCOUT_RANGE'}
+
         if entry_type == 'SQUEEZE':
             return {'action': 'CANDIDATE_SCOUT', 'pair': pair, 'level': resistance,
                     'confidence': 2, 'price': price, 'trade_type': 'SCOUT'}
@@ -1262,7 +1272,7 @@ class SmartTrader:
                 quantity = (balance * 0.15) / price
             elif trade_type == 'B+':
                 quantity = (balance * 0.07) / price
-            elif trade_type == 'SCOUT':
+            elif trade_type in ('SCOUT', 'SCOUT_RANGE'):
                 quantity = (balance * 0.05) / price   # 30% of intended; add 70% on confirmation
             elif small_position:
                 quantity = (balance * 0.05) / price
