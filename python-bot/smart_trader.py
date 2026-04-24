@@ -496,6 +496,14 @@ class SmartTrader:
         self.daily_profit = 0.0               # SINGLE profit tracker
         self.daily_loss = 0.0                 # SINGLE loss tracker
         self.daily_loss_ratio = 0.0
+        self.stats = {
+            'wins':         0,
+            'losses':       0,
+            'total_pnl':    0.0,
+            'best_trade':   float('-inf'),
+            'worst_trade':  float('inf'),
+            'total_trades': 0,
+        }
         self.weekly_pnl = 0.0
         self.daily_trades = 0
         self.consecutive_losses = 0
@@ -1536,8 +1544,14 @@ class SmartTrader:
             # Update single profit/loss tracker
             if pnl >= 0:
                 self.daily_profit += pnl
+                self.stats['wins'] += 1
             else:
                 self.daily_loss += abs(pnl)
+                self.stats['losses'] += 1
+            self.stats['total_pnl']    += pnl
+            self.stats['total_trades'] += 1
+            self.stats['best_trade']   = max(self.stats['best_trade'], pnl)
+            self.stats['worst_trade']  = min(self.stats['worst_trade'], pnl)
             self.weekly_pnl += pnl
 
             # Remove or reduce position
@@ -1608,6 +1622,10 @@ class SmartTrader:
             return 0
         wins = self.trade_history.count('WIN')
         return wins / len(self.trade_history)
+
+    def get_win_rate(self):
+        total = self.stats['wins'] + self.stats['losses']
+        return (self.stats['wins'] / total * 100) if total > 0 else 0
 
     def _log_trade(self, trade_data):
         log_path = os.path.join(os.path.dirname(__file__), 'trade_log.jsonl')
