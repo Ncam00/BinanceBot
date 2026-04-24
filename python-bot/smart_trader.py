@@ -45,6 +45,8 @@ POSITION_SIZE_PCT     = 0.12   # ~12% of balance per trade (~$50 on $400)
 TIME_EXIT_CANDLES     = 10     # exit if no TP1 hit after this many candles
 PARTIAL_TP_RATIO      = 0.5    # 50% of position closes at TP1
 BREAKEVEN_BUFFER      = 0.001  # move SL to entry + 0.1% after partial TP
+ATR_SL_MULTIPLIER     = 1.5    # stop loss = entry - ATR * 1.5
+ATR_TP_MULTIPLIER     = 3.0    # take profit = entry + ATR * 3.0
 
 
 class EntryEngine:
@@ -1536,6 +1538,10 @@ class SmartTrader:
             if 'tp_percent_override' in signal:
                 take_profit = fill_price * (1 + signal['tp_percent_override'] / 100)
                 stop_loss   = fill_price * (1 - signal['sl_percent_override'] / 100)
+            elif signal.get('atr'):
+                atr_val     = signal['atr']
+                stop_loss   = fill_price - atr_val * ATR_SL_MULTIPLIER
+                take_profit = fill_price + atr_val * ATR_TP_MULTIPLIER
             else:
                 take_profit, stop_loss = self.set_tp_sl(
                     fill_price,
