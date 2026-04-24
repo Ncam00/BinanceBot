@@ -1397,6 +1397,13 @@ class SmartTrader:
                 print(f"   ⚠️ Position size too small - skipping")
                 return None
 
+            # Pre-order slippage check: current price vs signal price
+            signal_price = signal.get('price', price)
+            pre_slippage = abs(price - signal_price) / signal_price
+            if pre_slippage > MAX_SLIPPAGE:
+                print(f"   ⚠️ {symbol} SKIP — slippage too high ({pre_slippage:.3%} > {MAX_SLIPPAGE:.3%})")
+                return None
+
             step_size, precision = self.get_symbol_precision(symbol)
             quantity = round(quantity, precision)
 
@@ -1408,7 +1415,7 @@ class SmartTrader:
             )
 
             fill_price = float(order['fills'][0]['price'])
-            slippage = (fill_price - price) / price
+            slippage = abs(fill_price - price) / price
             if slippage > MAX_SLIPPAGE:
                 print(f"   ⚠️ {symbol} fill rejected — slippage {slippage:.3%} > MAX {MAX_SLIPPAGE:.3%}")
                 return None
