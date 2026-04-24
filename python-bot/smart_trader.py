@@ -39,6 +39,7 @@ load_dotenv()
 TRADING_PAIRS      = ['BTCUSDT', 'ETHUSDT']
 TRAILING_STOP      = 0.992
 MAX_TRADES_PER_DAY = 3
+MAX_SLIPPAGE       = 0.002  # 0.2% — reject fills worse than this
 
 
 class EntryEngine:
@@ -1407,6 +1408,10 @@ class SmartTrader:
             )
 
             fill_price = float(order['fills'][0]['price'])
+            slippage = (fill_price - price) / price
+            if slippage > MAX_SLIPPAGE:
+                print(f"   ⚠️ {symbol} fill rejected — slippage {slippage:.3%} > MAX {MAX_SLIPPAGE:.3%}")
+                return None
             entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
             if 'tp_percent_override' in signal:
