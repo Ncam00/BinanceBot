@@ -1820,13 +1820,13 @@ class SmartTrader:
 
         # ── ENTRY ────────────────────────────────────────────────────────
         top_atr = atr.iloc[-1]
-        if score >= 5:
-            print(f"   ⭐ A+ BREAKOUT {symbol} score={score}/6 @ {price:.4f}")
-            self.execute_trade(symbol, price, atr=top_atr, trade_type='A+_BREAKOUT')
+        if score == 3:
+            print(f"   ⭐ A+ {symbol} score={score}/6 @ {price:.4f}")
+            self.execute_trade(symbol, price, atr=top_atr, trade_type='A+_BREAKOUT', small_position=False)
             return
-        if score >= 4:
-            print(f"   🔍 SCOUT BREAKOUT {symbol} score={score}/6 @ {price:.4f}")
-            self.execute_trade(symbol, price, atr=top_atr, trade_type='SCOUT_BREAKOUT')
+        if score >= 2:
+            print(f"   🔍 SCOUT {symbol} score={score}/6 @ {price:.4f}")
+            self.execute_trade(symbol, price, atr=top_atr, trade_type='SCOUT', small_position=True)
 
     # ════════════════════════════════════════════════════════════════════
     # POSITION MANAGEMENT (single unified exit system)
