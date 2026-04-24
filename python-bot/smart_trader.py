@@ -185,6 +185,13 @@ class EntryEngine:
             entry_type = None
 
         # ── PHASE 2: FILTER ──────────────────────────────────────────────────
+        # Pullback filter: only enter within 0.2% of breakout level
+        if entry_type in ('A+', 'B+'):
+            breakout_level = sig['level'] if sig['active'] else resistance
+            if price > breakout_level * 1.002:
+                print(f"Skipping {pair}: no pullback after breakout (price {price:.4f} > level {breakout_level:.4f} * 1.002)")
+                entry_type = None
+
         if entry_type == 'A+' and bullish_timeframes < 2:
             print(f"Skipping weak breakout (MTF misaligned: {bullish_timeframes}/3 bullish)")
             entry_type = None
@@ -635,6 +642,17 @@ class SmartTrader:
         }
 
     # ════════════════════════════════════════════════════════════════════
+    # BREAKOUT DETECTION
+    # ════════════════════════════════════════════════════════════════════
+    def detect_breakout(self, df, range_high):
+        close      = df['close'].iloc[-1]
+        prev_close = df['close'].iloc[-2]
+        volume     = df['volume'].iloc[-1]
+        avg_volume = df['volume'].rolling(20).mean().iloc[-1]
+        breakout       = prev_close <= range_high and close > range_high
+        volume_confirm = volume > avg_volume * 1.2
+        return breakout and volume_confirm
+
     # SUPPORT / RESISTANCE
     # ════════════════════════════════════════════════════════════════════
     def calculate_support_resistance(self, df):
