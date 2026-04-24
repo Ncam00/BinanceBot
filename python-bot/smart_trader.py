@@ -1,3 +1,14 @@
+import logging
+import os
+
+os.makedirs("logs", exist_ok=True)
+
+logging.basicConfig(
+    filename="logs/trades.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(message)s"
+)
+
 # ==============================
 # CONFIG
 # ==============================
@@ -15,6 +26,7 @@ class SmartTrader:
     def __init__(self):
         self.positions = {}
         self.trades_today = 0
+        self.daily_pnl = 0.0
         self.htf_cache = {}
 
     # ==============================
@@ -42,6 +54,9 @@ class SmartTrader:
     def check_entry(self, symbol, df):
 
         if symbol in self.positions:
+            return
+
+        if self.trades_today >= 3:
             return
 
         signal = self.analyze_market(df)
@@ -73,7 +88,8 @@ class SmartTrader:
             "max_price": price
         }
 
-        print(f"ENTER {symbol} | {tag} | Entry: {price} | SL: {sl} | TP: {tp}")
+        self.trades_today += 1
+        logging.info(f"ENTER {symbol} | {tag} | Entry: {price} | SL: {sl} | TP: {tp}")
 
     # ==============================
     # EXIT
@@ -90,13 +106,17 @@ class SmartTrader:
 
         # STOP LOSS
         if price <= pos["sl"]:
-            print(f"STOP LOSS HIT {symbol}")
+            profit = price - pos["entry"]
+            self.daily_pnl += profit
+            logging.info(f"STOP LOSS HIT {symbol} | PnL: {profit:.4f} | Daily PnL: {self.daily_pnl:.4f}")
             del self.positions[symbol]
             return
 
         # TAKE PROFIT
         if price >= pos["tp"]:
-            print(f"TAKE PROFIT {symbol}")
+            profit = price - pos["entry"]
+            self.daily_pnl += profit
+            logging.info(f"TAKE PROFIT {symbol} | PnL: {profit:.4f} | Daily PnL: {self.daily_pnl:.4f}")
             del self.positions[symbol]
             return
 
@@ -107,13 +127,17 @@ class SmartTrader:
         trailing_sl = pos["max_price"] * TRAILING_STOP
 
         if price <= trailing_sl:
-            print(f"TRAILING EXIT {symbol}")
+            profit = price - pos["entry"]
+            self.daily_pnl += profit
+            logging.info(f"TRAILING EXIT {symbol} | PnL: {profit:.4f} | Daily PnL: {self.daily_pnl:.4f}")
             del self.positions[symbol]
             return
 
         # TIME EXIT
         if pos["candles"] >= TIME_EXIT_CANDLES:
-            print(f"TIME EXIT {symbol}")
+            profit = price - pos["entry"]
+            self.daily_pnl += profit
+            logging.info(f"TIME EXIT {symbol} | PnL: {profit:.4f} | Daily PnL: {self.daily_pnl:.4f}")
             del self.positions[symbol]
 
     # ==============================
