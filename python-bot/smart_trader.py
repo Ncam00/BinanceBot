@@ -309,8 +309,29 @@ class EntryEngine:
             df = self.get_candles(symbol, '15m', 60)
             if df is None or len(df) < 32:
                 continue
-            price     = data.get('price', close)
-            top_atr   = data.get('atr')
+            price      = data.get('price', close)
+            top_atr    = data.get('atr')
+            prev_close = data.get('prev_close', close)
+            ma         = data.get('ma50', close)
+
+            # Skip if any position already open (one at a time)
+            if self.open_positions:
+                continue
+
+            # Per-symbol 15-min cooldown
+            last_t = self.last_trade_time.get(symbol, 0)
+            if time.time() - last_t < 900:
+                continue
+
+            # Compute entry score (trend, momentum, volume, structure)
+            score = sum([
+                ema9 is not None and ema21 is not None and ema9 > ema21,
+                close > prev_close,
+                volume > avg_volume * MIN_VOLUME_MULTIPLIER,
+                price > ma,
+            ])
+            if score < 3:
+                continue
 
             breakout_up, _ = self.detect_breakout(df)
             vol_exp        = self.volatility_expansion(df)
