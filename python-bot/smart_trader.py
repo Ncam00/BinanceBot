@@ -305,22 +305,57 @@ class EntryEngine:
             ema21      = data.get('ema21')
             trend_ok   = ema9 is not None and ema21 is not None and ema9 > ema21
 
-            # Phase 1: mark breakout level
+            # fetch df for signal methods
+            df = self.get_candles(symbol, '15m', 60)
+            if df is None or len(df) < 32:
+                continue
+            price     = data.get('price', close)
+            top_atr   = data.get('atr')
+
+            breakout_up, _ = self.detect_breakout(df)
+            vol_exp        = self.volatility_expansion(df)
+            pullback       = self.pullback_entry(df)
+
+            # Strong breakout: breakout + volatility expansion
+            if breakout_up and vol_exp:
+                print(f"   🚀 STRONG BREAKOUT {symbol} @ {price:.4f}")
+                self.execute_trade(symbol, price, small_position=False,
+                                   atr=top_atr, trade_type='BREAKOUT_STRONG')
+                candidates.append({'action': 'BUY', 'pair': symbol, 'price': price,
+                                   'confidence': 5, 'trade_type': 'BREAKOUT_STRONG'})
+                continue
+
+            # Regular breakout
+            if breakout_up:
+                print(f"   🔴 BREAKOUT DETECTED {symbol} @ {price:.4f}")
+                self.execute_trade(symbol, price, small_position=False,
+                                   atr=top_atr, trade_type='BREAKOUT')
+                candidates.append({'action': 'BUY', 'pair': symbol, 'price': price,
+                                   'confidence': 4, 'trade_type': 'BREAKOUT'})
+                continue
+
+            # Pullback into EMA9 and bounce
+            if pullback:
+                print(f"   ↩️ PULLBACK ENTRY {symbol} @ {price:.4f}")
+                self.execute_trade(symbol, price, small_position=False,
+                                   atr=top_atr, trade_type='PULLBACK')
+                candidates.append({'action': 'BUY', 'pair': symbol, 'price': price,
+                                   'confidence': 3, 'trade_type': 'PULLBACK'})
+                continue
+
+            # Phase 1: mark range breakout level (two-phase)
             if (is_range and range_high is not None and
                     close > range_high * 1.001 and
                     volume > avg_volume * MIN_VOLUME_MULTIPLIER and trend_ok):
                 if symbol not in self.breakout_levels:
                     self.breakout_levels[symbol] = range_high
-                    print(f"   🔴 BREAKOUT DETECTED {symbol} @ {range_high:.4f} — waiting for pullback")
+                    print(f"   📌 RANGE BREAKOUT MARKED {symbol} @ {range_high:.4f} — waiting for pullback")
 
-            # Phase 2: enter on pullback
+            # Phase 2: enter on pullback to range breakout level
             if symbol in self.breakout_levels:
                 breakout_level = self.breakout_levels[symbol]
-                price = data.get('price', close)
                 prev_close = data.get('prev_close', close)
-                open_price = data.get('open', close)
                 ma = data.get('ma50', close)
-                resistance = data.get('resistance', close)
                 score = sum([
                     close > prev_close,
                     volume > avg_volume * 0.9,
@@ -328,8 +363,7 @@ class EntryEngine:
                     ema9 is not None and ema21 is not None and ema9 > ema21,
                 ])
                 if price <= breakout_level * 1.002 and score >= 2:
-                    print(f"   ✅ PULLBACK ENTRY {symbol} @ {price:.4f} (score={score})")
-                    top_atr = data.get('atr')
+                    print(f"   ✅ PULLBACK_ENTRY {symbol} @ {price:.4f} (score={score})")
                     self.execute_trade(symbol, price, small_position=False,
                                        atr=top_atr, trade_type='PULLBACK_ENTRY',
                                        range_high=breakout_level)
@@ -722,13 +756,22 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # BREAKOUT DETECTION
     # ════════════════════════════════════════════════════════════════════
-    def detect_breakout(self, df, range_high):
-        close      = df['close'].iloc[-1]
-        volume     = df['volume'].iloc[-1]
-        avg_volume = df['volume'].rolling(20).mean().iloc[-1]
-        breakout       = close > range_high * 1.001  # small buffer avoids fake breakouts
-        volume_confirm = volume > avg_volume * MIN_VOLUME_MULTIPLIER
-        return breakout and volume_confirm
+    def detect_breakout(self, df):
+        recent_high = df['high'].rolling(20).max().iloc[-2]
+        recent_low  = df['low'].rolling(20).min().iloc[-2]
+        price       = df['close'].iloc[-1]
+        return price > recent_high, price < recent_low
+
+    def volatility_expansion(self, df):
+        recent_range = (df['high'] - df['low']).rolling(10).mean().iloc[-1]
+        past_range   = (df['high'] - df['low']).rolling(30).mean().iloc[-1]
+        return recent_range > past_range * 1.2
+
+    def pullback_entry(self, df):
+        ema       = df['close'].ewm(span=9).mean()
+        price     = df['close'].iloc[-1]
+        prev      = df['close'].iloc[-2]
+        return price > ema.iloc[-1] and prev < ema.iloc[-2]
 
     def detect_range(self, df):
         if len(df) < 20:
@@ -1390,10 +1433,12 @@ class SmartTrader:
             base_risk = self.adjust_risk(base_risk)
             trade_type = signal.get('trade_type', 'A+')
             small_position = signal.get('small_position', False)
-            if trade_type in ('A+', 'BREAKOUT', 'PULLBACK_ENTRY'):
-                quantity = (balance * POSITION_SIZE_PCT * 0.70) / price
-            elif trade_type == 'B+':
+            if trade_type == 'BREAKOUT_STRONG':
+                quantity = (balance * POSITION_SIZE_PCT * 0.60) / price
+            elif trade_type in ('A+', 'BREAKOUT', 'PULLBACK_ENTRY'):
                 quantity = (balance * POSITION_SIZE_PCT * 0.50) / price
+            elif trade_type in ('B+', 'PULLBACK'):
+                quantity = (balance * POSITION_SIZE_PCT * 0.40) / price
             elif trade_type in ('SCOUT', 'SCOUT_RANGE'):
                 quantity = (balance * POSITION_SIZE_PCT * 0.30) / price
             elif small_position:
