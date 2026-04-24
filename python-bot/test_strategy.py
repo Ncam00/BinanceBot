@@ -54,6 +54,31 @@ def get_klines(symbol, interval="5m", limit=100):
     return df
 
 
+def detect_range(df):
+    recent = df[-20:]
+
+    high = recent['high'].max()
+    low = recent['low'].min()
+
+    range_size = (high - low) / low
+
+    # tight range = consolidation
+    is_range = range_size < 0.01  # 1%
+
+    return is_range, high, low
+
+
+def detect_breakout(df, range_high):
+    close = df['close'].iloc[-1]
+    volume = df['volume'].iloc[-1]
+    avg_volume = df['volume'].rolling(20).mean().iloc[-1]
+
+    breakout = close > range_high * 1.001  # avoid fakeouts
+    volume_confirm = volume > avg_volume * 1.2
+
+    return breakout and volume_confirm
+
+
 # ==============================
 # BOT
 # ==============================
@@ -212,13 +237,29 @@ class SmartTrader:
 
             df = get_klines(symbol)
 
+            # Detect range
+            is_range, range_high, range_low = detect_range(df)
+
             trend, momentum, volume = self.analyze_market(df)
             score = sum([trend, momentum, volume])
 
+            # ======================
+            # ENTRY
+            # ======================
             if symbol not in self.positions:
-                if score >= 2:
-                    self.enter_trade(symbol, df, 0.3, "SCOUT")
 
+                # SCOUT inside range (optional early entry)
+                if is_range and score >= 2:
+                    self.enter_trade(symbol, df, 0.3, "SCOUT_RANGE")
+
+                # BREAKOUT ENTRY (THIS IS THE MONEY)
+                elif is_range:
+                    if detect_breakout(df, range_high):
+                        self.enter_trade(symbol, df, 1.0, "BREAKOUT")
+
+            # ======================
+            # MANAGE POSITION
+            # ======================
             else:
                 if score == 3:
                     self.add_position(symbol, df)
