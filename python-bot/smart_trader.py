@@ -47,6 +47,8 @@ PARTIAL_TP_RATIO      = 0.5    # 50% of position closes at TP1
 BREAKEVEN_BUFFER      = 0.001  # move SL to entry + 0.1% after partial TP
 ATR_SL_MULTIPLIER     = 1.5    # stop loss = entry - ATR * 1.5
 ATR_TP_MULTIPLIER     = 3.0    # take profit = entry + ATR * 3.0
+FEE_RATE              = 0.001  # 0.1% per side
+SLIPPAGE_RATE         = 0.0005 # 0.05% estimated slippage
 
 
 class EntryEngine:
@@ -1847,7 +1849,10 @@ class SmartTrader:
 
             # FULL TP
             if current_price >= pos['tp']:
-                profit = (current_price - pos['entry']) * pos['size']
+                gross    = (current_price - pos['entry']) * pos['size']
+                fees     = (pos['entry'] * pos['size'] * FEE_RATE) + (current_price * pos['size'] * FEE_RATE)
+                slippage = current_price * pos['size'] * SLIPPAGE_RATE
+                profit   = gross - fees - slippage
                 self.daily_pnl += profit
                 print(f"   🎯 FULL TP {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
                 self.execute_sell(open_pos, 'TP_FULL')
@@ -1859,7 +1864,10 @@ class SmartTrader:
                 partial_size = pos['size'] * PARTIAL_TP_RATIO
                 pos['remaining_size'] -= partial_size
                 pos['partial_taken'] = True
-                profit = (current_price - pos['entry']) * partial_size
+                gross    = (current_price - pos['entry']) * partial_size
+                fees     = (pos['entry'] * partial_size * FEE_RATE) + (current_price * partial_size * FEE_RATE)
+                slippage = current_price * partial_size * SLIPPAGE_RATE
+                profit   = gross - fees - slippage
                 self.daily_pnl += profit
                 pos['sl'] = pos['entry']
                 print(f"   🟢 PARTIAL TP {symbol} | Closed: {partial_size:.4f} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
@@ -1868,7 +1876,10 @@ class SmartTrader:
 
             # STOP LOSS
             if current_price <= pos['sl']:
-                profit = (current_price - pos['entry']) * pos['remaining_size']
+                gross    = (current_price - pos['entry']) * pos['remaining_size']
+                fees     = (pos['entry'] * pos['remaining_size'] * FEE_RATE) + (current_price * pos['remaining_size'] * FEE_RATE)
+                slippage = current_price * pos['remaining_size'] * SLIPPAGE_RATE
+                profit   = gross - fees - slippage
                 self.daily_pnl += profit
                 print(f"   🔴 STOP LOSS {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
                 self.execute_sell(open_pos, 'STOP_LOSS')
@@ -1882,7 +1893,10 @@ class SmartTrader:
             # RUNNER EXIT
             trailing_sl = pos['max_price'] * TRAILING_STOP
             if current_price <= trailing_sl:
-                profit = (current_price - pos['entry']) * pos['remaining_size']
+                gross    = (current_price - pos['entry']) * pos['remaining_size']
+                fees     = (pos['entry'] * pos['remaining_size'] * FEE_RATE) + (current_price * pos['remaining_size'] * FEE_RATE)
+                slippage = current_price * pos['remaining_size'] * SLIPPAGE_RATE
+                profit   = gross - fees - slippage
                 self.daily_pnl += profit
                 print(f"   🏁 RUNNER EXIT {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
                 self.execute_sell(open_pos, 'TRAILING_STOP')
