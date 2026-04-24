@@ -335,9 +335,19 @@ class EntryEngine:
             if score < 3:
                 continue
 
+            # Skip choppy markets — require EMA9/21 spread > 0.15% of price
+            if not data.get('is_trending', False):
+                print(f"   〰️ {symbol} skipped — not trending (EMA spread too tight)")
+                continue
+
             breakout_up, _ = self.detect_breakout(df)
             vol_exp        = self.volatility_expansion(df)
-            pullback       = self.pullback_entry(df)
+            pullback_ema   = self.pullback_entry(df)
+
+            # Pullback from last exit price — re-entry confirmation
+            last_exit = self.last_exit_price.get(symbol)
+            pullback_from_exit = (last_exit is not None and
+                                  price < last_exit * 0.995 and breakout_up)
 
             # Strong breakout: breakout + volatility expansion
             if breakout_up and vol_exp:
@@ -357,8 +367,17 @@ class EntryEngine:
                                    'confidence': 4, 'trade_type': 'BREAKOUT'})
                 continue
 
+            # Re-entry: pullback from last exit price + breakout confirmed
+            if pullback_from_exit:
+                print(f"   🔁 RE-ENTRY {symbol} @ {price:.4f} (pullback from exit {last_exit:.4f})")
+                self.execute_trade(symbol, price, small_position=False,
+                                   atr=top_atr, trade_type='PULLBACK_ENTRY')
+                candidates.append({'action': 'BUY', 'pair': symbol, 'price': price,
+                                   'confidence': 4, 'trade_type': 'PULLBACK_ENTRY'})
+                continue
+
             # Pullback into EMA9 and bounce
-            if pullback:
+            if pullback_ema:
                 print(f"   ↩️ PULLBACK ENTRY {symbol} @ {price:.4f}")
                 self.execute_trade(symbol, price, small_position=False,
                                    atr=top_atr, trade_type='PULLBACK')
@@ -517,9 +536,10 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # EXIT MANAGEMENT
         # ════════════════════════════════════════════════════════════════════
-        self.break_even_trigger = 1.2         # Move SL to entry at 1.2% profit
+        self.break_even_trigger = 1.2
         self.trailing_stop_activation = 1.5
-        self.trailing_stop_multiplier = TRAILING_STOP  # runner trail multiplier (0.992 = 0.8% below peak)
+        self.trailing_stop_multiplier = TRAILING_STOP
+        self.last_exit_price = {}
         self.partial_tp_percent = 0.70        # Sell 70% at first TP, let 30% run
 
         # ════════════════════════════════════════════════════════════════════
@@ -786,9 +806,8 @@ class SmartTrader:
         return price > recent_high, price < recent_low
 
     def volatility_expansion(self, df):
-        recent_range = (df['high'] - df['low']).rolling(10).mean().iloc[-1]
-        past_range   = (df['high'] - df['low']).rolling(30).mean().iloc[-1]
-        return recent_range > past_range * 1.2
+        atr = (df['high'] - df['low']).rolling(14).mean()
+        return len(atr) >= 6 and atr.iloc[-1] > atr.iloc[-5]
 
     def pullback_entry(self, df):
         ema       = df['close'].ewm(span=9).mean()
@@ -931,6 +950,8 @@ class SmartTrader:
                 'ema20':      self.calculate_ema(df['close'], 20),
                 'ema9':       df['close'].ewm(span=9).mean().iloc[-1],
                 'ema21':      df['close'].ewm(span=21).mean().iloc[-1],
+                'is_trending': abs(df['close'].ewm(span=9).mean().iloc[-1] -
+                                   df['close'].ewm(span=21).mean().iloc[-1]) > price_now * 0.0015,
                 'adx':        adx['adx'],
                 'atr':               atr_val,
                 'atr_avg':           atr_avg,
@@ -1651,6 +1672,7 @@ class SmartTrader:
                 self.open_positions = [p for p in self.open_positions
                                        if p['trade_id'] != position['trade_id']]
                 self.position_open[symbol] = False
+                self.last_exit_price[symbol] = fill_price
             else:
                 position['quantity'] = remaining_quantity
 
