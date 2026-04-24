@@ -8,8 +8,8 @@ from binance.enums import *
 # CONFIG
 # ==============================
 
-API_KEY = ""
-API_SECRET = ""
+API_KEY = "cb93KyQgjtwOrWFoZQCnk3P0ZWNnekaz0kmjwLs6R51yH48rwjGtASg6rrJtBV0c"
+API_SECRET = "et7smj2P4wwOZwfAEz4D2VLOZMAElgRaxUVX2Uj6ugj9tGKR8cc6LqsnbpBBTeud"
 
 TRADING_PAIRS = ["BTCUSDT", "ETHUSDT"]
 
