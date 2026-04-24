@@ -1697,13 +1697,13 @@ class SmartTrader:
                 result = self.execute_sell(position, 'TP2', quantity=qty)
                 if result:
                     position['tp2_hit'] = True
-                    position['runner_trailing'] = current_price * 0.995
+                    position['runner_trailing'] = current_price * 0.992
                     print(f"   🎯 TP2 {symbol} +2% → sold 30%, runner trailing @ ${position['runner_trailing']:.4f}")
                 continue
 
-            # 10. RUNNER (last 20%): trail at price * 0.995, sell all when hit
+            # 10. RUNNER (last 20%): trail at price * 0.992, sell all when hit
             if position.get('tp2_hit'):
-                position['runner_trailing'] = max(position['runner_trailing'], current_price * 0.995)
+                position['runner_trailing'] = max(position['runner_trailing'], current_price * 0.992)
                 if current_price <= position['runner_trailing']:
                     print(f"\n   🏁 RUNNER EXIT {symbol} @ ${current_price:.4f}")
                     self.execute_sell(position, 'RUNNER_TRAIL')
