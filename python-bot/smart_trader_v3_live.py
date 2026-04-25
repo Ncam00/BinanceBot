@@ -2489,7 +2489,11 @@ class SmartTrader:
                         if atr < df_entry['close'].iloc[-1] * 0.001:
                             print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f})")
                         else:
-                            self.check_entry(symbol, df_entry)
+                            recent_move = abs(df_entry['close'].iloc[-1] - df_entry['close'].iloc[-5])
+                            if recent_move > atr * 0.5:
+                                print(f"   ⚠️ {symbol} skipped — late entry (move {recent_move:.4f} > 0.5×ATR {atr * 0.5:.4f})")
+                            else:
+                                self.check_entry(symbol, df_entry)
 
                     signal = self.analyze(symbol)
 
