@@ -602,6 +602,8 @@ class SmartTrader:
             'wins':         0,
             'losses':       0,
             'total_pnl':    0.0,
+            'gross_wins':   0.0,   # sum of all winning trade profits
+            'gross_losses': 0.0,   # sum of all losing trade losses (absolute)
             'best_trade':   float('-inf'),
             'worst_trade':  float('inf'),
             'total_trades': 0,
@@ -1793,6 +1795,43 @@ class SmartTrader:
         total = self.stats['wins'] + self.stats['losses']
         return (self.stats['wins'] / total * 100) if total > 0 else 0
 
+    def print_stats(self):
+        s = self.stats
+        total = s['wins'] + s['losses']
+        if total == 0:
+            print("   📊 No completed trades yet.")
+            return
+        win_rate  = s['wins'] / total
+        avg_win   = s['gross_wins']   / s['wins']   if s['wins']   > 0 else 0.0
+        avg_loss  = s['gross_losses'] / s['losses'] if s['losses'] > 0 else 0.0
+        expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+        line = "─" * 36
+        msg = (
+            f"\n   📊 LIVE STATS ({total} trades)\n"
+            f"   {line}\n"
+            f"   Win Rate:   {win_rate * 100:.1f}%  ({s['wins']}W / {s['losses']}L)\n"
+            f"   Avg Win:    ${avg_win:.2f}\n"
+            f"   Avg Loss:   ${avg_loss:.2f}\n"
+            f"   Expectancy: ${expectancy:.2f} per trade\n"
+            f"   Total PnL:  ${s['total_pnl']:.2f}\n"
+            f"   Best:       ${s['best_trade']:.2f}\n"
+            f"   Worst:      ${s['worst_trade']:.2f}\n"
+            f"   {line}"
+        )
+        print(msg)
+        logging.info(
+            f"STATS | Trades: {total} | WR: {win_rate*100:.1f}% | "
+            f"AvgWin: ${avg_win:.2f} | AvgLoss: ${avg_loss:.2f} | "
+            f"Expectancy: ${expectancy:.2f} | TotalPnL: ${s['total_pnl']:.2f}"
+        )
+        self.send_telegram(
+            f"📊 Stats ({total} trades)\n"
+            f"Win Rate: {win_rate*100:.1f}% ({s['wins']}W/{s['losses']}L)\n"
+            f"Avg Win: ${avg_win:.2f} | Avg Loss: ${avg_loss:.2f}\n"
+            f"Expectancy: ${expectancy:.2f}/trade\n"
+            f"Total PnL: ${s['total_pnl']:.2f}"
+        )
+
     def _log_trade(self, trade_data):
         log_path = os.path.join(os.path.dirname(__file__), 'trade_log.jsonl')
         with open(log_path, 'a', encoding='utf-8') as f:
@@ -1884,8 +1923,21 @@ class SmartTrader:
         order = self.safe_exit(open_pos, reason)
         profit = self.calculate_profit(pos['entry'], price, pos['qty'])
         self.daily_pnl += profit
+
+        # Record stats
+        self.stats['total_trades'] += 1
+        self.stats['total_pnl']    += profit
+        self.stats['best_trade']    = max(self.stats['best_trade'], profit)
+        self.stats['worst_trade']   = min(self.stats['worst_trade'], profit)
+        if profit >= 0:
+            self.stats['wins']       += 1
+            self.stats['gross_wins'] += profit
+        else:
+            self.stats['losses']       += 1
+            self.stats['gross_losses'] += abs(profit)
+
         if order is not None:
-            msg = f"{reason} {symbol} | PnL: {profit:.4f} | Daily PnL: {self.daily_pnl:.4f}"
+            msg = f"{reason} {symbol} | PnL: ${profit:.2f} | Daily PnL: ${self.daily_pnl:.2f}"
             logging.info(msg)
             self.send_telegram(msg)
         else:
@@ -1893,6 +1945,7 @@ class SmartTrader:
             logging.error(msg)
             self.send_telegram(msg)
         self.positions.pop(symbol, None)
+        self.print_stats()
 
     # ════════════════════════════════════════════════════════════════════
     # POSITION MANAGEMENT (single unified exit system)
