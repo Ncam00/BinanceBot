@@ -1848,7 +1848,7 @@ class SmartTrader:
         # ── VOLATILITY EXPANSION ─────────────────────────────────────────
         atr                  = (high - low).rolling(14).mean()
         atr_val              = atr.iloc[-1]
-        if atr_val < price * 0.003:   # market too quiet for a clean 1:2 trade
+        if atr_val < price * 0.008:   # require 0.8% ATR for $2-$3.50 net on $60 position
             return
         volatility_expanding = len(atr) >= 6 and atr_val > atr.iloc[-5]
 
@@ -2510,8 +2510,8 @@ class SmartTrader:
                     df_entry = self.get_candles(symbol, '15m', 60)
                     if df_entry is not None and len(df_entry) >= 32:
                         atr = (df_entry['high'] - df_entry['low']).rolling(14).mean().iloc[-1]
-                        if atr < df_entry['close'].iloc[-1] * 0.001:
-                            print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f})")
+                        if atr < df_entry['close'].iloc[-1] * 0.008:
+                            print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f} < 0.8% of price)")
                         else:
                             recent_move = abs(df_entry['close'].iloc[-1] - df_entry['close'].iloc[-5])
                             if recent_move > atr * 0.5:
