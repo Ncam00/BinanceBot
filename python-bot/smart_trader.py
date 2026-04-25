@@ -1825,7 +1825,7 @@ class SmartTrader:
         volume_spike = volume.iloc[-1] > avg_vol * MIN_VOLUME_MULTIPLIER
 
         # ── BREAKOUT ─────────────────────────────────────────────────────
-        recent_high = high.rolling(20).max().iloc[-2]
+        recent_high = high.rolling(10).max().iloc[-2]
         breakout    = price > recent_high
 
         # ── VOLATILITY EXPANSION ─────────────────────────────────────────
@@ -1842,11 +1842,11 @@ class SmartTrader:
 
         # ── ENTRY ────────────────────────────────────────────────────────
         top_atr = atr.iloc[-1]
-        if score == 3:
+        if score == 3 and volatility_expanding and breakout:
             print(f"   ⭐ A+ {symbol} score={score}/6 @ {price:.4f}")
             self.execute_trade(symbol, price, atr=top_atr, trade_type='A+_BREAKOUT', small_position=False)
             return
-        if score >= 2:
+        if score >= 2 and volatility_expanding and breakout:
             print(f"   🔍 SCOUT {symbol} score={score}/6 @ {price:.4f}")
             self.execute_trade(symbol, price, atr=top_atr, trade_type='SCOUT', small_position=True)
 
