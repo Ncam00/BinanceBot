@@ -58,6 +58,10 @@ ATR_SL_MULTIPLIER     = 1.5    # stop loss = entry - ATR * 1.5
 ATR_TP_MULTIPLIER     = 2.0    # no longer used directly; TP = sl_distance * 2
 FEE_RATE              = 0.001  # 0.1% per side
 SLIPPAGE_RATE         = 0.0005 # 0.05% estimated slippage
+TP_FEE_BUFFER         = FEE_RATE * 2 + SLIPPAGE_RATE  # 0.0025 — adds fee cost to TP for true net 1:2
+POSITION_USDT_MIN     = 55.0   # minimum position value in USDT
+POSITION_USDT_MAX     = 65.0   # maximum position value in USDT
+POSITION_USDT_TARGET  = 60.0   # target position value in USDT per trade
 
 
 class EntryEngine:
@@ -303,6 +307,11 @@ class EntryEngine:
         return None
 
     def scan_market(self, market_data):
+        # Session guard: only enter during EU (19-23 NZT) or US (1-5 NZT)
+        _nz_hour = datetime.now(pytz.timezone('Pacific/Auckland')).hour
+        if not ((19 <= _nz_hour <= 23) or (1 <= _nz_hour <= 5)):
+            return
+
         candidates = []
         signals = []
 
@@ -1498,19 +1507,13 @@ class SmartTrader:
             max_sl = price * 0.97
             stop_loss_price = max(structure_sl, max_sl)
 
-            # Risk-based position sizing: risk 1% of balance per trade
+            # Fixed position size: $55–$65 USDT per trade
             trade_type = signal.get('trade_type', 'A+')
-            sl_distance = price - stop_loss_price
-            if sl_distance <= 0:
-                print(f"   ⚠️ Invalid SL distance for {symbol} — skipping")
-                return None
-            risk_amount = balance * RISK_PER_TRADE
-            quantity = risk_amount / sl_distance
-            print(f"   📐 {trade_type} | Risk: ${risk_amount:.2f} | SL dist: ${sl_distance:.4f} | Qty: {quantity:.5f}")
-
-            if quantity == 0 or quantity * price < 10:
-                print(f"   ⚠️ Position size too small - skipping")
-                return None
+            quantity = POSITION_USDT_TARGET / price
+            position_value = quantity * price
+            if not (POSITION_USDT_MIN <= position_value <= POSITION_USDT_MAX):
+                quantity = POSITION_USDT_TARGET / price  # re-derive cleanly
+            print(f"   📐 {trade_type} | Size: ${position_value:.2f} USDT | Qty: {quantity:.5f}")
 
             # Pre-order slippage check: current price vs signal price
             signal_price = signal.get('price', price)
@@ -1542,8 +1545,11 @@ class SmartTrader:
             elif signal.get('atr'):
                 atr_val     = signal['atr']
                 sl_distance = atr_val * ATR_SL_MULTIPLIER
+                if sl_distance < fill_price * 0.003:
+                    print(f"   ⚠️ {symbol} SL too tight ({sl_distance/fill_price:.3%}) — skipping")
+                    return None
                 stop_loss   = fill_price - sl_distance
-                take_profit = fill_price + (sl_distance * 2)  # true 1:2 R:R
+                take_profit = fill_price + (sl_distance * 2) + (fill_price * TP_FEE_BUFFER)  # net 1:2 R:R
             else:
                 take_profit, stop_loss = self.set_tp_sl(
                     fill_price,
@@ -1602,7 +1608,7 @@ class SmartTrader:
                 'entry':         fill_price,
                 'qty':           quantity,
                 'sl':            stop_loss,
-                'tp':            fill_price + (_sl_distance * 2),  # TRUE 1:2 R:R
+                'tp':            fill_price + (_sl_distance * 2) + (fill_price * TP_FEE_BUFFER),  # net 1:2 R:R after fees
                 'max_price':     fill_price,
                 'candles':       0,
                 'added':         False,
@@ -1824,17 +1830,27 @@ class SmartTrader:
         # ── MOMENTUM ─────────────────────────────────────────────────────
         momentum = close.iloc[-1] > close.iloc[-3]
 
-        # ── VOLUME ───────────────────────────────────────────────────────
+        # ── VOLUME (session-aware floor) ─────────────────────────────────
+        _nz_h = datetime.now(pytz.timezone('Pacific/Auckland')).hour
+        if 1 <= _nz_h <= 5:        # US session — require stronger confirmation
+            _vol_min = 1.5
+        elif 19 <= _nz_h <= 23:    # EU session
+            _vol_min = 1.3
+        else:
+            _vol_min = MIN_VOLUME_MULTIPLIER  # 1.1 fallback
         avg_vol      = volume.rolling(20).mean().iloc[-1]
-        volume_spike = volume.iloc[-1] > avg_vol * MIN_VOLUME_MULTIPLIER
+        volume_spike = volume.iloc[-1] > avg_vol * _vol_min
 
         # ── BREAKOUT ─────────────────────────────────────────────────────
         recent_high = high.rolling(10).max().iloc[-2]
         breakout    = price > recent_high
 
         # ── VOLATILITY EXPANSION ─────────────────────────────────────────
-        atr                 = (high - low).rolling(14).mean()
-        volatility_expanding = len(atr) >= 6 and atr.iloc[-1] > atr.iloc[-5]
+        atr                  = (high - low).rolling(14).mean()
+        atr_val              = atr.iloc[-1]
+        if atr_val < price * 0.003:   # market too quiet for a clean 1:2 trade
+            return
+        volatility_expanding = len(atr) >= 6 and atr_val > atr.iloc[-5]
 
         # ── REGIME FILTER ────────────────────────────────────────────────
         trend_strength = abs(ema_fast.iloc[-1] - ema_slow.iloc[-1])
