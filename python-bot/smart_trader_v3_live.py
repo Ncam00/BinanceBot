@@ -1893,6 +1893,13 @@ class SmartTrader:
 
             pos['candles'] += 1
 
+            # Fee-killer guard: skip exit if move too small to cover fees
+            atr_now = (self.get_candles(symbol, '15m', 20) or None)
+            atr_now = ((atr_now['high'] - atr_now['low']).rolling(14).mean().iloc[-1]
+                       if atr_now is not None and len(atr_now) >= 14 else None)
+            if atr_now and abs(current_price - pos['entry']) < atr_now * 0.3:
+                continue
+
             # STOP LOSS
             if current_price <= pos['sl']:
                 self.exit_trade(symbol, 'STOP LOSS', current_price)
@@ -1923,8 +1930,8 @@ class SmartTrader:
                 self.exit_trade(symbol, 'TRAILING EXIT', current_price)
                 continue
 
-            # TIME EXIT: only if no progress
-            if pos['candles'] >= TIME_EXIT_CANDLES and current_price <= pos['entry']:
+            # TIME EXIT: only if trade peaked above entry but stalled
+            if pos['candles'] >= TIME_EXIT_CANDLES and pos['max_price'] > pos['entry']:
                 self.exit_trade(symbol, 'TIME EXIT', current_price)
         # ── END manage_trade loop ─────────────────────────────────────────
 
@@ -2059,8 +2066,9 @@ class SmartTrader:
                     self.execute_sell(position, 'TRAILING_STOP')
                     continue
 
-            # 4. MOMENTUM ADD-ON: scale in if winning and breakout continues
-            trade_in_profit = current_price > position['entry_price']
+            # 4. MOMENTUM ADD-ON: scale in only after 0.5x ATR confirmed move
+            add_threshold = position['entry_price'] + (position.get('atr', 0) * 0.5)
+            trade_in_profit = current_price > add_threshold
             breakout_continues = current_price > position.get('entry_resistance', current_price)
             if trade_in_profit and breakout_continues and not position.get('scaled_in'):
                 self.add_small_position(position, current_price)
