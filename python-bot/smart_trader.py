@@ -1864,6 +1864,18 @@ class SmartTrader:
                 self.positions.pop(symbol, None)
                 continue
 
+            pos['candles'] += 1
+
+            # TIME EXIT: only exit if no progress after 30 candles
+            if pos['candles'] >= 30 and current_price <= pos['entry']:
+                profit = self.calculate_profit(pos['entry'], current_price, pos['remaining_size'])
+                self.daily_pnl += profit
+                print(f"   ⏱️ TIME EXIT {symbol} | {pos['candles']} candles, no progress | PnL: ${profit:.4f}")
+                logging.info(f"TIME EXIT {symbol} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}")
+                self.execute_sell(open_pos, 'TIME_EXIT')
+                self.positions.pop(symbol, None)
+                continue
+
             # FULL TP
             if current_price >= pos['tp']:
                 profit = self.calculate_profit(pos['entry'], current_price, pos['size'])
@@ -1932,9 +1944,9 @@ class SmartTrader:
             candles_open = int((datetime.now() - position['entry_time']).total_seconds() / (15 * 60))
             position['candle_count'] = candles_open
 
-            # TIME EXIT: no momentum after TIME_EXIT_CANDLES and TP1 not hit
-            if candles_open >= TIME_EXIT_CANDLES and not position.get('tp1_hit'):
-                print(f"\n   ⏱️ TIME EXIT {symbol}: {candles_open} candles, no momentum")
+            # TIME EXIT: only exit if no progress after 30 candles
+            if candles_open >= 30 and current_price <= position['entry_price']:
+                print(f"\n   ⏱️ TIME EXIT {symbol}: {candles_open} candles, no progress")
                 self.execute_sell(position, 'TIME_EXIT')
                 continue
 
