@@ -51,10 +51,10 @@ MAX_SLIPPAGE          = 0.002  # 0.2% — reject fills worse than this
 MIN_VOLUME_MULTIPLIER = 1.1    # minimum volume vs avg to confirm signal
 POSITION_SIZE_PCT     = 0.12   # ~12% of balance per trade (~$50 on $400)
 RISK_PER_TRADE        = 0.01   # 1% of balance risked per trade
-TIME_EXIT_CANDLES     = 15     # exit if no TP1 hit after this many candles
+TIME_EXIT_CANDLES     = 25     # exit if no progress after this many candles
 PARTIAL_TP_RATIO      = 0.5    # 50% of position closes at TP1
 BREAKEVEN_BUFFER      = 0.001  # move SL to entry + 0.1% after partial TP
-ATR_SL_MULTIPLIER     = 2.0    # stop loss = entry - ATR * 2.0
+ATR_SL_MULTIPLIER     = 1.5    # stop loss = entry - ATR * 1.5
 ATR_TP_MULTIPLIER     = 3.0    # take profit = entry + ATR * 3.0
 FEE_RATE              = 0.001  # 0.1% per side
 SLIPPAGE_RATE         = 0.0005 # 0.05% estimated slippage
@@ -1867,7 +1867,7 @@ class SmartTrader:
             pos['candles'] += 1
 
             # TIME EXIT: only exit if no progress after 30 candles
-            if pos['candles'] >= 30 and current_price <= pos['entry']:
+            if pos['candles'] >= TIME_EXIT_CANDLES and current_price <= pos['entry']:
                 profit = self.calculate_profit(pos['entry'], current_price, pos['remaining_size'])
                 self.daily_pnl += profit
                 print(f"   ⏱️ TIME EXIT {symbol} | {pos['candles']} candles, no progress | PnL: ${profit:.4f}")
@@ -1945,7 +1945,7 @@ class SmartTrader:
             position['candle_count'] = candles_open
 
             # TIME EXIT: only exit if no progress after 30 candles
-            if candles_open >= 30 and current_price <= position['entry_price']:
+            if candles_open >= TIME_EXIT_CANDLES and current_price <= position['entry_price']:
                 print(f"\n   ⏱️ TIME EXIT {symbol}: {candles_open} candles, no progress")
                 self.execute_sell(position, 'TIME_EXIT')
                 continue
