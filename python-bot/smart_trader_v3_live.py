@@ -46,6 +46,7 @@ logging.basicConfig(
 
 TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT']
 TRAILING_STOP         = 0.985
+RUNNER_TRAIL          = 0.970   # 3% below max_price — wide enough to let winners run
 MAX_TRADES_PER_DAY    = 3
 MAX_SLIPPAGE          = 0.002  # 0.2% — reject fills worse than this
 MIN_VOLUME_MULTIPLIER = 1.1    # minimum volume vs avg to confirm signal
@@ -1607,14 +1608,16 @@ class SmartTrader:
             self.last_trade_time[symbol] = time.time()
             _sl_distance = fill_price - stop_loss
             self.positions[symbol] = {
-                'entry':         fill_price,
-                'qty':           quantity,
-                'sl':            stop_loss,
-                'tp':            fill_price + (_sl_distance * 2) + (fill_price * TP_FEE_BUFFER),  # net 1:2 R:R after fees
-                'max_price':     fill_price,
-                'candles':       0,
-                'added':         False,
-                'partial_taken': False,
+                'entry':     fill_price,
+                'qty':       quantity,
+                'sl':        stop_loss,
+                'tp1':       fill_price + _sl_distance + (fill_price * TP_FEE_BUFFER),          # 1R net
+                'tp2':       fill_price + (_sl_distance * 2) + (fill_price * TP_FEE_BUFFER),   # 2R net
+                'max_price': fill_price,
+                'candles':   0,
+                'added':     False,
+                'tp1_hit':   False,
+                'tp2_hit':   False,
             }
             self.daily_trades += 1
 
@@ -1974,29 +1977,56 @@ class SmartTrader:
                 self.exit_trade(symbol, 'STOP LOSS', current_price)
                 continue
 
-            # PARTIAL TP: sell 50%, move SL to breakeven
-            if not pos['partial_taken'] and current_price >= pos['tp']:
-                sell_qty = self.format_quantity(symbol, pos['qty'] * 0.5)
+            # STAGE 1: TP1 at 1R — sell 40%, move SL to breakeven
+            if not pos['tp1_hit'] and current_price >= pos['tp1']:
+                sell_qty = self.format_quantity(symbol, pos['qty'] * 0.40)
                 open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
                 order = self.execute_sell(open_pos, 'TP1', quantity=sell_qty) if open_pos else None
                 if order:
                     profit = self.calculate_profit(pos['entry'], current_price, sell_qty)
                     self.daily_pnl += profit
+                    self.stats['total_trades'] += 1
+                    self.stats['total_pnl'] += profit
+                    self.stats['wins'] += 1
+                    self.stats['gross_wins'] += profit
+                    self.stats['best_trade'] = max(self.stats['best_trade'], profit)
                     pos['qty'] -= sell_qty
-                    pos['partial_taken'] = True
-                    pos['sl'] = pos['entry']
-                    msg = f"PARTIAL TP {symbol} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}"
+                    pos['tp1_hit'] = True
+                    pos['sl'] = pos['entry']   # breakeven
+                    msg = f"TP1 (1R) {symbol} | +${profit:.2f} | SL → breakeven"
                     logging.info(msg)
                     self.send_telegram(msg)
+                    self.print_stats()
+
+            # STAGE 2: TP2 at 2R — sell 50% of remaining (30% of original)
+            if pos['tp1_hit'] and not pos['tp2_hit'] and current_price >= pos['tp2']:
+                sell_qty = self.format_quantity(symbol, pos['qty'] * 0.50)
+                open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
+                order = self.execute_sell(open_pos, 'TP2', quantity=sell_qty) if open_pos else None
+                if order:
+                    profit = self.calculate_profit(pos['entry'], current_price, sell_qty)
+                    self.daily_pnl += profit
+                    self.stats['total_trades'] += 1
+                    self.stats['total_pnl'] += profit
+                    self.stats['wins'] += 1
+                    self.stats['gross_wins'] += profit
+                    self.stats['best_trade'] = max(self.stats['best_trade'], profit)
+                    pos['qty'] -= sell_qty
+                    pos['tp2_hit'] = True
+                    msg = f"TP2 (2R) {symbol} | +${profit:.2f} | Runner active"
+                    logging.info(msg)
+                    self.send_telegram(msg)
+                    self.print_stats()
 
             # TRACK MAX PRICE
             if current_price > pos['max_price']:
                 pos['max_price'] = current_price
 
-            # TRAILING STOP (runner)
-            trailing_sl = pos['max_price'] * TRAILING_STOP
+            # RUNNER: trail 3% below max after TP1; 1.5% before
+            trail_pct = RUNNER_TRAIL if pos['tp1_hit'] else TRAILING_STOP
+            trailing_sl = pos['max_price'] * trail_pct
             if current_price <= trailing_sl:
-                self.exit_trade(symbol, 'TRAILING EXIT', current_price)
+                self.exit_trade(symbol, 'RUNNER EXIT', current_price)
                 continue
 
             # TIME EXIT: only if trade peaked above entry but stalled
