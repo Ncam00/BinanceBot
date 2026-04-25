@@ -2476,6 +2476,12 @@ class SmartTrader:
                         print(f"   ⚠️ {symbol} skipped - BTC filter")
                         continue
 
+                    # Session filter: EU (19-23 NZST) or US (1-5 NZST) only
+                    nz = pytz.timezone('Pacific/Auckland')
+                    now_hour = datetime.now(nz).hour
+                    if not ((19 <= now_hour <= 23) or (1 <= now_hour <= 5)):
+                        continue
+
                     # Unified entry check (score-based)
                     df_entry = self.get_candles(symbol, '15m', 60)
                     if df_entry is not None and len(df_entry) >= 32:
