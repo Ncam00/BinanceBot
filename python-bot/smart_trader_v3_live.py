@@ -55,7 +55,7 @@ TIME_EXIT_CANDLES     = 25     # exit if no progress after this many candles
 PARTIAL_TP_RATIO      = 0.5    # 50% of position closes at TP1
 BREAKEVEN_BUFFER      = 0.001  # move SL to entry + 0.1% after partial TP
 ATR_SL_MULTIPLIER     = 1.5    # stop loss = entry - ATR * 1.5
-ATR_TP_MULTIPLIER     = 3.0    # take profit = entry + ATR * 3.0
+ATR_TP_MULTIPLIER     = 2.0    # no longer used directly; TP = sl_distance * 2
 FEE_RATE              = 0.001  # 0.1% per side
 SLIPPAGE_RATE         = 0.0005 # 0.05% estimated slippage
 
@@ -1597,16 +1597,16 @@ class SmartTrader:
             self.open_positions.append(position)
             self.position_open[symbol] = True
             self.last_trade_time[symbol] = time.time()
+            _sl_distance = fill_price - stop_loss
             self.positions[symbol] = {
-                'entry':          fill_price,
-                'sl':             stop_loss,
-                'tp':             take_profit,
-                'size':           quantity,
-                'remaining_size': quantity,
-                'partial_taken':  False,
-                'tag':            trade_type,
-                'candles':        0,
-                'max_price':      fill_price,
+                'entry':         fill_price,
+                'qty':           quantity,
+                'sl':            stop_loss,
+                'tp':            fill_price + (_sl_distance * 2),  # TRUE 1:2 R:R
+                'max_price':     fill_price,
+                'candles':       0,
+                'added':         False,
+                'partial_taken': False,
             }
             self.daily_trades += 1
 
@@ -1804,6 +1804,10 @@ class SmartTrader:
         last_any = max(self.last_trade_time.values()) if self.last_trade_time else 0
         if time.time() - last_any < 900:
             return
+        # prevent BTC + ETH double exposure
+        if ('BTCUSDT' in self.positions and symbol == 'ETHUSDT') or \
+           ('ETHUSDT' in self.positions and symbol == 'BTCUSDT'):
+            return
 
         # ── CORE DATA ────────────────────────────────────────────────────
         close  = df['close']
@@ -1851,79 +1855,78 @@ class SmartTrader:
             self.execute_trade(symbol, price, atr=top_atr, trade_type='SCOUT', small_position=True)
 
     # ════════════════════════════════════════════════════════════════════
+    # UNIFIED EXIT
+    # ════════════════════════════════════════════════════════════════════
+    def exit_trade(self, symbol, reason, price):
+        pos = self.positions.get(symbol)
+        if not pos:
+            return
+        open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
+        if open_pos is None:
+            self.positions.pop(symbol, None)
+            return
+        order = self.safe_exit(open_pos, reason)
+        profit = self.calculate_profit(pos['entry'], price, pos['qty'])
+        self.daily_pnl += profit
+        if order is not None:
+            msg = f"{reason} {symbol} | PnL: {profit:.4f} | Daily PnL: {self.daily_pnl:.4f}"
+            logging.info(msg)
+            self.send_telegram(msg)
+        else:
+            msg = f"SELL FAILED {symbol} | {reason}"
+            logging.error(msg)
+            self.send_telegram(msg)
+        self.positions.pop(symbol, None)
+
+    # ════════════════════════════════════════════════════════════════════
     # POSITION MANAGEMENT (single unified exit system)
     # ════════════════════════════════════════════════════════════════════
     def check_positions(self):
-        # ── NEW: self.positions exit loop ────────────────────────────────
+        # ── manage_trade loop ─────────────────────────────────────────────
         for symbol, pos in list(self.positions.items()):
             current_price = self.get_price(symbol)
             if not current_price:
                 continue
-            open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
-            if open_pos is None:
+            if next((p for p in self.open_positions if p['symbol'] == symbol), None) is None:
                 self.positions.pop(symbol, None)
                 continue
 
             pos['candles'] += 1
 
-            # TIME EXIT: only exit if no progress after 30 candles
-            if pos['candles'] >= TIME_EXIT_CANDLES and current_price <= pos['entry']:
-                profit = self.calculate_profit(pos['entry'], current_price, pos['remaining_size'])
-                self.daily_pnl += profit
-                print(f"   ⏱️ TIME EXIT {symbol} | {pos['candles']} candles, no progress | PnL: ${profit:.4f}")
-                logging.info(f"TIME EXIT {symbol} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}")
-                self.execute_sell(open_pos, 'TIME_EXIT')
-                self.positions.pop(symbol, None)
-                continue
-
-            # FULL TP
-            if current_price >= pos['tp']:
-                profit = self.calculate_profit(pos['entry'], current_price, pos['size'])
-                self.daily_pnl += profit
-                print(f"   🎯 FULL TP {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
-                logging.info(f"FULL TP {symbol} | Entry: {pos['entry']} | Exit: {current_price} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}")
-                self.execute_sell(open_pos, 'TP_FULL')
-                self.positions.pop(symbol, None)
-                continue
-
-            # PARTIAL TP: take 50%, move SL to breakeven
-            if not pos['partial_taken'] and current_price >= pos['tp']:
-                partial_size = pos['size'] * PARTIAL_TP_RATIO
-                pos['remaining_size'] -= partial_size
-                pos['partial_taken'] = True
-                profit = self.calculate_profit(pos['entry'], current_price, partial_size)
-                self.daily_pnl += profit
-                pos['sl'] = pos['entry']
-                print(f"   🟢 PARTIAL TP {symbol} | Closed: {partial_size:.4f} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
-                logging.info(f"PARTIAL TP {symbol} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}")
-                self.execute_sell(open_pos, 'TP1', quantity=partial_size)
-                continue
-
             # STOP LOSS
             if current_price <= pos['sl']:
-                profit = self.calculate_profit(pos['entry'], current_price, pos['remaining_size'])
-                self.daily_pnl += profit
-                print(f"   🔴 STOP LOSS {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
-                logging.info(f"STOP LOSS {symbol} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}")
-                self.execute_sell(open_pos, 'STOP_LOSS')
-                self.positions.pop(symbol, None)
+                self.exit_trade(symbol, 'STOP LOSS', current_price)
                 continue
 
-            # UPDATE MAX PRICE
+            # PARTIAL TP: sell 50%, move SL to breakeven
+            if not pos['partial_taken'] and current_price >= pos['tp']:
+                sell_qty = self.format_quantity(symbol, pos['qty'] * 0.5)
+                open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
+                order = self.execute_sell(open_pos, 'TP1', quantity=sell_qty) if open_pos else None
+                if order:
+                    profit = self.calculate_profit(pos['entry'], current_price, sell_qty)
+                    self.daily_pnl += profit
+                    pos['qty'] -= sell_qty
+                    pos['partial_taken'] = True
+                    pos['sl'] = pos['entry']
+                    msg = f"PARTIAL TP {symbol} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}"
+                    logging.info(msg)
+                    self.send_telegram(msg)
+
+            # TRACK MAX PRICE
             if current_price > pos['max_price']:
                 pos['max_price'] = current_price
 
-            # RUNNER EXIT
+            # TRAILING STOP (runner)
             trailing_sl = pos['max_price'] * TRAILING_STOP
             if current_price <= trailing_sl:
-                profit = self.calculate_profit(pos['entry'], current_price, pos['remaining_size'])
-                self.daily_pnl += profit
-                print(f"   🏁 RUNNER EXIT {symbol} | PnL: ${profit:.4f} | Daily: ${self.daily_pnl:.4f}")
-                logging.info(f"RUNNER EXIT {symbol} | PnL: {profit:.4f} | Daily: {self.daily_pnl:.4f}")
-                self.execute_sell(open_pos, 'TRAILING_STOP')
-                self.positions.pop(symbol, None)
+                self.exit_trade(symbol, 'TRAILING EXIT', current_price)
                 continue
-        # ── END new loop ─────────────────────────────────────────────────
+
+            # TIME EXIT: only if no progress
+            if pos['candles'] >= TIME_EXIT_CANDLES and current_price <= pos['entry']:
+                self.exit_trade(symbol, 'TIME EXIT', current_price)
+        # ── END manage_trade loop ─────────────────────────────────────────
 
         for position in self.open_positions[:]:
             symbol = position['symbol']
