@@ -2479,7 +2479,11 @@ class SmartTrader:
                     # Unified entry check (score-based)
                     df_entry = self.get_candles(symbol, '15m', 60)
                     if df_entry is not None and len(df_entry) >= 32:
-                        self.check_entry(symbol, df_entry)
+                        atr = (df_entry['high'] - df_entry['low']).rolling(14).mean().iloc[-1]
+                        if atr < df_entry['close'].iloc[-1] * 0.001:
+                            print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f})")
+                        else:
+                            self.check_entry(symbol, df_entry)
 
                     signal = self.analyze(symbol)
 
