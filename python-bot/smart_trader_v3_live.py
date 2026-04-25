@@ -63,6 +63,7 @@ TP_FEE_BUFFER         = FEE_RATE * 2 + SLIPPAGE_RATE  # 0.0025 — adds fee cost
 POSITION_USDT_MIN     = 55.0   # minimum position value in USDT
 POSITION_USDT_MAX     = 65.0   # maximum position value in USDT
 POSITION_USDT_TARGET  = 60.0   # target position value in USDT per trade
+DRY_RUN               = True   # Paper mode: signals fire, NO real orders placed. Set False to go live.
 
 
 class EntryEngine:
@@ -1528,19 +1529,25 @@ class SmartTrader:
             step_size, precision = self.get_symbol_precision(symbol)
             quantity = round(quantity, precision)
 
-            order = self.client.create_order(
-                symbol=symbol,
-                side=SIDE_BUY,
-                type=ORDER_TYPE_MARKET,
-                quantity=quantity
-            )
-
-            fill_price = float(order['fills'][0]['price'])
-            slippage = abs(fill_price - price) / price
-            if slippage > MAX_SLIPPAGE:
-                print(f"   ⚠️ {symbol} fill rejected — slippage {slippage:.3%} > MAX {MAX_SLIPPAGE:.3%}")
-                return None
-            entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
+            if DRY_RUN:
+                fill_price = price
+                entry_fee  = fill_price * quantity * FEE_RATE
+                print(f"   🧪 [DRY RUN] Simulated BUY {symbol} @ ${fill_price:.4f} | Qty: {quantity} | Fee: ${entry_fee:.4f}")
+                msg = f"🧪 [DRY RUN] WOULD BUY {symbol} @ ${fill_price:.4f} | Qty: {quantity:.5f}"
+                self.send_telegram(msg)
+            else:
+                order = self.client.create_order(
+                    symbol=symbol,
+                    side=SIDE_BUY,
+                    type=ORDER_TYPE_MARKET,
+                    quantity=quantity
+                )
+                fill_price = float(order['fills'][0]['price'])
+                slippage = abs(fill_price - price) / price
+                if slippage > MAX_SLIPPAGE:
+                    print(f"   ⚠️ {symbol} fill rejected — slippage {slippage:.3%} > MAX {MAX_SLIPPAGE:.3%}")
+                    return None
+                entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
             if 'tp_percent_override' in signal:
                 take_profit = fill_price * (1 + signal['tp_percent_override'] / 100)
@@ -1676,13 +1683,17 @@ class SmartTrader:
                 print(f"   ⚠️ Sell quantity too small for {symbol}")
                 return None
 
-            order = self.client.order_market_sell(
-                symbol=symbol,
-                quantity=sell_quantity
-            )
-
-            fill_price = float(order['fills'][0]['price'])
-            exit_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
+            if DRY_RUN:
+                fill_price = self.get_price(symbol) or position['entry_price']
+                exit_fee   = fill_price * sell_quantity * FEE_RATE
+                print(f"   🧪 [DRY RUN] Simulated SELL {symbol} @ ${fill_price:.4f} | Qty: {sell_quantity} | Reason: {reason}")
+            else:
+                order = self.client.order_market_sell(
+                    symbol=symbol,
+                    quantity=sell_quantity
+                )
+                fill_price = float(order['fills'][0]['price'])
+                exit_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
             pnl = (fill_price - position['entry_price']) * sell_quantity
             pnl_percent = ((fill_price / position['entry_price']) - 1) * 100
             total_trade_pnl = position.get('realized_pnl', 0.0) + pnl
@@ -2500,7 +2511,14 @@ class SmartTrader:
         self._started = True
 
         print("\n" + "=" * 60)
-        print("   🚀 SMART TRADER V2 - LIVE")
+        if DRY_RUN:
+            print("   🧪 SMART TRADER V3 - PAPER MODE (DRY RUN)")
+            print("   ⚠️  NO REAL ORDERS WILL BE PLACED")
+            print("   Set DRY_RUN = False in constants to go live")
+            self.send_telegram("🧪 Bot started in PAPER MODE — no real orders will be placed")
+        else:
+            print("   🚀 SMART TRADER V3 - LIVE")
+            self.send_telegram("🚀 Bot started in LIVE MODE")
         print(f"   PID: {os.getpid()}")
         print("=" * 60)
 
