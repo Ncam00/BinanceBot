@@ -65,6 +65,12 @@ POSITION_USDT_MAX     = 65.0   # maximum position value in USDT
 POSITION_USDT_TARGET  = 60.0   # target position value in USDT per trade
 DRY_RUN               = True   # Paper mode: signals fire, NO real orders placed. Set False to go live.
 
+# ─── SMOOTH MODE ────────────────────────────────────────────────────────────
+# These settings reduce equity-curve volatility and remove fear-inducing swings.
+A_PLUS_ONLY        = True    # Skip B+ and SCOUT entries — only take the best setups
+KILL_TRADE_CANDLES = 10      # Exit losing trade after N candles of no progress (was 3)
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 class EntryEngine:
     MAX_RETEST_CANDLES = 25
@@ -484,6 +490,10 @@ class EntryEngine:
                 signals.append(result)
 
         if candidates:
+            if A_PLUS_ONLY:
+                candidates = [c for c in candidates if c['action'] not in ('CANDIDATE_SMALL', 'CANDIDATE_SCOUT')]
+            if not candidates:
+                return signals
             top_pair = max(candidates, key=lambda x: x['confidence'])
             self.get(top_pair['pair'])['active'] = False
             small = top_pair['action'] == 'CANDIDATE_SMALL'
@@ -540,7 +550,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # DAILY / WEEKLY LIMITS
         # ════════════════════════════════════════════════════════════════════
-        self.daily_profit_target = 5.00       # Stop new trades at $5 profit
+        self.daily_profit_target = 7.00       # Stop new trades at $7 profit (matches loss limit)
         self.max_daily_loss = 7.00            # Stop trading at $7 loss
         self.max_weekly_loss = 20.00          # Stop trading at $20 loss this week
         self.max_trades_per_day = MAX_TRADES_PER_DAY
@@ -1511,12 +1521,16 @@ class SmartTrader:
             max_sl = price * 0.97
             stop_loss_price = max(structure_sl, max_sl)
 
-            # Fixed position size: $55–$65 USDT per trade
+            # Position size scales with trade quality
             trade_type = signal.get('trade_type', 'A+')
-            quantity = POSITION_USDT_TARGET / price
+            if trade_type in ('B+',):
+                usdt_target = POSITION_USDT_TARGET * 0.60   # 60% size for B+ setups
+            elif trade_type in ('SCOUT', 'SCOUT_RANGE'):
+                usdt_target = POSITION_USDT_TARGET * 0.40   # 40% size for scout entries
+            else:
+                usdt_target = POSITION_USDT_TARGET           # full size for A+ / BREAKOUT
+            quantity = usdt_target / price
             position_value = quantity * price
-            if not (POSITION_USDT_MIN <= position_value <= POSITION_USDT_MAX):
-                quantity = POSITION_USDT_TARGET / price  # re-derive cleanly
             print(f"   📐 {trade_type} | Size: ${position_value:.2f} USDT | Qty: {quantity:.5f}")
 
             # Pre-order slippage check: current price vs signal price
@@ -2070,15 +2084,9 @@ class SmartTrader:
                 self.execute_sell(position, 'TIME_EXIT')
                 continue
 
-            if candles_open > 3 and pnl_percent < 0:
+            if candles_open > KILL_TRADE_CANDLES and pnl_percent < -1.0:
                 print(f"\n   ⚡ KILL BAD TRADE {symbol}: {candles_open} candles open, PNL {pnl_percent:.2f}%")
                 self.execute_sell(position, 'TIMEOUT_LOSS')
-                continue
-
-            # 3. HARD TIMEOUT: close any trade still open after 4 candles (60 min)
-            if candles_open > 4:
-                print(f"\n   ⏱️ TIMEOUT {symbol}: {candles_open} candles open → closing (PNL {pnl_percent:.2f}%)")
-                self.execute_sell(position, 'TIMEOUT')
                 continue
 
             # 4. SCOUT ADD-ON: scale to full position when breakout confirms
