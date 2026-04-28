@@ -2138,47 +2138,39 @@ class SmartTrader:
                     if len(rsi_series) >= 2:
                         current_rsi = rsi_series.iloc[-1]
                         prev_rsi    = rsi_series.iloc[-2]
-                        if prev_rsi >= 70 and current_rsi < prev_rsi and pnl_percent > 0:
+                        if prev_rsi >= 70 and current_rsi < prev_rsi and pnl_percent > 0 and position.get('tp1_hit'):
                             print(f"\n   📉 RSI OVERBOUGHT EXIT {symbol}: RSI {prev_rsi:.1f}→{current_rsi:.1f}, PNL +{pnl_percent:.2f}%")
                             self.execute_sell(position, 'RSI_OVERBOUGHT')
                             continue
             except Exception:
                 pass
 
-            # 6. TRAILING STOP: activates at 1.5% profit; looser after partial TP
-            if pnl_percent >= self.trailing_stop_activation:
-                # track max price
-                if current_price > position.get('highest_price', 0):
-                    position['highest_price'] = current_price
+            # 6. TRAILING STOP: only activates after TP1 is secured; ATR-based width
+            # Tracks highest price throughout the trade regardless of when trail activates
+            if current_price > position.get('highest_price', 0):
+                position['highest_price'] = current_price
 
-                # tighter trail AFTER profit locked; looser before TP1
-                trail_mult = 0.995 if position.get('tp1_hit') else 0.990
+            if position.get('tp1_hit'):
+                # Use ATR for trail width so normal crypto pullbacks don't shake us out
+                atr = position.get('atr')
+                if atr:
+                    new_trail = position['highest_price'] - atr * 1.5
+                else:
+                    new_trail = position['highest_price'] * 0.980  # 2% fallback
 
                 if not position.get('trailing_stop_active'):
                     position['trailing_stop_active'] = True
-                    position['trailing_stop_price'] = position['highest_price'] * trail_mult
-                    print(f"   🔒 TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
+                    position['trailing_stop_price'] = new_trail
+                    print(f"   🔒 TRAILING STOP ACTIVATED {symbol} @ ${new_trail:.4f}")
                     self.send_telegram(
                         f"🔒 Trailing Stop Active\n{symbol}\n"
                         f"Profit: +{pnl_percent:.2f}%\n"
-                        f"Trail: ${position['trailing_stop_price']:.4f}"
+                        f"Trail: ${new_trail:.4f}"
                     )
-
-                # Update trailing stop if price moves higher
-                strong_trend = position.get('signal', {}).get('strength', 0) >= self.strong_setup_threshold
-                atr = position.get('atr')
-                if strong_trend and atr:
-                    new_trail = position['highest_price'] - atr * 0.8
-                else:
-                    new_trail = position['highest_price'] * trail_mult
-                locked = self.trailing_stop(current_price, position['entry_price'])
-                if locked:
-                    new_trail = max(new_trail, locked)
-                if new_trail > position.get('trailing_stop_price', 0):
+                elif new_trail > position.get('trailing_stop_price', 0):
                     position['trailing_stop_price'] = new_trail
                     print(f"   📈 TRAILING STOP RAISED {symbol} @ ${new_trail:.4f}")
 
-                # Check if trailing stop hit
                 if position.get('trailing_stop_price') and current_price <= position['trailing_stop_price']:
                     print(f"\n   🔒 TRAILING STOP HIT {symbol} @ ${current_price:.4f}")
                     self.execute_sell(position, 'TRAILING_STOP')
@@ -2212,9 +2204,14 @@ class SmartTrader:
                     print(f"   🎯 TP2 {symbol} +2% → sold 30%, runner trailing @ ${position['runner_trailing']:.4f}")
                 continue
 
-            # 10. RUNNER (last 20%): looser trail after partial TP, sell all when hit
+            # 10. RUNNER (last 20%): 2% ATR-based trail — wide enough for crypto volatility
             if position.get('tp2_hit'):
-                position['runner_trailing'] = max(position['runner_trailing'], current_price * 0.990)
+                atr = position.get('atr')
+                if atr:
+                    runner_trail = position['highest_price'] - atr * 1.5
+                else:
+                    runner_trail = current_price * 0.980  # 2% fallback
+                position['runner_trailing'] = max(position.get('runner_trailing', 0), runner_trail)
                 if current_price <= position['runner_trailing']:
                     print(f"\n   🏁 RUNNER EXIT {symbol} @ ${current_price:.4f}")
                     self.execute_sell(position, 'RUNNER_TRAIL')
