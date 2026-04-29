@@ -139,6 +139,12 @@ class EntryEngine:
         if adx is not None and adx < adx_threshold:
             return {'action': 'HOLD', 'pair': pair, 'reason': f'ADX {adx:.1f} < {adx_threshold} (choppy)'}
 
+        # Daily range context — skip longs in the top quartile of today's 24h range
+        ctx = self.get_daily_context(pair)
+        if ctx and ctx['price_position_pct'] > 75:
+            return {'action': 'HOLD', 'pair': pair,
+                    'reason': f"Near 24h high ({ctx['price_position_pct']:.0f}% of daily range)"}
+
         # Market mode
         market_mode = 'CHOPPY' if (atr is not None and atr_avg is not None and atr < atr_avg * 0.8) else 'ACTIVE'
 
@@ -637,6 +643,9 @@ class SmartTrader:
         self.last_reset_date = datetime.now().date()
         self.last_week_reset_key = self._get_week_key()
         self.daily_start_balance = None       # Set on first balance fetch of the day
+        self.eu_trades_today = 0              # trades taken in EU/London session today
+        self.us_trades_today = 0              # trades taken in US session today
+        self.last_session = None              # track session transitions
 
         # Telegram
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -706,6 +715,33 @@ class SmartTrader:
             return df
         except Exception as e:
             print(f"   ❌ Candle fetch error {symbol}: {e}")
+            return None
+
+    def get_daily_context(self, symbol):
+        """Return price position within today's 24h range (0%=low, 100%=high)."""
+        try:
+            klines = self.client.get_klines(symbol=symbol, interval='1d', limit=2)
+            if not klines:
+                return None
+            today = klines[-1]
+            daily_high  = float(today[2])
+            daily_low   = float(today[3])
+            daily_open  = float(today[1])
+            daily_close = float(today[4])
+            daily_range = daily_high - daily_low
+            if daily_range < 1e-8:
+                return None
+            current_price = float(self.client.get_symbol_ticker(symbol=symbol)['price'])
+            price_position_pct = (current_price - daily_low) / daily_range * 100
+            daily_trend = 'BULLISH' if daily_close > daily_open else 'BEARISH'
+            return {
+                'daily_high':         daily_high,
+                'daily_low':          daily_low,
+                'price_position_pct': price_position_pct,
+                'daily_trend':        daily_trend,
+            }
+        except Exception as e:
+            print(f"   ⚠️ Daily context error {symbol}: {e}")
             return None
 
     def get_price(self, symbol):
@@ -1641,6 +1677,11 @@ class SmartTrader:
                 'tp2_hit':   False,
             }
             self.daily_trades += 1
+            _trade_session, _ = self.get_market_session()
+            if _trade_session == 'london':
+                self.eu_trades_today += 1
+            elif _trade_session == 'us':
+                self.us_trades_today += 1
 
             if signal.get('clear_breakout_wait'):
                 self.reset_breakout_state(symbol)
@@ -2251,6 +2292,9 @@ class SmartTrader:
         if today != self.last_reset_date:
             print(f"\n   🔄 New day - resetting daily counters")
             self.daily_trades = 0
+            self.eu_trades_today = 0
+            self.us_trades_today = 0
+            self.last_session = None
             self.daily_profit = 0.0
             self.daily_loss = 0.0
             self.daily_pnl = 0.0
@@ -2439,10 +2483,17 @@ class SmartTrader:
             remaining = 300 - (time.time() - last_any)
             return False, f"⏳ COOLDOWN: {remaining:.0f}s remaining"
 
-        # Session trade limit
+        # Per-session slot management — EU capped at 2 to reserve a slot for US
         session, settings = self.get_market_session()
-        if self.daily_trades >= settings['max_trades']:
-            return False, f"Session limit ({self.daily_trades}/{settings['max_trades']} {session.upper()})"
+        if session == 'london' and self.eu_trades_today >= 2:
+            return False, f"🕐 EU slots full ({self.eu_trades_today}/2) — saving slot for US session"
+        elif session == 'us':
+            eu_unused = max(0, 2 - self.eu_trades_today)   # slots EU didn't use
+            us_cap = 1 + eu_unused                          # US gets its 1 + any EU leftovers
+            if self.us_trades_today >= us_cap:
+                return False, f"🕐 US slots full ({self.us_trades_today}/{us_cap})"
+        elif session == 'asia' and self.daily_trades >= settings['max_trades']:
+            return False, f"Session limit ({self.daily_trades}/{settings['max_trades']} ASIA)"
 
         return True, "OK"
 
