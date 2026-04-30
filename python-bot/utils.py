@@ -56,4 +56,10 @@ def detect_breakout(df, range_high):
 
 
 def calc_atr(df, period=14):
-    return (df["high"] - df["low"]).rolling(period).mean().iloc[-1]
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"] - prev_close).abs()
+    ], axis=1).max(axis=1)
+    return tr.rolling(period).mean().iloc[-1]
