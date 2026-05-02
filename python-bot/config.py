@@ -8,9 +8,9 @@ load_dotenv()
 def get_daily_trade_limit():
     """
     Automatically scales daily trade limit based on proven performance:
-      < 30 closed trades              → 3 trades/day (default)
-      30+ trades AND win rate >= 40%  → 5 trades/day
-      60+ trades AND win rate >= 40%  → 8 trades/day
+      < 15 closed trades              → 3 trades/day (default)
+      15+ trades AND win rate >= 40%  → 5 trades/day
+      30+ trades AND win rate >= 40%  → 8 trades/day
     """
     log_path = os.path.join(os.path.dirname(__file__), "trade_log.jsonl")
     if not os.path.exists(log_path):
@@ -29,14 +29,14 @@ def get_daily_trade_limit():
         return 3
 
     n = len(trades)
-    if n < 30:
+    if n < 15:
         return 3
 
     win_rate = len([t for t in trades if t.get("pnl_usd", 0) > 0]) / n
 
-    if n >= 60 and win_rate >= 0.40:
-        return 8
     if n >= 30 and win_rate >= 0.40:
+        return 8
+    if n >= 15 and win_rate >= 0.40:
         return 5
     return 3
 
