@@ -63,7 +63,7 @@ TP_FEE_BUFFER         = FEE_RATE * 2 + SLIPPAGE_RATE  # 0.0025 — adds fee cost
 POSITION_USDT_MIN     = 55.0   # minimum position value in USDT
 POSITION_USDT_MAX     = 65.0   # maximum position value in USDT
 POSITION_USDT_TARGET  = 60.0   # target position value in USDT per trade
-DRY_RUN               = True   # Paper mode: signals fire, NO real orders placed. Set False to go live.
+DRY_RUN               = False  # LIVE mode — real orders placed. Set True to return to paper mode.
 
 # ─── SMOOTH MODE ────────────────────────────────────────────────────────────
 # These settings reduce equity-curve volatility and remove fear-inducing swings.
