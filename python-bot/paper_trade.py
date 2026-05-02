@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from binance.client import Client
 from config import (
     API_KEY, API_SECRET, TRADING_PAIRS, POSITION_SIZE_PCT, DAILY_TRADE_LIMIT,
-    ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER, TRAILING_STOP, TIME_EXIT_CANDLES
+    ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER, TRAILING_STOP, TIME_EXIT_CANDLES,
+    get_daily_trade_limit
 )
 from utils import get_klines, analyze_market, detect_range, detect_breakout, calc_atr
 
@@ -149,7 +150,8 @@ class PaperTrader:
 
 
 if __name__ == "__main__":
-    print(f"=== PAPER TRADING | Virtual Balance: ${PAPER_BALANCE:.2f} ===", flush=True)
+    limit = get_daily_trade_limit()
+    print(f"=== PAPER TRADING | Virtual Balance: ${PAPER_BALANCE:.2f} | Daily Limit: {limit} trades/day ===", flush=True)
     trader = PaperTrader()
     cycle = 0
     while True:
