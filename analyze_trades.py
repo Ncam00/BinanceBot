@@ -32,7 +32,7 @@ POSITION_USDT  = 60.0
 DAILY_PROFIT_CAP  = 5.0
 DAILY_LOSS_LIMIT  = 7.0
 
-MIN_TRADES = 30  # minimum for reliable analysis
+MIN_TRADES = 13  # minimum before drawing directional conclusions
 
 # NZST session windows (local hours)
 EU_START, EU_END = 19, 23
@@ -432,7 +432,7 @@ def print_projection(trades: list):
     rate = len(trades) / span_days
 
     rows = []
-    for target in [30, 50, 100]:
+    for target in [13, 30, 50]:
         remaining = max(0, target - len(trades))
         eta = math.ceil(remaining / rate) if remaining > 0 else 0
         status = "✅ Already reached" if remaining == 0 else f"~{eta} more day(s)"
@@ -445,7 +445,7 @@ def print_projection(trades: list):
 
     print()
     print("  Confidence levels:")
-    print("    30 trades → directional patterns visible")
+    print("    13 trades → directional patterns visible")
     print("    50 trades → statistical confidence (±14% win rate margin)")
     print("   100 trades → full strategy evaluation (±10% margin)")
 
