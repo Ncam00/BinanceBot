@@ -14,25 +14,18 @@ from dash import Dash, dcc, html, dash_table
 from dash.dependencies import Input, Output
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DB_PATH         = Path(__file__).parent / "data" / "trades.db"
-REFRESH_MS      = 5_000
-DAILY_TARGET    = 7.0
-DAILY_LOSS_LIM  = 7.0
-EU_CAP          = 2
-US_CAP_BASE     = 1
+DB_PATH    = Path(__file__).parent / "data" / "trades.db"
+REFRESH_MS = 5_000
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-BG      = "#060810"
-PANEL   = "#0c1018"
-BORDER  = "#1c2535"
-GOLD    = "#f7a435"
-TEAL    = "#00d4aa"
-RED     = "#ff3d55"
-GREEN   = "#00e676"
-DIM     = "#3d4f6a"
-TEXT    = "#b0bec5"
-BRIGHT  = "#e8edf2"
-FONT    = "'Courier New', monospace"
+BG     = "#0a0a0a"
+CARD   = "#141414"
+BORDER = "#242424"
+YELLOW = "#F5C518"
+RED    = "#FF4444"
+TEXT   = "#FFFFFF"
+MUTED  = "#888888"
+FONT   = "'Inter', 'Segoe UI', Arial, sans-serif"
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
 def _db():
@@ -47,8 +40,7 @@ def _sql(query, params=()):
     if not conn:
         return pd.DataFrame()
     try:
-        df = pd.read_sql(query, conn, params=params)
-        return df
+        return pd.read_sql(query, conn, params=params)
     except Exception:
         return pd.DataFrame()
     finally:
@@ -66,525 +58,492 @@ def load_balance_history():
 def load_signals():
     return _sql("SELECT * FROM signals ORDER BY created_at DESC LIMIT 12")
 
-def nzst_now():
-    nzst = timezone(timedelta(hours=12))
-    return datetime.now(nzst).strftime("%H:%M NZST")
+# ── Time helpers ──────────────────────────────────────────────────────────────
+def _nzst():
+    return datetime.now(timezone(timedelta(hours=12)))
 
-def nzst_hour():
-    nzst = timezone(timedelta(hours=12))
-    return datetime.now(nzst).hour
+def nzst_str():
+    return _nzst().strftime("%H:%M NZST")
 
-def current_session():
-    h = nzst_hour()
+def session_str():
+    h = _nzst().hour
     if 11 <= h < 19:
-        return "ASIA"
+        return "ASIA SESSION"
     elif h >= 19 or h < 3:
-        return "EU/LONDON"
-    return "US"
+        return "EU / LONDON SESSION"
+    return "US SESSION"
 
-# ── Style helpers ─────────────────────────────────────────────────────────────
-def panel_style(extra=None):
-    s = {
-        "background": PANEL, "border": f"1px solid {BORDER}",
-        "borderRadius": "4px", "padding": "14px", "marginBottom": "10px",
+def today_prefix():
+    return datetime.utcnow().date().isoformat()
+
+# ── Chart builders ────────────────────────────────────────────────────────────
+def sparkline(df_bal):
+    fig = go.Figure()
+    if not df_bal.empty and "balance_usdt" in df_bal.columns:
+        y = df_bal["balance_usdt"].astype(float).tail(50)
+        color = YELLOW if y.iloc[-1] >= y.iloc[0] else RED
+        fig.add_trace(go.Scatter(
+            y=y, mode="lines",
+            line=dict(color=color, width=2),
+            fill="tozeroy",
+            fillcolor=f"rgba(245,197,24,0.08)" if color == YELLOW else "rgba(255,68,68,0.08)",
+            hoverinfo="skip",
+        ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=0, b=0), height=60,
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+        showlegend=False,
+    )
+    return fig
+
+def pnl_by_day_chart(df):
+    fig = go.Figure()
+    if not df.empty and "exit_time" in df.columns and "pnl_usdt" in df.columns:
+        df = df.copy()
+        df["day"] = pd.to_datetime(df["exit_time"]).dt.date
+        daily = df.groupby("day")["pnl_usdt"].sum().reset_index()
+        daily = daily.sort_values("day").tail(14)
+        colors = [YELLOW if v >= 0 else RED for v in daily["pnl_usdt"]]
+        fig.add_trace(go.Bar(
+            x=daily["day"].astype(str),
+            y=daily["pnl_usdt"],
+            marker_color=colors,
+            hovertemplate="<b>%{x}</b><br>P&L: $%{y:.2f}<extra></extra>",
+        ))
+        fig.add_hline(y=0, line_color=BORDER, line_width=1)
+    else:
+        fig.add_annotation(
+            text="No trade data yet", xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False,
+            font=dict(color=MUTED, size=13, family=FONT),
+        )
+    fig.update_layout(
+        paper_bgcolor=CARD, plot_bgcolor=CARD,
+        font=dict(color=MUTED, family=FONT, size=11),
+        margin=dict(l=45, r=15, t=15, b=40),
+        xaxis=dict(
+            gridcolor=BORDER, zeroline=False,
+            tickfont=dict(size=10, color=MUTED),
+            showline=False,
+        ),
+        yaxis=dict(
+            gridcolor=BORDER, zeroline=False,
+            tickformat="$,.2f",
+            tickfont=dict(size=10, color=MUTED),
+        ),
+        showlegend=False, height=240,
+        bargap=0.3,
+    )
+    return fig
+
+# ── UI helpers ────────────────────────────────────────────────────────────────
+def card(children, extra_style=None):
+    style = {
+        "background": CARD,
+        "border": f"1px solid {BORDER}",
+        "borderRadius": "12px",
+        "padding": "20px 24px",
     }
-    if extra:
-        s.update(extra)
-    return s
+    if extra_style:
+        style.update(extra_style)
+    return html.Div(children, style=style)
 
-def section_title(text):
-    return html.Div(f"// {text}", style={
-        "color": GOLD, "fontFamily": FONT, "fontSize": "10px",
-        "letterSpacing": "2px", "marginBottom": "10px",
+def label(text):
+    return html.Div(text, style={
+        "color": MUTED, "fontFamily": FONT,
+        "fontSize": "12px", "fontWeight": "500",
+        "letterSpacing": "0.5px", "marginBottom": "8px",
         "textTransform": "uppercase",
     })
 
-def kv_row(label, value, color=BRIGHT):
-    return html.Div([
-        html.Span(label, style={"color": DIM, "fontFamily": FONT, "fontSize": "11px", "flex": "1"}),
-        html.Span(value, style={"color": color, "fontFamily": FONT, "fontSize": "12px", "fontWeight": "bold"}),
-    ], style={"display": "flex", "justifyContent": "space-between", "marginBottom": "5px"})
-
-def prog_bar(label, used, cap, danger=False):
-    pct = min(100, (used / cap * 100)) if cap else 0
-    bar_color = RED if pct >= 100 else GOLD if pct >= 50 else TEAL
-    return html.Div([
-        html.Div([
-            html.Span(label, style={"color": DIM, "fontFamily": FONT, "fontSize": "10px"}),
-            html.Span(f"{int(used)}/{int(cap)}", style={"color": TEXT, "fontFamily": FONT, "fontSize": "10px"}),
-        ], style={"display": "flex", "justifyContent": "space-between", "marginBottom": "3px"}),
-        html.Div(
-            html.Div(style={
-                "width": f"{pct}%", "height": "5px",
-                "background": bar_color, "borderRadius": "2px",
-            }),
-            style={"background": "#0a1020", "borderRadius": "2px", "height": "5px"}
-        )
-    ], style={"marginBottom": "10px"})
-
-def fmt_pnl(v):
-    if v is None or (isinstance(v, float) and v != v):
-        return "—"
-    color = GREEN if v >= 0 else RED
-    sign = "+" if v >= 0 else ""
-    return html.Span(f"{sign}${v:.2f}", style={"color": color, "fontFamily": FONT, "fontWeight": "bold"})
-
-def pnl_color(v):
+def big_number(value, prefix="$", positive_yellow=True):
     try:
-        return GREEN if float(v) >= 0 else RED
+        v = float(value)
     except Exception:
-        return TEXT
+        return html.Div("—", style={"color": MUTED, "fontFamily": FONT, "fontSize": "32px", "fontWeight": "700"})
+    color = YELLOW if (v >= 0 and positive_yellow) else RED if v < 0 else TEXT
+    sign = "+" if v > 0 else ""
+    return html.Div(
+        f"{sign}{prefix}{v:,.2f}",
+        style={"color": color, "fontFamily": FONT, "fontSize": "32px", "fontWeight": "700", "lineHeight": "1.1"},
+    )
 
-# ── Equity curve ──────────────────────────────────────────────────────────────
-def make_equity_fig(df_bal, df_trades):
-    fig = go.Figure()
+def sub_text(text, color=None):
+    return html.Div(text, style={
+        "color": color or MUTED, "fontFamily": FONT,
+        "fontSize": "13px", "marginTop": "6px",
+    })
 
-    if not df_bal.empty and "balance_usdt" in df_bal.columns:
-        x = pd.to_datetime(df_bal["recorded_at"])
-        y = df_bal["balance_usdt"].astype(float)
-        start = y.iloc[0]
-        end   = y.iloc[-1]
-        line_color = GREEN if end >= start else RED
-        fig.add_trace(go.Scatter(
-            x=x, y=y, mode="lines",
-            line=dict(color=GOLD, width=2),
-            fill="tozeroy", fillcolor="rgba(247,164,53,0.06)",
-            name="Balance",
-            hovertemplate="<b>%{x|%d %b %H:%M}</b><br>$%{y:.2f}<extra></extra>",
-        ))
+def performer_card(title, symbol, pnl, is_best=True):
+    if symbol is None:
+        content = html.Div("—", style={"color": MUTED, "fontFamily": FONT, "fontSize": "14px"})
     else:
-        fig.add_annotation(
-            text="AWAITING DATA — BOT RUNNING", xref="paper", yref="paper",
-            x=0.5, y=0.5, showarrow=False,
-            font=dict(color=DIM, size=13, family=FONT),
-        )
-
-    # Entry markers from closed trades
-    if not df_trades.empty and "entry_time" in df_trades.columns:
         try:
-            wins  = df_trades[df_trades["pnl_usdt"] >= 0]
-            losses = df_trades[df_trades["pnl_usdt"] < 0]
-            for subset, symbol, color in [(wins, "triangle-up", GREEN), (losses, "triangle-down", RED)]:
-                if not subset.empty and "entry_price" in subset.columns:
-                    fig.add_trace(go.Scatter(
-                        x=pd.to_datetime(subset["entry_time"]),
-                        y=subset["entry_price"].astype(float),
-                        mode="markers",
-                        marker=dict(symbol=symbol, size=8, color=color, opacity=0.7),
-                        name="Win" if color == GREEN else "Loss",
-                        hovertemplate="<b>%{x|%H:%M}</b><br>Entry $%{y:.4f}<extra></extra>",
-                        yaxis="y2",
-                    ))
+            v = float(pnl)
         except Exception:
-            pass
-
-    fig.update_layout(
-        plot_bgcolor=PANEL, paper_bgcolor=BG,
-        font=dict(color=TEXT, family=FONT, size=10),
-        margin=dict(l=55, r=10, t=10, b=35),
-        xaxis=dict(gridcolor=BORDER, zeroline=False, tickfont=dict(size=9)),
-        yaxis=dict(gridcolor=BORDER, zeroline=False, tickformat="$,.0f", tickfont=dict(size=9), title=dict(text="Balance USD", font=dict(size=9, color=DIM))),
-        yaxis2=dict(overlaying="y", side="right", showgrid=False, tickformat="$,.0f", tickfont=dict(size=8, color=DIM)),
-        showlegend=False, height=240,
-        hovermode="x unified",
-    )
-    return fig
-
-# ── P&L per-trade bar chart ───────────────────────────────────────────────────
-def make_pnl_bar(df):
-    fig = go.Figure()
-    if df.empty or "pnl_usdt" not in df.columns:
-        fig.add_annotation(text="NO TRADES YET", xref="paper", yref="paper",
-                           x=0.5, y=0.5, showarrow=False,
-                           font=dict(color=DIM, size=12, family=FONT))
-    else:
-        recent = df.iloc[::-1].tail(30)  # chronological order, last 30
-        pnls   = recent["pnl_usdt"].astype(float)
-        colors = [GREEN if v >= 0 else RED for v in pnls]
-        labels = recent.get("symbol", pd.Series(["?"] * len(recent)))
-        fig.add_trace(go.Bar(
-            x=list(range(len(pnls))), y=pnls,
-            marker_color=colors,
-            customdata=labels,
-            hovertemplate="<b>%{customdata}</b><br>P&L: $%{y:.2f}<extra></extra>",
-        ))
-        fig.add_hline(y=0, line_color=DIM, line_width=1)
-
-    fig.update_layout(
-        plot_bgcolor=PANEL, paper_bgcolor=BG,
-        font=dict(color=TEXT, family=FONT, size=10),
-        margin=dict(l=45, r=10, t=10, b=25),
-        xaxis=dict(showticklabels=False, gridcolor=BORDER, zeroline=False),
-        yaxis=dict(gridcolor=BORDER, zeroline=False, tickformat="$,.2f", tickfont=dict(size=9)),
-        showlegend=False, height=160,
-        bargap=0.15,
-    )
-    return fig
-
-# ── Win-rate donut ────────────────────────────────────────────────────────────
-def make_donut(wins, total):
-    losses = total - wins
-    wr = wins / total * 100 if total else 0
-    fig = go.Figure(go.Pie(
-        values=[wins, losses] if total else [1, 1],
-        labels=["Wins", "Losses"],
-        hole=0.68,
-        marker=dict(colors=[GREEN, RED]),
-        textinfo="none",
-        hovertemplate="%{label}: %{value}<extra></extra>",
-    ))
-    fig.add_annotation(
-        text=f"{wr:.0f}%", xref="paper", yref="paper",
-        x=0.5, y=0.5, showarrow=False,
-        font=dict(color=BRIGHT if total else DIM, size=20, family=FONT, weight="bold"),
-    )
-    fig.update_layout(
-        paper_bgcolor=BG, plot_bgcolor=BG,
-        margin=dict(l=0, r=0, t=0, b=0),
-        showlegend=False, height=120,
-    )
-    return fig
+            v = 0
+        color = YELLOW if is_best else RED
+        sign = "+" if v >= 0 else ""
+        content = html.Div([
+            html.Div(str(symbol), style={
+                "color": TEXT, "fontFamily": FONT,
+                "fontSize": "16px", "fontWeight": "600", "marginBottom": "4px",
+            }),
+            html.Div(f"{sign}${v:.2f}", style={
+                "color": color, "fontFamily": FONT,
+                "fontSize": "20px", "fontWeight": "700",
+            }),
+        ])
+    return card([
+        label(title),
+        content,
+    ], extra_style={"marginBottom": "12px"})
 
 # ── App ───────────────────────────────────────────────────────────────────────
-app = Dash(__name__, title="BinanceBot Edge")
+app = Dash(__name__, title="BinanceBot")
+
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+<head>
+    {%metas%}
+    <title>{%title%}</title>
+    {%favicon%}
+    {%css%}
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #0a0a0a; font-family: 'Inter', sans-serif; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #141414; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    {%app_entry%}
+    <footer>{%config%}{%scripts%}{%renderer%}</footer>
+</body>
+</html>
+'''
+
 app.layout = html.Div([
     dcc.Interval(id="tick", interval=REFRESH_MS, n_intervals=0),
 
     # ── Header ────────────────────────────────────────────────────────────────
     html.Div([
-        html.Span("// BINANCEBOT EDGE", style={
-            "color": GOLD, "fontFamily": FONT, "fontSize": "14px",
-            "fontWeight": "bold", "letterSpacing": "3px",
-        }),
-        html.Div(id="hdr-balance", style={"color": BRIGHT, "fontFamily": FONT, "fontSize": "22px", "fontWeight": "bold"}),
         html.Div([
+            html.Span("BINANCEBOT", style={
+                "color": YELLOW, "fontFamily": FONT,
+                "fontSize": "16px", "fontWeight": "700", "letterSpacing": "2px",
+            }),
+            html.Span(" · ", style={"color": BORDER, "margin": "0 10px"}),
             html.Span(id="hdr-mode"),
-            html.Span("  ·  ", style={"color": DIM}),
-            html.Span(id="hdr-time", style={"color": TEXT, "fontFamily": FONT, "fontSize": "12px"}),
-            html.Span("  ·  ", style={"color": DIM}),
-            html.Span(id="hdr-session", style={"color": TEAL, "fontFamily": FONT, "fontSize": "12px"}),
-        ]),
+        ], style={"display": "flex", "alignItems": "center"}),
+        html.Div([
+            html.Span(id="hdr-session", style={"color": MUTED, "fontFamily": FONT, "fontSize": "13px"}),
+            html.Span(" · ", style={"color": BORDER, "margin": "0 10px"}),
+            html.Span(id="hdr-time", style={"color": MUTED, "fontFamily": FONT, "fontSize": "13px"}),
+        ], style={"display": "flex", "alignItems": "center"}),
     ], style={
-        "background": "#080d18", "border": f"1px solid {BORDER}",
-        "borderRadius": "4px", "padding": "14px 20px",
-        "marginBottom": "10px", "display": "flex",
-        "alignItems": "center", "gap": "30px",
+        "display": "flex", "justifyContent": "space-between", "alignItems": "center",
+        "padding": "16px 24px", "borderBottom": f"1px solid {BORDER}",
+        "background": CARD, "marginBottom": "20px",
+        "borderRadius": "12px",
     }),
 
-    # ── 3-column body ─────────────────────────────────────────────────────────
+    # ── Top 3 stat cards ──────────────────────────────────────────────────────
     html.Div([
 
-        # ── LEFT COLUMN ───────────────────────────────────────────────────────
+        # Balance card with sparkline
+        card([
+            label("Current Balance"),
+            html.Div(id="card-balance"),
+            html.Div(id="card-balance-sub"),
+            dcc.Graph(id="sparkline", config={"displayModeBar": False},
+                      style={"marginTop": "12px"}),
+        ], extra_style={"flex": "1"}),
+
+        # Total P&L
+        card([
+            label("Total P / L"),
+            html.Div(id="card-total-pnl"),
+            html.Div(id="card-total-pnl-sub"),
+            html.Div(id="card-winrate", style={"marginTop": "16px"}),
+        ], extra_style={"flex": "1"}),
+
+        # Today's P&L
+        card([
+            label("Today's P / L"),
+            html.Div(id="card-today-pnl"),
+            html.Div(id="card-today-sub"),
+            html.Div(id="card-today-trades", style={"marginTop": "16px"}),
+        ], extra_style={"flex": "1"}),
+
+    ], style={"display": "flex", "gap": "16px", "marginBottom": "16px"}),
+
+    # ── Middle row ────────────────────────────────────────────────────────────
+    html.Div([
+
+        # Best / Worst performer
         html.Div([
-
-            html.Div([
-                section_title("Equity Targets"),
-                html.Div(id="eq-targets"),
-            ], style=panel_style()),
-
-            html.Div([
-                section_title("Session Slots"),
-                html.Div(id="session-slots"),
-            ], style=panel_style()),
-
-            html.Div([
-                section_title("Open Positions"),
+            html.Div(id="best-trade"),
+            html.Div(id="worst-trade"),
+            # Open positions mini
+            card([
+                label("Open Positions"),
                 html.Div(id="open-positions"),
-            ], style=panel_style()),
+            ]),
+        ], style={"width": "28%", "flexShrink": "0"}),
 
+        # P&L by day chart
+        card([
             html.Div([
-                section_title("Pair Stats"),
-                html.Div(id="pair-stats"),
-            ], style=panel_style()),
+                label("P&L by Day"),
+                html.Div(id="vol-label"),
+            ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start"}),
+            dcc.Graph(id="pnl-day-chart", config={"displayModeBar": False}),
+        ], extra_style={"flex": "1"}),
 
-        ], style={"width": "22%", "flexShrink": "0"}),
+    ], style={"display": "flex", "gap": "16px", "marginBottom": "16px"}),
 
-        # ── CENTER COLUMN ─────────────────────────────────────────────────────
+    # ── Trade history table ───────────────────────────────────────────────────
+    card([
         html.Div([
+            html.Div("Trade History", style={
+                "color": TEXT, "fontFamily": FONT,
+                "fontSize": "15px", "fontWeight": "600",
+            }),
+            html.Div(id="trade-count-badge", style={
+                "color": MUTED, "fontFamily": FONT, "fontSize": "12px",
+                "alignSelf": "center",
+            }),
+        ], style={"display": "flex", "justifyContent": "space-between", "marginBottom": "16px"}),
+        html.Div(id="trade-table"),
+    ]),
 
-            html.Div([
-                section_title("Equity Curve"),
-                dcc.Graph(id="equity-chart", config={"displayModeBar": False}),
-            ], style=panel_style()),
-
-            html.Div([
-                section_title("P&L Per Trade  (last 30)"),
-                dcc.Graph(id="pnl-bar", config={"displayModeBar": False}),
-            ], style=panel_style()),
-
-            html.Div([
-                section_title("Trade Log"),
-                html.Div(id="trade-log"),
-            ], style=panel_style()),
-
-        ], style={"flex": "1", "minWidth": "0"}),
-
-        # ── RIGHT COLUMN ──────────────────────────────────────────────────────
-        html.Div([
-
-            html.Div([
-                section_title("Performance"),
-                dcc.Graph(id="donut", config={"displayModeBar": False}),
-                html.Div(id="perf-stats"),
-            ], style=panel_style()),
-
-            html.Div([
-                section_title("Risk Matrix"),
-                html.Div(id="risk-matrix"),
-            ], style=panel_style()),
-
-            html.Div([
-                section_title("Disposition"),
-                html.Div(id="disposition"),
-            ], style=panel_style()),
-
-            html.Div([
-                section_title("Signal Log"),
-                html.Div(id="signal-log"),
-            ], style=panel_style()),
-
-        ], style={"width": "25%", "flexShrink": "0"}),
-
-    ], style={"display": "flex", "gap": "10px", "alignItems": "flex-start"}),
-
-], style={"background": BG, "minHeight": "100vh", "padding": "12px", "boxSizing": "border-box"})
+], style={"padding": "20px", "minHeight": "100vh", "background": BG})
 
 
-# ── Callbacks ─────────────────────────────────────────────────────────────────
+# ── Callback ──────────────────────────────────────────────────────────────────
 @app.callback(
-    Output("hdr-balance", "children"),
-    Output("hdr-mode", "children"),
-    Output("hdr-mode", "style"),
-    Output("hdr-time", "children"),
-    Output("hdr-session", "children"),
-    Output("eq-targets", "children"),
-    Output("session-slots", "children"),
-    Output("open-positions", "children"),
-    Output("pair-stats", "children"),
-    Output("equity-chart", "figure"),
-    Output("pnl-bar", "figure"),
-    Output("trade-log", "children"),
-    Output("donut", "figure"),
-    Output("perf-stats", "children"),
-    Output("risk-matrix", "children"),
-    Output("disposition", "children"),
-    Output("signal-log", "children"),
-    Input("tick", "n_intervals"),
+    Output("hdr-mode",           "children"),
+    Output("hdr-mode",           "style"),
+    Output("hdr-session",        "children"),
+    Output("hdr-time",           "children"),
+    Output("card-balance",       "children"),
+    Output("card-balance-sub",   "children"),
+    Output("sparkline",          "figure"),
+    Output("card-total-pnl",     "children"),
+    Output("card-total-pnl-sub", "children"),
+    Output("card-winrate",       "children"),
+    Output("card-today-pnl",     "children"),
+    Output("card-today-sub",     "children"),
+    Output("card-today-trades",  "children"),
+    Output("best-trade",         "children"),
+    Output("worst-trade",        "children"),
+    Output("open-positions",     "children"),
+    Output("vol-label",          "children"),
+    Output("pnl-day-chart",      "figure"),
+    Output("trade-count-badge",  "children"),
+    Output("trade-table",        "children"),
+    Input("tick",                "n_intervals"),
 )
 def refresh(_):
     trades   = load_closed_trades()
     open_pos = load_open_trades()
     bal_hist = load_balance_history()
-    signals  = load_signals()
 
-    # ── Derived stats ──────────────────────────────────────────────────────────
-    total       = len(trades)
-    wins        = int((trades["pnl_usdt"] > 0).sum()) if not trades.empty else 0
-    losses      = total - wins
-    total_pnl   = float(trades["pnl_usdt"].sum())      if not trades.empty else 0.0
-    avg_pnl     = float(trades["pnl_usdt"].mean())     if not trades.empty else 0.0
-    best_trade  = float(trades["pnl_usdt"].max())      if not trades.empty else 0.0
-    worst_trade = float(trades["pnl_usdt"].min())      if not trades.empty else 0.0
-    wr          = wins / total * 100 if total else 0
+    # ── Aggregates ────────────────────────────────────────────────────────────
+    total      = len(trades)
+    wins       = int((trades["pnl_usdt"] > 0).sum())       if not trades.empty else 0
+    total_pnl  = float(trades["pnl_usdt"].sum())            if not trades.empty else 0.0
+    wr         = wins / total * 100                          if total else 0.0
 
-    # Today's P&L
-    today_str = datetime.utcnow().date().isoformat()
-    if not trades.empty and "exit_time" in trades.columns:
-        today_trades = trades[trades["exit_time"].str.startswith(today_str)]
-        daily_pnl    = float(today_trades["pnl_usdt"].sum()) if not today_trades.empty else 0.0
-        daily_wins   = int((today_trades["pnl_usdt"] > 0).sum()) if not today_trades.empty else 0
-        daily_count  = len(today_trades)
-    else:
-        daily_pnl = 0.0
-        daily_wins = 0
-        daily_count = 0
-
-    # Current balance
+    # Balance
     if not bal_hist.empty and "balance_usdt" in bal_hist.columns:
-        current_bal = float(bal_hist["balance_usdt"].iloc[-1])
-        bal_str     = f"${current_bal:,.2f}"
+        current_bal  = float(bal_hist["balance_usdt"].iloc[-1])
+        start_bal    = float(bal_hist["balance_usdt"].iloc[0])
+        bal_change   = current_bal - start_bal
     else:
-        current_bal = 0.0
-        bal_str     = "$—"
+        current_bal = start_bal = bal_change = 0.0
+
+    # Today
+    today = today_prefix()
+    if not trades.empty and "exit_time" in trades.columns:
+        today_t   = trades[trades["exit_time"].str.startswith(today, na=False)]
+        today_pnl = float(today_t["pnl_usdt"].sum()) if not today_t.empty else 0.0
+        today_n   = len(today_t)
+        today_w   = int((today_t["pnl_usdt"] > 0).sum()) if not today_t.empty else 0
+    else:
+        today_pnl = 0.0; today_n = 0; today_w = 0
+
+    # Best / worst single trade
+    if not trades.empty and "pnl_usdt" in trades.columns:
+        best_idx  = trades["pnl_usdt"].idxmax()
+        worst_idx = trades["pnl_usdt"].idxmin()
+        best_sym  = trades.loc[best_idx, "symbol"]  if "symbol" in trades.columns else "?"
+        worst_sym = trades.loc[worst_idx, "symbol"] if "symbol" in trades.columns else "?"
+        best_pnl  = float(trades.loc[best_idx,  "pnl_usdt"])
+        worst_pnl = float(trades.loc[worst_idx, "pnl_usdt"])
+    else:
+        best_sym = worst_sym = None
+        best_pnl = worst_pnl = 0.0
 
     # ── Header ────────────────────────────────────────────────────────────────
     mode_text  = "● LIVE"
-    mode_style = {"color": RED, "fontFamily": FONT, "fontSize": "12px", "fontWeight": "bold"}
+    mode_style = {"color": RED, "fontFamily": FONT, "fontSize": "13px", "fontWeight": "700"}
 
-    # ── Equity targets ────────────────────────────────────────────────────────
-    daily_profit = max(0, daily_pnl)
-    daily_loss   = abs(min(0, daily_pnl))
-    eq_targets = html.Div([
-        prog_bar("Daily profit", daily_profit, DAILY_TARGET),
-        prog_bar("Loss used",   daily_loss,   DAILY_LOSS_LIM, danger=True),
-        kv_row("Today P&L", f"{'+'if daily_pnl>=0 else ''}${daily_pnl:.2f}",
-               GREEN if daily_pnl >= 0 else RED),
-        kv_row("Today trades", str(daily_count)),
-    ])
+    # ── Balance card ──────────────────────────────────────────────────────────
+    bal_display = big_number(current_bal, positive_yellow=True)
+    bal_pct = (bal_change / start_bal * 100) if start_bal else 0
+    sign = "+" if bal_change >= 0 else ""
+    bal_sub = sub_text(f"{sign}${bal_change:.2f}  ({sign}{bal_pct:.1f}%)",
+                       YELLOW if bal_change >= 0 else RED)
 
-    # ── Session slots ─────────────────────────────────────────────────────────
-    sess = current_session()
-    session_slots = html.Div([
-        kv_row("Session", sess, TEAL),
-        prog_bar("EU slots", 0, EU_CAP),        # counters come from bot state, show 0 as placeholder
-        prog_bar("US slots", 0, US_CAP_BASE),
-        html.Div("Live slot counts visible in bot console", style={
-            "color": DIM, "fontFamily": FONT, "fontSize": "9px", "marginTop": "4px"
+    # ── Total P&L card ────────────────────────────────────────────────────────
+    pnl_display = big_number(total_pnl)
+    pnl_pct = (total_pnl / start_bal * 100) if start_bal else 0
+    sign = "+" if total_pnl >= 0 else ""
+    pnl_sub  = sub_text(f"{sign}{pnl_pct:.1f}% all time")
+    wr_text  = html.Div([
+        html.Span(f"{wins}W  {total - wins}L", style={
+            "color": TEXT, "fontFamily": FONT, "fontSize": "14px", "fontWeight": "600",
         }),
+        html.Span(f"  ·  {wr:.0f}% win rate", style={"color": MUTED, "fontFamily": FONT, "fontSize": "13px"}),
     ])
+
+    # ── Today card ────────────────────────────────────────────────────────────
+    today_display = big_number(today_pnl)
+    today_sub     = sub_text(f"Daily target  $7.00", MUTED)
+    today_trades  = html.Div([
+        html.Span(f"{today_n} trade{'s' if today_n != 1 else ''} today", style={
+            "color": MUTED, "fontFamily": FONT, "fontSize": "13px",
+        }),
+        html.Span(f"  ·  {today_w}W", style={"color": YELLOW, "fontFamily": FONT, "fontSize": "13px"}),
+    ])
+
+    # ── Best / Worst ──────────────────────────────────────────────────────────
+    best_card  = performer_card("Best Trade",  best_sym,  best_pnl,  is_best=True)
+    worst_card = performer_card("Worst Trade", worst_sym, worst_pnl, is_best=False)
 
     # ── Open positions ────────────────────────────────────────────────────────
     if open_pos.empty:
-        open_panel = html.Div("No open positions", style={"color": DIM, "fontFamily": FONT, "fontSize": "11px"})
+        open_panel = html.Div("No open positions", style={
+            "color": MUTED, "fontFamily": FONT, "fontSize": "13px",
+        })
     else:
         rows = []
         for _, r in open_pos.iterrows():
             sym = r.get("symbol", "?")
             ep  = r.get("entry_price", 0)
             rows.append(html.Div([
-                html.Span(sym, style={"color": GOLD, "fontFamily": FONT, "fontSize": "11px", "flex": "1"}),
-                html.Span(f"@${float(ep):.2f}", style={"color": TEXT, "fontFamily": FONT, "fontSize": "10px"}),
-            ], style={"display": "flex", "justifyContent": "space-between", "marginBottom": "4px"}))
+                html.Span(str(sym), style={"color": TEXT, "fontFamily": FONT, "fontSize": "13px", "fontWeight": "600"}),
+                html.Span(f"@${float(ep):.2f}", style={"color": MUTED, "fontFamily": FONT, "fontSize": "12px"}),
+            ], style={"display": "flex", "justifyContent": "space-between", "marginBottom": "6px"}))
         open_panel = html.Div(rows)
 
-    # ── Pair stats ────────────────────────────────────────────────────────────
-    if trades.empty or "symbol" not in trades.columns:
-        pair_panel = html.Div("No trade data", style={"color": DIM, "fontFamily": FONT, "fontSize": "11px"})
+    # ── P&L by day label ──────────────────────────────────────────────────────
+    if not trades.empty:
+        positive_days = 0
+        if "exit_time" in trades.columns:
+            df_tmp = trades.copy()
+            df_tmp["day"] = pd.to_datetime(df_tmp["exit_time"], errors="coerce").dt.date
+            daily = df_tmp.groupby("day")["pnl_usdt"].sum()
+            positive_days = int((daily > 0).sum())
+        vol_label = html.Div(f"{positive_days} profitable day{'s' if positive_days != 1 else ''}",
+                             style={"color": YELLOW, "fontFamily": FONT, "fontSize": "13px", "fontWeight": "600",
+                                    "alignSelf": "center"})
     else:
-        grp = trades.groupby("symbol")["pnl_usdt"].agg(["sum", "count"]).reset_index()
-        rows = []
-        for _, r in grp.iterrows():
-            pnl = float(r["sum"])
-            rows.append(html.Div([
-                html.Span(r["symbol"], style={"color": TEXT, "fontFamily": FONT, "fontSize": "11px", "flex": "1"}),
-                html.Span(f"{int(r['count'])}t", style={"color": DIM, "fontFamily": FONT, "fontSize": "10px", "marginRight": "8px"}),
-                html.Span(f"{'+'if pnl>=0 else ''}${pnl:.2f}",
-                          style={"color": GREEN if pnl >= 0 else RED, "fontFamily": FONT, "fontSize": "11px"}),
-            ], style={"display": "flex", "marginBottom": "5px"}))
-        pair_panel = html.Div(rows)
+        vol_label = html.Div()
 
-    # ── Trade log table ───────────────────────────────────────────────────────
+    # ── Trade table ───────────────────────────────────────────────────────────
+    badge = html.Span(f"{total} total trade{'s' if total != 1 else ''}",
+                      style={"color": MUTED, "fontFamily": FONT, "fontSize": "12px"})
+
     if trades.empty:
-        trade_log = html.Div("No closed trades yet — bot is running", style={
-            "color": DIM, "fontFamily": FONT, "fontSize": "12px", "textAlign": "center", "padding": "20px"
+        trade_table = html.Div("No trades yet — bot is running", style={
+            "color": MUTED, "fontFamily": FONT, "fontSize": "14px",
+            "textAlign": "center", "padding": "40px 0",
         })
     else:
-        disp = trades.head(15).copy()
-        disp["pnl_usdt"] = disp["pnl_usdt"].apply(lambda v: f"{'+'if float(v)>=0 else ''}${float(v):.2f}" if v is not None else "—")
-        disp["entry_price"] = disp["entry_price"].apply(lambda v: f"${float(v):.4f}" if v is not None else "—")
-        disp["exit_price"]  = disp["exit_price"].apply(lambda v: f"${float(v):.4f}" if v is not None else "—")
-        disp["entry_time"]  = disp["entry_time"].apply(lambda v: str(v)[:16] if v else "—")
+        disp = trades.head(50).copy()
 
-        cols = ["symbol", "entry_price", "exit_price", "pnl_usdt", "exit_reason", "entry_time"]
+        def fmt_pnl(v):
+            try:
+                f = float(v)
+                return f"+${f:.2f}" if f >= 0 else f"-${abs(f):.2f}"
+            except Exception:
+                return "—"
+
+        disp["P&L"]        = disp["pnl_usdt"].apply(fmt_pnl)
+        disp["Entry $"]    = disp["entry_price"].apply(lambda v: f"${float(v):,.4f}" if v else "—")
+        disp["Exit $"]     = disp["exit_price"].apply(lambda v: f"${float(v):,.4f}" if v else "—")
+        disp["Date"]       = pd.to_datetime(disp["exit_time"], errors="coerce").dt.strftime("%d %b  %H:%M")
+        disp["Type"]       = "LONG"
+        disp["Symbol"]     = disp.get("symbol", "?")
+        disp["Exit Reason"] = disp.get("exit_reason", "—").fillna("—").str.upper()
+
+        cols = ["Date", "Symbol", "Type", "Entry $", "Exit $", "P&L", "Exit Reason"]
         cols = [c for c in cols if c in disp.columns]
-        trade_log = dash_table.DataTable(
+
+        trade_table = dash_table.DataTable(
             data=disp[cols].to_dict("records"),
-            columns=[{"name": c.replace("_", " ").title(), "id": c} for c in cols],
+            columns=[{"name": c, "id": c} for c in cols],
+            page_size=15,
+            sort_action="native",
             style_table={"overflowX": "auto"},
             style_cell={
-                "backgroundColor": PANEL, "color": TEXT,
-                "fontFamily": FONT, "fontSize": "11px",
-                "border": f"1px solid {BORDER}", "padding": "6px 10px",
+                "backgroundColor": CARD,
+                "color": TEXT,
+                "fontFamily": FONT,
+                "fontSize": "13px",
+                "border": f"1px solid {BORDER}",
+                "padding": "10px 14px",
                 "textAlign": "left",
+                "whiteSpace": "nowrap",
             },
             style_header={
-                "backgroundColor": "#0a1020", "color": GOLD,
-                "fontFamily": FONT, "fontSize": "10px",
+                "backgroundColor": BG,
+                "color": MUTED,
+                "fontFamily": FONT,
+                "fontSize": "11px",
+                "fontWeight": "600",
                 "border": f"1px solid {BORDER}",
-                "textTransform": "uppercase", "letterSpacing": "1px",
+                "textTransform": "uppercase",
+                "letterSpacing": "0.8px",
+                "padding": "10px 14px",
             },
             style_data_conditional=[
-                {"if": {"filter_query": "{pnl_usdt} contains '+'"},  "color": GREEN},
-                {"if": {"filter_query": "{pnl_usdt} contains '-'"},  "color": RED},
+                {"if": {"filter_query": '{P&L} contains "+"'}, "color": YELLOW},
+                {"if": {"filter_query": '{P&L} contains "-"'}, "color": RED},
+                {"if": {"column_id": "Type"},                  "color": YELLOW},
+                {"if": {"state": "active"}, "backgroundColor": "#1e1e1e", "border": f"1px solid {YELLOW}"},
             ],
-            page_size=15,
         )
 
-    # ── Donut & perf stats ────────────────────────────────────────────────────
-    donut = make_donut(wins, total)
-    perf_stats = html.Div([
-        kv_row("Win rate",    f"{wr:.1f}%",    GREEN if wr >= 50 else GOLD if wr >= 40 else RED),
-        kv_row("Total trades", str(total),      BRIGHT),
-        kv_row("Total P&L",  f"{'+'if total_pnl>=0 else ''}${total_pnl:.2f}", GREEN if total_pnl >= 0 else RED),
-        kv_row("Avg / trade", f"{'+'if avg_pnl>=0 else ''}${avg_pnl:.2f}",   GREEN if avg_pnl >= 0 else RED),
-        kv_row("Best trade",  f"+${best_trade:.2f}",   GREEN),
-        kv_row("Worst trade", f"-${abs(worst_trade):.2f}", RED),
-    ])
-
-    # ── Risk matrix ───────────────────────────────────────────────────────────
-    drawdown_pct = (daily_loss / current_bal * 100) if current_bal > 0 else 0
-    risk_color   = RED if drawdown_pct >= 4 else GOLD if drawdown_pct >= 2 else GREEN
-    risk_matrix = html.Div([
-        kv_row("Daily P&L",     f"{'+'if daily_pnl>=0 else ''}${daily_pnl:.2f}", GREEN if daily_pnl >= 0 else RED),
-        kv_row("Daily drawdown", f"{drawdown_pct:.1f}%",   risk_color),
-        kv_row("Daily target",   f"${DAILY_TARGET:.2f}",   DIM),
-        kv_row("Loss limit",     f"${DAILY_LOSS_LIM:.2f}", DIM),
-        kv_row("Wins today",     str(daily_wins),           GREEN),
-    ])
-
-    # ── Disposition bar ───────────────────────────────────────────────────────
-    disp_children = [
-        prog_bar("Win rate", wins, total if total else 1),
-        html.Div([
-            html.Span(f"{wins} W", style={"color": GREEN, "fontFamily": FONT, "fontSize": "12px", "fontWeight": "bold"}),
-            html.Span("  /  ", style={"color": DIM}),
-            html.Span(f"{losses} L", style={"color": RED, "fontFamily": FONT, "fontSize": "12px", "fontWeight": "bold"}),
-        ], style={"textAlign": "center", "marginTop": "6px"}),
-    ]
-    if total >= 5:
-        consec = 0
-        for _, r in trades.iterrows():
-            if float(r.get("pnl_usdt", 0)) < 0:
-                consec += 1
-            else:
-                break
-        disp_children.append(kv_row("Consec. losses", str(consec), RED if consec >= 3 else TEXT))
-    disposition = html.Div(disp_children)
-
-    # ── Signal log ────────────────────────────────────────────────────────────
-    if signals.empty:
-        sig_panel = html.Div("No signals recorded", style={"color": DIM, "fontFamily": FONT, "fontSize": "11px"})
-    else:
-        rows = []
-        for _, r in signals.iterrows():
-            sym  = r.get("symbol", "?")
-            stype = str(r.get("signal_type", "")).upper()[:6]
-            conf  = r.get("confidence", 0)
-            acted = r.get("acted_on", 0)
-            color = GREEN if acted else DIM
-            rows.append(html.Div([
-                html.Span(sym,   style={"color": color, "fontFamily": FONT, "fontSize": "10px", "width": "80px"}),
-                html.Span(stype, style={"color": TEAL, "fontFamily": FONT, "fontSize": "10px", "width": "50px"}),
-                html.Span(f"{float(conf):.0f}", style={"color": GOLD, "fontFamily": FONT, "fontSize": "10px"}),
-            ], style={"display": "flex", "gap": "6px", "marginBottom": "4px"}))
-        sig_panel = html.Div(rows)
-
     return (
-        bal_str,
         mode_text, mode_style,
-        nzst_now(),
-        f"SESSION: {current_session()}",
-        eq_targets,
-        session_slots,
+        session_str(), nzst_str(),
+        bal_display, bal_sub, sparkline(bal_hist),
+        pnl_display, pnl_sub, wr_text,
+        today_display, today_sub, today_trades,
+        best_card, worst_card,
         open_panel,
-        pair_panel,
-        make_equity_fig(bal_hist, trades),
-        make_pnl_bar(trades),
-        trade_log,
-        donut,
-        perf_stats,
-        risk_matrix,
-        disposition,
-        sig_panel,
+        vol_label,
+        pnl_by_day_chart(trades),
+        badge,
+        trade_table,
     )
 
 
 if __name__ == "__main__":
-    print("\n" + "=" * 55)
-    print("   BINANCEBOT EDGE  —  TRADING DASHBOARD")
-    print("=" * 55)
-    print(f"   DB path:  {DB_PATH}")
-    print(f"   Refresh:  every {REFRESH_MS // 1000}s")
-    print(f"   Open:     http://localhost:8050")
-    print("=" * 55 + "\n")
+    print("\n" + "=" * 50)
+    print("   BINANCEBOT  —  DASHBOARD")
+    print("=" * 50)
+    print(f"   DB:   {DB_PATH}")
+    print(f"   URL:  http://localhost:8050")
+    print(f"   Auto-refresh every {REFRESH_MS // 1000}s")
+    print("=" * 50 + "\n")
     app.run(debug=False, host="0.0.0.0", port=8050)
