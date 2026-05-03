@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python analyze_trades.py*)",
+      "Bash(python project_returns.py*)",
+      "Bash(python dashboard.py*)",
+      "Bash(python -c *)",
+      "Bash(grep * python-bot/smart_trader_v3_live.py)",
+      "Bash(grep * analyze_trades.py)",
+      "Bash(grep * dashboard.py)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git pull*)",
+      "Bash(git fetch*)",
+      "Bash(ls*)",
+      "Bash(find . *)",
+      "Bash(pip list*)",
+      "Bash(pip install*)",
+      "Bash(sqlite3 data/trades.db *)"
+    ]
+  }
+}
