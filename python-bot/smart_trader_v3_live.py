@@ -2661,6 +2661,7 @@ class SmartTrader:
                     nz = pytz.timezone('Pacific/Auckland')
                     now_hour = datetime.now(nz).hour
                     if not ((19 <= now_hour <= 23) or (1 <= now_hour <= 5)):
+                        print(f"   ⏰ {symbol} skipped — outside trading hours (NZST {now_hour:02d}:xx, need 19-23 or 01-05)")
                         continue
 
                     # Unified entry check (score-based)
@@ -2678,14 +2679,10 @@ class SmartTrader:
 
                     signal = self.analyze(symbol)
 
-                    # Log anything interesting
-                    if signal['action'] != 'HOLD' or any(
-                        x in signal.get('reason', '')
-                        for x in ['HARD BLOCK', 'WAITING', 'Breakout', 'Daily target']
-                    ):
-                        print(f"   {symbol}: {signal['action']} "
-                              f"({signal.get('market_type','N/A')}|{signal.get('zone','?')}) "
-                              f"- {signal['reason']}")
+                    # Log every signal reason so you can see exactly what's blocking
+                    print(f"   {symbol}: {signal['action']} "
+                          f"({signal.get('market_type','N/A')}|{signal.get('zone','?')}) "
+                          f"- {signal['reason']}")
 
                     if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
                         if len(self.open_positions) >= self.max_positions:
