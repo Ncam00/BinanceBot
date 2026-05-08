@@ -18,9 +18,13 @@ Do NOT touch `nodejs-bot/` or `main.py` — they are legacy/unused.
 | `ATR_SL_MULTIPLIER` | `1.5` | Stop loss = entry − ATR × 1.5 |
 | `ATR_TP_MULTIPLIER` | `2.0` | Take profit target = 2× stop distance |
 | `PARTIAL_TP_RATIO` | `0.5` | 50% exits at TP1, remainder runs |
-| `A_PLUS_ONLY` | `True` | Only take highest-confidence setups |
+| `A_PLUS_ONLY` | `False` | Allow B+ entries at 60% position size (relaxed from True) |
 | `KILL_TRADE_CANDLES` | `10` | Exit losing trade after 10 candles AND −1% |
 | `MAX_TRADES_PER_DAY` | `3` | Hard cap across all sessions |
+| `MIN_VOLUME_MULTIPLIER` | `1.05` | Volume vs avg to confirm signal (was 1.1) |
+| `adx_range_threshold` | `18` | ADX < 18 = choppy, skip (was 22) |
+| Daily range filter | `> 85%` | Block longs above 85% of daily range (was 75%) |
+| UTC trading window | `24/7` | Removed — session-slot caps prevent overtrading |
 
 ## Daily risk limits (set in __init__, line ~553)
 - **Daily profit target:** $7.00 — bot stops opening new trades when hit

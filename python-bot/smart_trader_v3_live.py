@@ -49,7 +49,7 @@ TRAILING_STOP         = 0.985
 RUNNER_TRAIL          = 0.970   # 3% below max_price — wide enough to let winners run
 MAX_TRADES_PER_DAY    = 3
 MAX_SLIPPAGE          = 0.002  # 0.2% — reject fills worse than this
-MIN_VOLUME_MULTIPLIER = 1.1    # minimum volume vs avg to confirm signal
+MIN_VOLUME_MULTIPLIER = 1.05   # minimum volume vs avg to confirm signal (was 1.1)
 POSITION_SIZE_PCT     = 0.12   # ~12% of balance per trade (~$50 on $400)
 RISK_PER_TRADE        = 0.01   # 1% of balance risked per trade
 TIME_EXIT_CANDLES     = 25     # exit if no progress after this many candles
@@ -67,7 +67,7 @@ DRY_RUN               = False  # LIVE mode — real orders placed. Set True to r
 
 # ─── SMOOTH MODE ────────────────────────────────────────────────────────────
 # These settings reduce equity-curve volatility and remove fear-inducing swings.
-A_PLUS_ONLY        = True    # Skip B+ and SCOUT entries — only take the best setups
+A_PLUS_ONLY        = False   # Allow B+ entries (60% size); SCOUT still skipped at scoring
 KILL_TRADE_CANDLES = 10      # Exit losing trade after N candles of no progress (was 3)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -132,7 +132,7 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend', recent_volumes=None, range_high=None, is_range=False, ema9=None, ema21=None):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=18, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend', recent_volumes=None, range_high=None, is_range=False, ema9=None, ema21=None):
         sig = self.get(pair)
 
         # ADX filter — skip choppy markets
@@ -141,7 +141,7 @@ class EntryEngine:
 
         # Daily range context — skip longs in the top quartile of today's 24h range
         ctx = self.get_daily_context(pair)
-        if ctx and ctx['price_position_pct'] > 75:
+        if ctx and ctx['price_position_pct'] > 85:
             return {'action': 'HOLD', 'pair': pair,
                     'reason': f"Near 24h high ({ctx['price_position_pct']:.0f}% of daily range)"}
 
@@ -466,7 +466,7 @@ class EntryEngine:
                 atr=data.get('atr'),
                 lows=data.get('lows'),
                 adx=data.get('adx'),
-                adx_threshold=22,
+                adx_threshold=18,
                 atr_avg=data.get('atr_avg'),
                 bullish_timeframes=data.get('bullish_timeframes', 0),
                 ema20=data.get('ema20'),
@@ -592,7 +592,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # ADX THRESHOLDS
         # ════════════════════════════════════════════════════════════════════
-        self.adx_range_threshold = 22         # ADX < 22 = market too choppy, skip
+        self.adx_range_threshold = 18         # ADX < 18 = market too choppy, skip (was 22)
         self.adx_trend_threshold = 25         # ADX > 25 = trending market
         self.min_atr_percent = 0.003          # Skip trades when ATR < 0.3% of price
         self.max_spread_percent = 0.001       # Skip trades when spread > 0.1% of price
@@ -2436,10 +2436,8 @@ class SmartTrader:
         return True, daily_loss
 
     def can_trade(self):
-        # UTC trading window: EU session (07-16) and US session (18-23) only
-        hour = datetime.utcnow().hour
-        if not (7 <= hour <= 16 or 18 <= hour <= 23):
-            return False, f"🕐 OUTSIDE TRADING HOURS (UTC {hour:02d}:00)"
+        # Trading window: 24/7 (crypto markets never close)
+        # Session-slot caps below already prevent overtrading per session.
 
         # Weekly loss guard
         if self.weekly_pnl <= -self.max_weekly_loss:
