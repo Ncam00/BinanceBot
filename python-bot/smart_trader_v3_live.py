@@ -1565,6 +1565,22 @@ class SmartTrader:
                 usdt_target = POSITION_USDT_TARGET * 0.40   # 40% size for scout entries
             else:
                 usdt_target = POSITION_USDT_TARGET           # full size for A+ / BREAKOUT
+
+            # Session-aware sizing: Asia is slower/range-bound (0.5x); US has strongest momentum (1.5x)
+            _current_session, _ = self.get_market_session()
+            if _current_session == 'asia':
+                usdt_target *= 0.5
+                print(f"   🌙 Asia session — reducing size to ${usdt_target:.2f} (0.5x)")
+            elif _current_session == 'us':
+                usdt_target *= 1.5
+                print(f"   🇺🇸 US session — increasing size to ${usdt_target:.2f} (1.5x)")
+
+            # Correlation guard: BTC and ETH move together — halve size if the other is already open
+            _correlated = {'BTCUSDT': 'ETHUSDT', 'ETHUSDT': 'BTCUSDT'}.get(symbol)
+            if _correlated and _correlated in self.positions:
+                usdt_target *= 0.5
+                print(f"   🔗 Correlation guard — {_correlated} open, halving {symbol} to ${usdt_target:.2f}")
+
             quantity = usdt_target / price
             position_value = quantity * price
             print(f"   📐 {trade_type} | Size: ${position_value:.2f} USDT | Qty: {quantity:.5f}")
@@ -1599,6 +1615,7 @@ class SmartTrader:
                     return None
                 entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
+            tp_multiplier = 2.0   # default; updated dynamically below
             if 'tp_percent_override' in signal:
                 take_profit = fill_price * (1 + signal['tp_percent_override'] / 100)
                 stop_loss   = fill_price * (1 - signal['sl_percent_override'] / 100)
@@ -1608,8 +1625,16 @@ class SmartTrader:
                 if sl_distance < fill_price * 0.003:
                     print(f"   ⚠️ {symbol} SL too tight ({sl_distance/fill_price:.3%}) — skipping")
                     return None
-                stop_loss   = fill_price - sl_distance
-                take_profit = fill_price + (sl_distance * 2) + (fill_price * TP_FEE_BUFFER)  # net 1:2 R:R
+                stop_loss = fill_price - sl_distance
+                # Dynamic TP: let runners run when volume spike + A+ confidence + strong trend align
+                _volume_spike = signal.get('volume_ratio', 1.0) >= 1.5
+                _strong_trend = signal.get('adx', 0) >= 25
+                if _volume_spike and strong_setup and _strong_trend:
+                    tp_multiplier = 3.5
+                    print(f"   🚀 Dynamic TP 3.5× (volume + A+ + ADX {signal.get('adx', 0):.1f})")
+                else:
+                    tp_multiplier = 1.8
+                take_profit = fill_price + (sl_distance * tp_multiplier) + (fill_price * TP_FEE_BUFFER)
             else:
                 take_profit, stop_loss = self.set_tp_sl(
                     fill_price,
@@ -1668,8 +1693,8 @@ class SmartTrader:
                 'entry':     fill_price,
                 'qty':       quantity,
                 'sl':        stop_loss,
-                'tp1':       fill_price + _sl_distance + (fill_price * TP_FEE_BUFFER),          # 1R net
-                'tp2':       fill_price + (_sl_distance * 2) + (fill_price * TP_FEE_BUFFER),   # 2R net
+                'tp1':       fill_price + _sl_distance + (fill_price * TP_FEE_BUFFER),                        # 1R net
+                'tp2':       fill_price + (_sl_distance * tp_multiplier) + (fill_price * TP_FEE_BUFFER),   # dynamic R:R
                 'max_price': fill_price,
                 'candles':   0,
                 'added':     False,
