@@ -1542,6 +1542,12 @@ class SmartTrader:
         try:
             strong_setup = signal.get('strength', 0) >= self.strong_setup_threshold
 
+            # EU session: only take A+ — the single EU slot is too valuable for marginal setups
+            _entry_session, _ = self.get_market_session()
+            if _entry_session == 'london' and not strong_setup:
+                print(f"   🕐 EU session — A+ required, skipping {signal.get('trade_type', '?')} setup")
+                return None
+
             # Trade frequency gate: free rein for first 2 trades; 3rd only on A+
             if self.daily_trades >= 2 and not strong_setup:
                 print(f"   🛑 Trade #{self.daily_trades + 1} blocked - A+ setup required")
@@ -2150,7 +2156,15 @@ class SmartTrader:
                 self.execute_sell(position, 'TIME_EXIT')
                 continue
 
-            if candles_open > KILL_TRADE_CANDLES and pnl_percent < -1.0:
+            # Session-specific kill timer: cut EU losers fast, give US runners more room
+            _monitor_session, _ = self.get_market_session()
+            if _monitor_session == 'london':
+                _kill_candles = 6    # ~1.5h — don't let EU losers eat the daily budget before US opens
+            elif _monitor_session == 'us':
+                _kill_candles = 14   # ~3.5h — US trends need room; institutional moves take time
+            else:
+                _kill_candles = KILL_TRADE_CANDLES
+            if candles_open > _kill_candles and pnl_percent < -1.0:
                 print(f"\n   ⚡ KILL BAD TRADE {symbol}: {candles_open} candles open, PNL {pnl_percent:.2f}%")
                 self.execute_sell(position, 'TIMEOUT_LOSS')
                 continue
@@ -2506,13 +2520,16 @@ class SmartTrader:
             remaining = 300 - (time.time() - last_any)
             return False, f"⏳ COOLDOWN: {remaining:.0f}s remaining"
 
-        # Per-session slot management — EU capped at 2 to reserve a slot for US
+        # Per-session slot management — EU capped at 1 to guarantee 2 slots for US
         session, settings = self.get_market_session()
-        if session == 'london' and self.eu_trades_today >= 2:
-            return False, f"🕐 EU slots full ({self.eu_trades_today}/2) — saving slot for US session"
+        if session == 'london':
+            if self.eu_trades_today >= 1:
+                return False, f"🕐 EU slot taken ({self.eu_trades_today}/1) — saving 2 slots for US"
+            if self.daily_profit >= 3.50:
+                return False, f"🕐 EU profit lock (${self.daily_profit:.2f} ≥ $3.50) — preserving daily budget for US"
         elif session == 'us':
-            eu_unused = max(0, 2 - self.eu_trades_today)   # slots EU didn't use
-            us_cap = 1 + eu_unused                          # US gets its 1 + any EU leftovers
+            eu_unused = max(0, 1 - self.eu_trades_today)   # slot EU didn't use
+            us_cap = 2 + eu_unused                          # US gets 2 + any EU leftover
             if self.us_trades_today >= us_cap:
                 return False, f"🕐 US slots full ({self.us_trades_today}/{us_cap})"
         elif session == 'asia' and self.daily_trades >= settings['max_trades']:
