@@ -321,11 +321,6 @@ class EntryEngine:
         return None
 
     def scan_market(self, market_data):
-        # Session guard: only enter during EU (19-23 NZT) or US (1-5 NZT)
-        _nz_hour = datetime.now(pytz.timezone('Pacific/Auckland')).hour
-        if not ((19 <= _nz_hour <= 23) or (1 <= _nz_hour <= 5)):
-            return
-
         candidates = []
         signals = []
 
@@ -2695,13 +2690,6 @@ class SmartTrader:
                     # BTC filter for alts
                     if symbol not in ('BTCUSDT',) and not self.btc_is_healthy():
                         print(f"   ⚠️ {symbol} skipped - BTC filter")
-                        continue
-
-                    # Session filter: EU (19-23 NZST) or US (1-5 NZST) only
-                    nz = pytz.timezone('Pacific/Auckland')
-                    now_hour = datetime.now(nz).hour
-                    if not ((19 <= now_hour <= 23) or (1 <= now_hour <= 5)):
-                        print(f"   ⏰ {symbol} skipped — outside trading hours (NZST {now_hour:02d}:xx, need 19-23 or 01-05)")
                         continue
 
                     # Unified entry check (score-based)
