@@ -24,6 +24,7 @@ Pairs: BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, BNBUSDT
 import logging
 import os
 import time
+import math
 import json
 from datetime import datetime
 from binance.client import Client
@@ -44,7 +45,7 @@ logging.basicConfig(
     format="%(asctime)s - %(message)s"
 )
 
-TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT']
+TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']
 TRAILING_STOP         = 0.985
 RUNNER_TRAIL          = 0.970   # 3% below max_price — wide enough to let winners run
 MAX_TRADES_PER_DAY    = 3
@@ -564,7 +565,7 @@ class SmartTrader:
         # CIRCUIT BREAKER
         # 5% drawdown from starting balance kills the bot
         # ════════════════════════════════════════════════════════════════════
-        self.starting_balance = 468.35
+        self.starting_balance = 316.00
         self.circuit_breaker_percent = 0.05
         self.circuit_breaker_limit = self.starting_balance * (1 - self.circuit_breaker_percent)
 
@@ -1607,7 +1608,7 @@ class SmartTrader:
                     symbol=symbol,
                     side=SIDE_BUY,
                     type=ORDER_TYPE_MARKET,
-                    quantity=quantity
+                    quantity=self.qty_to_str(symbol, quantity)
                 )
                 fill_price = float(order['fills'][0]['price'])
                 slippage = abs(fill_price - price) / price
@@ -1645,6 +1646,7 @@ class SmartTrader:
                 )
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
+            risk_percent = actual_risk / fill_price if fill_price else 0.0
 
             position = {
                 'trade_id': f"{symbol}-{int(entry_time.timestamp())}",
@@ -1735,12 +1737,21 @@ class SmartTrader:
     # EXECUTE SELL
     # ════════════════════════════════════════════════════════════════════
     def format_quantity(self, symbol, qty):
-        if symbol == 'BTCUSDT':
-            return round(qty, 5)
-        elif symbol == 'ETHUSDT':
-            return round(qty, 4)
-        else:
-            return round(qty, 5)
+        try:
+            _, precision = self.get_symbol_precision(symbol)
+        except Exception:
+            precision = 5
+        # Floor to step precision so we never round up over actual balance
+        factor = 10 ** precision
+        floored = math.floor(qty * factor) / factor
+        return floored
+
+    def qty_to_str(self, symbol, qty):
+        try:
+            _, precision = self.get_symbol_precision(symbol)
+        except Exception:
+            precision = 5
+        return f"{qty:.{precision}f}"
 
     def get_available_quantity(self, symbol):
         asset = symbol.replace('USDT', '')
@@ -1771,7 +1782,7 @@ class SmartTrader:
             else:
                 order = self.client.order_market_sell(
                     symbol=symbol,
-                    quantity=sell_quantity
+                    quantity=self.qty_to_str(symbol, sell_quantity)
                 )
                 fill_price = float(order['fills'][0]['price'])
                 exit_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
@@ -2058,9 +2069,9 @@ class SmartTrader:
             pos['candles'] += 1
 
             # Fee-killer guard: skip exit if move too small to cover fees
-            atr_now = (self.get_candles(symbol, '15m', 20) or None)
-            atr_now = ((atr_now['high'] - atr_now['low']).rolling(14).mean().iloc[-1]
-                       if atr_now is not None and len(atr_now) >= 14 else None)
+            atr_df = self.get_candles(symbol, '15m', 20)
+            atr_now = ((atr_df['high'] - atr_df['low']).rolling(14).mean().iloc[-1]
+                       if atr_df is not None and len(atr_df) >= 14 else None)
             if atr_now and abs(current_price - pos['entry']) < atr_now * 0.3:
                 continue
 
@@ -2560,6 +2571,9 @@ class SmartTrader:
                 entry_price = known_entries.get(symbol, current_price)
                 stop_loss = entry_price * (1 - self.stop_loss_percent / 100)
                 take_profit = entry_price * (1 + self.take_profit_percent / 100)
+                _sl_distance = entry_price - stop_loss
+                tp1_price = entry_price + _sl_distance + (entry_price * TP_FEE_BUFFER)
+                tp2_price = entry_price + (_sl_distance * 2) + (entry_price * TP_FEE_BUFFER)
                 position = {
                     'trade_id': f"{symbol}-synced",
                     'symbol': symbol,
@@ -2568,6 +2582,10 @@ class SmartTrader:
                     'entry_price': entry_price,
                     'stop_loss': stop_loss,
                     'take_profit': take_profit,
+                    'tp1': tp1_price,
+                    'tp2': tp2_price,
+                    'tp1_hit': False,
+                    'tp2_hit': False,
                     'risk_percent': self.stop_loss_percent / 100,
                     'rr_target': 2.0,
                     'entry_type': 'synced',
@@ -2588,6 +2606,18 @@ class SmartTrader:
                 }
                 self.open_positions.append(position)
                 self.position_open[symbol] = True
+                self.positions[symbol] = {
+                    'entry':     entry_price,
+                    'qty':       amount,
+                    'sl':        stop_loss,
+                    'tp1':       tp1_price,
+                    'tp2':       tp2_price,
+                    'max_price': current_price,
+                    'candles':   0,
+                    'added':     False,
+                    'tp1_hit':   False,
+                    'tp2_hit':   False,
+                }
                 pnl = (current_price - entry_price) * amount
                 print(f"   ✅ Synced: {amount:.8f} {asset} @ ${entry_price:.2f} | P&L: ${pnl:.2f}")
         except Exception as e:
@@ -2696,8 +2726,8 @@ class SmartTrader:
                     df_entry = self.get_candles(symbol, '15m', 60)
                     if df_entry is not None and len(df_entry) >= 32:
                         atr = (df_entry['high'] - df_entry['low']).rolling(14).mean().iloc[-1]
-                        if atr < df_entry['close'].iloc[-1] * 0.008:
-                            print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f} < 0.8% of price)")
+                        if atr < df_entry['close'].iloc[-1] * 0.005:
+                            print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f} < 0.5% of price)")
                         else:
                             recent_move = abs(df_entry['close'].iloc[-1] - df_entry['close'].iloc[-5])
                             if recent_move > atr * 0.5:
@@ -2727,7 +2757,9 @@ class SmartTrader:
                 print("\n\n   🛑 Bot stopped by user")
                 break
             except Exception as e:
+                import traceback
                 print(f"\n   ❌ Loop error: {e}")
+                traceback.print_exc()
                 time.sleep(10)
 
         net_pnl = self.daily_profit - self.daily_loss
@@ -2761,5 +2793,7 @@ if __name__ == '__main__':
             print("\n\n   🛑 Bot stopped by user")
             break
         except Exception as e:
+            import traceback
             print(f"\n   ❌ Loop error: {e}")
+            traceback.print_exc()
             time.sleep(10)

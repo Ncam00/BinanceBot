@@ -55,7 +55,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # ==============================
 # TRADING
 # ==============================
-TRADING_PAIRS = ["BTCUSDT", "ETHUSDT"]
+TRADING_PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
 POSITION_SIZE_PCT = 0.10
 DAILY_TRADE_LIMIT = get_daily_trade_limit()  # auto-scales: 3 → 5 → 8 based on win rate
 
