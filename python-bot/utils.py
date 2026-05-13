@@ -63,3 +63,26 @@ def calc_atr(df, period=14):
         (df["low"] - prev_close).abs()
     ], axis=1).max(axis=1)
     return tr.rolling(period).mean().iloc[-1]
+
+
+def detect_market_regime(df):
+    atr = calc_atr(df)
+
+    recent_range = (
+        df["high"].rolling(20).max().iloc[-1]
+        - df["low"].rolling(20).min().iloc[-1]
+    )
+
+    close = df["close"]
+    ema_fast = close.ewm(span=20).mean()
+    ema_slow = close.ewm(span=50).mean()
+
+    trend_strength = abs(ema_fast.iloc[-1] - ema_slow.iloc[-1])
+
+    if trend_strength > atr * 1.5:
+        return "TRENDING"
+
+    if recent_range > atr * 8:
+        return "VOLATILE"
+
+    return "RANGING"

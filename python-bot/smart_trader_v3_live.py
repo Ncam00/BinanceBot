@@ -35,6 +35,7 @@ import numpy as np
 from dotenv import load_dotenv
 import requests
 import pytz
+from utils import detect_market_regime
 
 load_dotenv()
 
@@ -55,7 +56,8 @@ POSITION_SIZE_PCT     = 0.12   # ~12% of balance per trade (~$50 on $400)
 RISK_PER_TRADE        = 0.01   # 1% of balance risked per trade
 TIME_EXIT_CANDLES     = 25     # exit if no progress after this many candles
 PARTIAL_TP_RATIO      = 0.5    # 50% of position closes at TP1
-BREAKEVEN_BUFFER      = 0.001  # move SL to entry + 0.1% after partial TP
+BREAK_EVEN_BUFFER     = 0.0015
+BREAKEVEN_BUFFER      = BREAK_EVEN_BUFFER  # backward-compatible alias
 ATR_SL_MULTIPLIER     = 1.5    # stop loss = entry - ATR * 1.5
 ATR_TP_MULTIPLIER     = 2.0    # no longer used directly; TP = sl_distance * 2
 FEE_RATE              = 0.001  # 0.1% per side
@@ -70,6 +72,14 @@ DRY_RUN               = False  # LIVE mode — real orders placed. Set True to r
 # These settings reduce equity-curve volatility and remove fear-inducing swings.
 A_PLUS_ONLY        = False   # Allow B+ entries (60% size); SCOUT still skipped at scoring
 KILL_TRADE_CANDLES = 10      # Exit losing trade after N candles of no progress (was 3)
+
+# PHASE 2 CONFIG
+ENABLE_RUNNERS     = True
+TP1_MULTIPLIER     = 1.5
+RUNNER_MULTIPLIER  = 4.0
+EU_US_BOOST        = 1.5
+ASIA_REDUCTION     = 0.7
+MIN_ADD_ATR        = 0.5
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1571,17 +1581,23 @@ class SmartTrader:
             # Session-aware sizing: Asia is slower/range-bound (0.5x); US has strongest momentum (1.5x)
             _current_session, _ = self.get_market_session()
             if _current_session == 'asia':
-                usdt_target *= 0.5
-                print(f"   🌙 Asia session — reducing size to ${usdt_target:.2f} (0.5x)")
-            elif _current_session == 'us':
-                usdt_target *= 1.5
-                print(f"   🇺🇸 US session — increasing size to ${usdt_target:.2f} (1.5x)")
+                usdt_target *= ASIA_REDUCTION
+                print(f"   🌙 Asia session — reducing size to ${usdt_target:.2f} ({ASIA_REDUCTION:.2f}x)")
+            elif _current_session in ('london', 'us'):
+                usdt_target *= EU_US_BOOST
+                print(f"   🌍 EU/US session — boosting size to ${usdt_target:.2f} ({EU_US_BOOST:.2f}x)")
 
             # Correlation guard: BTC and ETH move together — halve size if the other is already open
             _correlated = {'BTCUSDT': 'ETHUSDT', 'ETHUSDT': 'BTCUSDT'}.get(symbol)
             if _correlated and _correlated in self.positions:
                 usdt_target *= 0.5
                 print(f"   🔗 Correlation guard — {_correlated} open, halving {symbol} to ${usdt_target:.2f}")
+
+            # Regime adaptation from run-loop context
+            position_boost = signal.get('position_boost', 1.0)
+            usdt_target *= position_boost
+            if position_boost != 1.0:
+                print(f"   🧠 Regime boost applied — size ${usdt_target:.2f} ({position_boost:.2f}x)")
 
             quantity = usdt_target / price
             position_value = quantity * price
@@ -1617,7 +1633,7 @@ class SmartTrader:
                     return None
                 entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
-            tp_multiplier = 2.0   # default; updated dynamically below
+            tp_multiplier = signal.get('atr_tp', RUNNER_MULTIPLIER)
             if 'tp_percent_override' in signal:
                 take_profit = fill_price * (1 + signal['tp_percent_override'] / 100)
                 stop_loss   = fill_price * (1 - signal['sl_percent_override'] / 100)
@@ -1628,14 +1644,7 @@ class SmartTrader:
                     print(f"   ⚠️ {symbol} SL too tight ({sl_distance/fill_price:.3%}) — skipping")
                     return None
                 stop_loss = fill_price - sl_distance
-                # Dynamic TP: let runners run when volume spike + A+ confidence + strong trend align
-                _volume_spike = signal.get('volume_ratio', 1.0) >= 1.5
-                _strong_trend = signal.get('adx', 0) >= 25
-                if _volume_spike and strong_setup and _strong_trend:
-                    tp_multiplier = 3.5
-                    print(f"   🚀 Dynamic TP 3.5× (volume + A+ + ADX {signal.get('adx', 0):.1f})")
-                else:
-                    tp_multiplier = 1.8
+                print(f"   🎯 Regime TP multiplier: {tp_multiplier:.2f}x")
                 take_profit = fill_price + (sl_distance * tp_multiplier) + (fill_price * TP_FEE_BUFFER)
             else:
                 take_profit, stop_loss = self.set_tp_sl(
@@ -1692,17 +1701,18 @@ class SmartTrader:
             self.position_open[symbol] = True
             self.last_trade_time[symbol] = time.time()
             _sl_distance = fill_price - stop_loss
+            _atr_for_targets = signal.get('atr', _sl_distance)
             self.positions[symbol] = {
                 'entry':     fill_price,
                 'qty':       quantity,
+                'initial_qty': quantity,
                 'sl':        stop_loss,
-                'tp1':       fill_price + _sl_distance + (fill_price * TP_FEE_BUFFER),                        # 1R net
-                'tp2':       fill_price + (_sl_distance * tp_multiplier) + (fill_price * TP_FEE_BUFFER),   # dynamic R:R
+                'tp1':       fill_price + (_atr_for_targets * TP1_MULTIPLIER),
+                'runner_tp': fill_price + (_atr_for_targets * tp_multiplier),
                 'max_price': fill_price,
                 'candles':   0,
                 'added':     False,
                 'tp1_hit':   False,
-                'tp2_hit':   False,
             }
             self.daily_trades += 1
             _trade_session, _ = self.get_market_session()
@@ -1993,7 +2003,7 @@ class SmartTrader:
         # ── VOLATILITY EXPANSION ─────────────────────────────────────────
         atr                  = (high - low).rolling(14).mean()
         atr_val              = atr.iloc[-1]
-        if atr_val < price * 0.008:   # require 0.8% ATR for $2-$3.50 net on $60 position
+        if atr_val < price * 0.005:   # require 0.5% ATR for calmer market entries
             return
         volatility_expanding = len(atr) >= 6 and atr_val > atr.iloc[-5]
 
@@ -2075,14 +2085,23 @@ class SmartTrader:
             if atr_now and abs(current_price - pos['entry']) < atr_now * 0.3:
                 continue
 
+            # Momentum add only after price clears entry by MIN_ADD_ATR × ATR
+            if (not pos.get('added')) and atr_now and current_price > pos['entry'] + (atr_now * MIN_ADD_ATR):
+                open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
+                if open_pos is not None:
+                    self.add_small_position(open_pos, current_price)
+                    if open_pos.get('scaled_in'):
+                        pos['qty'] = open_pos.get('quantity', pos['qty'])
+                        pos['added'] = True
+
             # STOP LOSS
             if current_price <= pos['sl']:
                 self.exit_trade(symbol, 'STOP LOSS', current_price)
                 continue
 
-            # STAGE 1: TP1 at 1R — sell 40%, move SL to breakeven
+            # STAGE 1: TP1 hit — sell partial, move SL to breakeven buffer
             if not pos['tp1_hit'] and current_price >= pos['tp1']:
-                sell_qty = self.format_quantity(symbol, pos['qty'] * 0.40)
+                sell_qty = self.format_quantity(symbol, pos['qty'] * PARTIAL_TP_RATIO)
                 open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
                 order = self.execute_sell(open_pos, 'TP1', quantity=sell_qty) if open_pos else None
                 if order:
@@ -2095,31 +2114,16 @@ class SmartTrader:
                     self.stats['best_trade'] = max(self.stats['best_trade'], profit)
                     pos['qty'] -= sell_qty
                     pos['tp1_hit'] = True
-                    pos['sl'] = pos['entry']   # breakeven
-                    msg = f"TP1 (1R) {symbol} | +${profit:.2f} | SL → breakeven"
+                    pos['sl'] = pos['entry'] * (1 + BREAK_EVEN_BUFFER)
+                    msg = f"TP1 HIT {symbol} | +${profit:.2f} | SL → breakeven+buffer"
                     logging.info(msg)
                     self.send_telegram(msg)
                     self.print_stats()
 
-            # STAGE 2: TP2 at 2R — sell 50% of remaining (30% of original)
-            if pos['tp1_hit'] and not pos['tp2_hit'] and current_price >= pos['tp2']:
-                sell_qty = self.format_quantity(symbol, pos['qty'] * 0.50)
-                open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
-                order = self.execute_sell(open_pos, 'TP2', quantity=sell_qty) if open_pos else None
-                if order:
-                    profit = self.calculate_profit(pos['entry'], current_price, sell_qty)
-                    self.daily_pnl += profit
-                    self.stats['total_trades'] += 1
-                    self.stats['total_pnl'] += profit
-                    self.stats['wins'] += 1
-                    self.stats['gross_wins'] += profit
-                    self.stats['best_trade'] = max(self.stats['best_trade'], profit)
-                    pos['qty'] -= sell_qty
-                    pos['tp2_hit'] = True
-                    msg = f"TP2 (2R) {symbol} | +${profit:.2f} | Runner active"
-                    logging.info(msg)
-                    self.send_telegram(msg)
-                    self.print_stats()
+            # Full runner exit after TP1
+            if ENABLE_RUNNERS and pos.get('tp1_hit') and current_price >= pos.get('runner_tp', float('inf')):
+                self.exit_trade(symbol, 'RUNNER TP', current_price)
+                continue
 
             # TRACK MAX PRICE
             if current_price > pos['max_price']:
@@ -2132,8 +2136,12 @@ class SmartTrader:
                 self.exit_trade(symbol, 'RUNNER EXIT', current_price)
                 continue
 
-            # TIME EXIT: only if trade peaked above entry but stalled
-            if pos['candles'] >= TIME_EXIT_CANDLES and pos['max_price'] > pos['entry']:
+            # Smarter time exit: only after enough candles and meaningful move context
+            if (
+                pos['candles'] >= TIME_EXIT_CANDLES
+                and atr_now is not None
+                and abs(current_price - pos['entry']) > atr_now * 0.3
+            ):
                 self.exit_trade(symbol, 'TIME EXIT', current_price)
         # ── END manage_trade loop ─────────────────────────────────────────
 
@@ -2263,7 +2271,7 @@ class SmartTrader:
                     continue
 
             # 4. MOMENTUM ADD-ON: scale in only after 0.5x ATR confirmed move
-            add_threshold = position['entry_price'] + (position.get('atr', 0) * 0.5)
+            add_threshold = position['entry_price'] + (position.get('atr', 0) * MIN_ADD_ATR)
             trade_in_profit = current_price > add_threshold
             breakout_continues = current_price > position.get('entry_resistance', current_price)
             if trade_in_profit and breakout_continues and not position.get('scaled_in'):
@@ -2572,8 +2580,8 @@ class SmartTrader:
                 stop_loss = entry_price * (1 - self.stop_loss_percent / 100)
                 take_profit = entry_price * (1 + self.take_profit_percent / 100)
                 _sl_distance = entry_price - stop_loss
-                tp1_price = entry_price + _sl_distance + (entry_price * TP_FEE_BUFFER)
-                tp2_price = entry_price + (_sl_distance * 2) + (entry_price * TP_FEE_BUFFER)
+                tp1_price = entry_price + (_sl_distance * TP1_MULTIPLIER)
+                runner_tp_price = entry_price + (_sl_distance * RUNNER_MULTIPLIER)
                 position = {
                     'trade_id': f"{symbol}-synced",
                     'symbol': symbol,
@@ -2583,9 +2591,8 @@ class SmartTrader:
                     'stop_loss': stop_loss,
                     'take_profit': take_profit,
                     'tp1': tp1_price,
-                    'tp2': tp2_price,
+                    'runner_tp': runner_tp_price,
                     'tp1_hit': False,
-                    'tp2_hit': False,
                     'risk_percent': self.stop_loss_percent / 100,
                     'rr_target': 2.0,
                     'entry_type': 'synced',
@@ -2609,14 +2616,14 @@ class SmartTrader:
                 self.positions[symbol] = {
                     'entry':     entry_price,
                     'qty':       amount,
+                    'initial_qty': amount,
                     'sl':        stop_loss,
                     'tp1':       tp1_price,
-                    'tp2':       tp2_price,
+                    'runner_tp': runner_tp_price,
                     'max_price': current_price,
                     'candles':   0,
                     'added':     False,
                     'tp1_hit':   False,
-                    'tp2_hit':   False,
                 }
                 pnl = (current_price - entry_price) * amount
                 print(f"   ✅ Synced: {amount:.8f} {asset} @ ${entry_price:.2f} | P&L: ${pnl:.2f}")
@@ -2709,6 +2716,10 @@ class SmartTrader:
                       f"Trades: {self.daily_trades}/{settings['max_trades']}]")
 
                 for symbol in self.trading_pairs:
+                    regime = 'RANGING'
+                    atr_tp = 2.2
+                    position_boost = 1.0
+
                     # Skip if already in this symbol
                     if self.position_open.get(symbol, False):
                         continue
@@ -2725,6 +2736,14 @@ class SmartTrader:
                     # Unified entry check (score-based)
                     df_entry = self.get_candles(symbol, '15m', 60)
                     if df_entry is not None and len(df_entry) >= 32:
+                        regime = detect_market_regime(df_entry)
+                        if regime == 'TRENDING':
+                            atr_tp = 4.0
+                            position_boost = 1.3
+                        elif regime == 'VOLATILE':
+                            atr_tp = 1.8
+                            position_boost = 0.7
+
                         atr = (df_entry['high'] - df_entry['low']).rolling(14).mean().iloc[-1]
                         if atr < df_entry['close'].iloc[-1] * 0.005:
                             print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f} < 0.5% of price)")
@@ -2736,6 +2755,9 @@ class SmartTrader:
                                 self.check_entry(symbol, df_entry)
 
                     signal = self.analyze(symbol)
+                    signal['regime'] = regime
+                    signal['atr_tp'] = atr_tp
+                    signal['position_boost'] = position_boost
 
                     # Log every signal reason so you can see exactly what's blocking
                     print(f"   {symbol}: {signal['action']} "
