@@ -2806,29 +2806,4 @@ class SmartTrader:
 
 if __name__ == '__main__':
     trader = SmartTrader()
-    balance = trader.get_balance()
-    trader.send_telegram(
-        f"🚀 Smart Trader V2 Started\n"
-        f"Balance: ${balance:.2f}\n"
-        f"Target: ${trader.daily_profit_target}/day\n"
-        f"Pairs: {', '.join(trader.trading_pairs)}"
-    )
-
-    engine = trader.entry_engine
-
-    while True:
-        try:
-            market_data = trader.get_market_data()
-            signals = engine.scan_market(market_data)
-            bought = any(s.get('action') == 'BUY' for s in signals)
-            if not bought:
-                trader.forced_b_plus_attempt(market_data)
-            time.sleep(5)
-        except KeyboardInterrupt:
-            print("\n\n   🛑 Bot stopped by user")
-            break
-        except Exception as e:
-            import traceback
-            print(f"\n   ❌ Loop error: {e}")
-            traceback.print_exc()
-            time.sleep(10)
+    trader.run()
