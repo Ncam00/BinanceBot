@@ -611,9 +611,9 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         self.nz_timezone = pytz.timezone('Pacific/Auckland')
         self.session_settings = {
-            'asia':   {'mode': 'low_risk',   'max_trades': 1, 'min_strength': 0.85},
-            'london': {'mode': 'normal',     'max_trades': 3, 'min_strength': 0.75},
-            'us':     {'mode': 'aggressive', 'max_trades': 3, 'min_strength': 0.70},
+            'asia':   {'mode': 'low_risk',   'max_trades': 1, 'min_strength': 0.85, 'position_boost': 0.5, 'min_score': 3, 'allow_adds': False, 'runner_mode': False},
+            'london': {'mode': 'normal',     'max_trades': 3, 'min_strength': 0.75, 'position_boost': 1.0, 'min_score': 2, 'allow_adds': True,  'runner_mode': False},
+            'us':     {'mode': 'aggressive', 'max_trades': 3, 'min_strength': 0.70, 'position_boost': 1.5, 'min_score': 2, 'allow_adds': True,  'runner_mode': True},
         }
 
         # ════════════════════════════════════════════════════════════════════
@@ -1578,14 +1578,11 @@ class SmartTrader:
             else:
                 usdt_target = POSITION_USDT_TARGET           # full size for A+ / BREAKOUT
 
-            # Session-aware sizing: Asia is slower/range-bound (0.5x); US has strongest momentum (1.5x)
-            _current_session, _ = self.get_market_session()
-            if _current_session == 'asia':
-                usdt_target *= ASIA_REDUCTION
-                print(f"   🌙 Asia session — reducing size to ${usdt_target:.2f} ({ASIA_REDUCTION:.2f}x)")
-            elif _current_session in ('london', 'us'):
-                usdt_target *= EU_US_BOOST
-                print(f"   🌍 EU/US session — boosting size to ${usdt_target:.2f} ({EU_US_BOOST:.2f}x)")
+            # Session-aware sizing driven by per-session position_boost
+            _current_session, _sess_buy = self.get_market_session()
+            _session_boost = _sess_buy.get('position_boost', 1.0)
+            usdt_target *= _session_boost
+            print(f"   📍 {_current_session.upper()} session boost {_session_boost:.2f}x → ${usdt_target:.2f}")
 
             # Correlation guard: BTC and ETH move together — halve size if the other is already open
             _correlated = {'BTCUSDT': 'ETHUSDT', 'ETHUSDT': 'BTCUSDT'}.get(symbol)
@@ -1982,8 +1979,21 @@ class SmartTrader:
         ema_slow = close.ewm(span=21).mean()
         trend    = ema_fast.iloc[-1] > ema_slow.iloc[-1]
 
-        # ── MOMENTUM ─────────────────────────────────────────────────────
-        momentum = close.iloc[-1] > close.iloc[-3]
+        # ── MOMENTUM ALIGNMENT: RSI rising + MACD cross ──────────────────
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, np.nan)
+        rsi   = 100 - (100 / (1 + rs))
+        rsi_rising = rsi.iloc[-1] > 50 and rsi.iloc[-1] > rsi.iloc[-3]
+
+        ema12       = close.ewm(span=12).mean()
+        ema26       = close.ewm(span=26).mean()
+        macd_line   = ema12 - ema26
+        signal_line = macd_line.ewm(span=9).mean()
+        macd_cross  = macd_line.iloc[-1] > signal_line.iloc[-1] and macd_line.iloc[-2] <= signal_line.iloc[-2]
+
+        momentum = rsi_rising  # RSI rising strongly (used in 3-factor score)
 
         # ── VOLUME (session-aware floor) ─────────────────────────────────
         _nz_h = datetime.now(pytz.timezone('Pacific/Auckland')).hour
@@ -2007,22 +2017,21 @@ class SmartTrader:
             return
         volatility_expanding = len(atr) >= 6 and atr_val > atr.iloc[-5]
 
-        # ── REGIME FILTER ────────────────────────────────────────────────
-        trend_strength = abs(ema_fast.iloc[-1] - ema_slow.iloc[-1])
-        is_trending    = trend_strength > price * 0.0015
+        # ── MOMENTUM ALIGNMENT SCORE (3-factor: trend / momentum / volume) ──
+        score = sum([trend, momentum, volume_spike])  # max 3 = A+ conditions
 
-        # ── SCORE ────────────────────────────────────────────────────────
-        score = sum([trend, momentum, volume_spike, breakout,
-                     volatility_expanding, is_trending])
+        _entry_sess, _entry_settings = self.get_market_session()
+        _min_score = _entry_settings.get('min_score', 2)
 
         # ── ENTRY ────────────────────────────────────────────────────────
         top_atr = atr.iloc[-1]
-        if score == 3 and volatility_expanding and breakout:
-            print(f"   ⭐ A+ {symbol} score={score}/6 @ {price:.4f}")
+        rsi_val = rsi.iloc[-1]
+        if score == 3 and volatility_expanding:
+            print(f"   ⭐ A+ {symbol} score={score}/3 @ {price:.4f} (RSI:{rsi_val:.0f} MACD:{'✓' if macd_cross else '~'})")
             self.execute_trade(symbol, price, atr=top_atr, trade_type='A+_BREAKOUT', small_position=False)
             return
-        if score >= 2 and volatility_expanding and breakout:
-            print(f"   🔍 SCOUT {symbol} score={score}/6 @ {price:.4f}")
+        if score >= _min_score and volatility_expanding and breakout:
+            print(f"   🔍 SCOUT {symbol} score={score}/3 @ {price:.4f} (RSI:{rsi_val:.0f})")
             self.execute_trade(symbol, price, atr=top_atr, trade_type='SCOUT', small_position=True)
 
     # ════════════════════════════════════════════════════════════════════
@@ -2086,7 +2095,8 @@ class SmartTrader:
                 continue
 
             # Momentum add only after price clears entry by MIN_ADD_ATR × ATR
-            if (not pos.get('added')) and atr_now and current_price > pos['entry'] + (atr_now * MIN_ADD_ATR):
+            _, _add_sess = self.get_market_session()
+            if _add_sess.get('allow_adds', True) and (not pos.get('added')) and atr_now and current_price > pos['entry'] + (atr_now * MIN_ADD_ATR):
                 open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
                 if open_pos is not None:
                     self.add_small_position(open_pos, current_price)
@@ -2120,8 +2130,9 @@ class SmartTrader:
                     self.send_telegram(msg)
                     self.print_stats()
 
-            # Full runner exit after TP1
-            if ENABLE_RUNNERS and pos.get('tp1_hit') and current_price >= pos.get('runner_tp', float('inf')):
+            # Full runner exit after TP1 (US session only)
+            _, _runner_sess = self.get_market_session()
+            if ENABLE_RUNNERS and _runner_sess.get('runner_mode', False) and pos.get('tp1_hit') and current_price >= pos.get('runner_tp', float('inf')):
                 self.exit_trade(symbol, 'RUNNER TP', current_price)
                 continue
 
@@ -2274,7 +2285,8 @@ class SmartTrader:
             add_threshold = position['entry_price'] + (position.get('atr', 0) * MIN_ADD_ATR)
             trade_in_profit = current_price > add_threshold
             breakout_continues = current_price > position.get('entry_resistance', current_price)
-            if trade_in_profit and breakout_continues and not position.get('scaled_in'):
+            _, _add_sess2 = self.get_market_session()
+            if _add_sess2.get('allow_adds', True) and trade_in_profit and breakout_continues and not position.get('scaled_in'):
                 self.add_small_position(position, current_price)
 
             # 8. TP1: sell PARTIAL_TP_RATIO, move SL to entry + BREAKEVEN_BUFFER
