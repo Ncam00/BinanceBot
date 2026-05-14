@@ -90,6 +90,7 @@ class EntryEngine:
     def __init__(self, pairs, execute_fn=None):
         self.pairs = pairs
         self.execute_fn = execute_fn
+        self.position_open = {pair: False for pair in self.pairs}
         self.signals = {
             pair: {
                 'active': False,
