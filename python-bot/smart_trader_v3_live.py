@@ -2014,7 +2014,7 @@ class SmartTrader:
         # ── VOLATILITY EXPANSION ─────────────────────────────────────────
         atr                  = (high - low).rolling(14).mean()
         atr_val              = atr.iloc[-1]
-        if atr_val < price * 0.005:   # require 0.5% ATR for calmer market entries
+        if atr_val < price * 0.002:   # require 0.2% ATR for calmer market entries
             return
         volatility_expanding = len(atr) >= 6 and atr_val > atr.iloc[-5]
 
@@ -2758,12 +2758,12 @@ class SmartTrader:
                             position_boost = 0.7
 
                         atr = (df_entry['high'] - df_entry['low']).rolling(14).mean().iloc[-1]
-                        if atr < df_entry['close'].iloc[-1] * 0.005:
-                            print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f} < 0.5% of price)")
+                        if atr < df_entry['close'].iloc[-1] * 0.002:
+                            print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f} < 0.2% of price)")
                         else:
                             recent_move = abs(df_entry['close'].iloc[-1] - df_entry['close'].iloc[-5])
-                            if recent_move > atr * 0.5:
-                                print(f"   ⚠️ {symbol} skipped — late entry (move {recent_move:.4f} > 0.5×ATR {atr * 0.5:.4f})")
+                            if recent_move > atr * 2.0:
+                                print(f"   ⚠️ {symbol} skipped — late entry (move {recent_move:.4f} > 2.0×ATR {atr * 2.0:.4f})")
                             else:
                                 self.check_entry(symbol, df_entry)
 
