@@ -939,8 +939,8 @@ class SmartTrader:
         range_size = resistance - support
         if range_size <= 0:
             return 'middle'
-        buy_zone_top = support + (range_size * 0.30)
-        sell_zone_bottom = resistance - (range_size * 0.30)
+        buy_zone_top = support + (range_size * 0.45)
+        sell_zone_bottom = resistance - (range_size * 0.45)
         if price <= buy_zone_top:
             return 'buy_zone'
         elif price >= sell_zone_bottom:
@@ -2757,15 +2757,12 @@ class SmartTrader:
                             atr_tp = 1.8
                             position_boost = 0.7
 
+                        recent_move = abs(df_entry['close'].iloc[-1] - df_entry['close'].iloc[-5])
                         atr = (df_entry['high'] - df_entry['low']).rolling(14).mean().iloc[-1]
-                        if atr < df_entry['close'].iloc[-1] * 0.002:
-                            print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f} < 0.2% of price)")
+                        if atr > 0 and recent_move > atr * 2.0:
+                            print(f"   ⚠️ {symbol} skipped — late entry (move {recent_move:.4f} > 2.0×ATR {atr * 2.0:.4f})")
                         else:
-                            recent_move = abs(df_entry['close'].iloc[-1] - df_entry['close'].iloc[-5])
-                            if recent_move > atr * 2.0:
-                                print(f"   ⚠️ {symbol} skipped — late entry (move {recent_move:.4f} > 2.0×ATR {atr * 2.0:.4f})")
-                            else:
-                                self.check_entry(symbol, df_entry)
+                            self.check_entry(symbol, df_entry)
 
                     signal = self.analyze(symbol)
                     signal['regime'] = regime
