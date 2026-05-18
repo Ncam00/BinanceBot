@@ -1701,16 +1701,17 @@ class SmartTrader:
             _sl_distance = fill_price - stop_loss
             _atr_for_targets = signal.get('atr', _sl_distance)
             self.positions[symbol] = {
-                'entry':     fill_price,
-                'qty':       quantity,
+                'entry':      fill_price,
+                'qty':        quantity,
                 'initial_qty': quantity,
-                'sl':        stop_loss,
-                'tp1':       fill_price + (_atr_for_targets * TP1_MULTIPLIER),
-                'runner_tp': fill_price + (_atr_for_targets * tp_multiplier),
-                'max_price': fill_price,
-                'candles':   0,
-                'added':     False,
-                'tp1_hit':   False,
+                'sl':         stop_loss,
+                'tp1':        fill_price + (_atr_for_targets * TP1_MULTIPLIER),
+                'runner_tp':  fill_price + (_atr_for_targets * tp_multiplier),
+                'max_price':  fill_price,
+                'candles':    0,
+                'added':      False,
+                'tp1_hit':    False,
+                'entry_time': datetime.now(),
             }
             self.daily_trades += 1
             _trade_session, _ = self.get_market_session()
@@ -2086,7 +2087,8 @@ class SmartTrader:
                 self.positions.pop(symbol, None)
                 continue
 
-            pos['candles'] += 1
+            # Track candles by real elapsed time, not scan-cycle count
+            pos['candles'] = int((datetime.now() - pos.get('entry_time', datetime.now())).total_seconds() / (15 * 60))
 
             # Fee-killer guard: skip exit if move too small to cover fees
             atr_df = self.get_candles(symbol, '15m', 20)
@@ -2148,10 +2150,11 @@ class SmartTrader:
                 self.exit_trade(symbol, 'RUNNER EXIT', current_price)
                 continue
 
-            # Smarter time exit: only after enough candles and meaningful move context
+            # Smarter time exit: only exit stagnant or losing positions — never cut a winner
             if (
                 pos['candles'] >= TIME_EXIT_CANDLES
                 and atr_now is not None
+                and current_price <= pos['entry']  # only if not profitable
                 and abs(current_price - pos['entry']) > atr_now * 0.3
             ):
                 self.exit_trade(symbol, 'TIME EXIT', current_price)
