@@ -2029,11 +2029,11 @@ class SmartTrader:
         rsi_val = rsi.iloc[-1]
         if score == 3 and volatility_expanding:
             print(f"   ⭐ A+ {symbol} score={score}/3 @ {price:.4f} (RSI:{rsi_val:.0f} MACD:{'✓' if macd_cross else '~'})")
-            self.execute_trade(symbol, price, atr=top_atr, trade_type='A+_BREAKOUT', small_position=False)
+            self.execute_buy(symbol, {'price': price, 'trade_type': 'A+_BREAKOUT', 'strength': 1.0})
             return
         if score >= _min_score and volatility_expanding and breakout:
             print(f"   🔍 SCOUT {symbol} score={score}/3 @ {price:.4f} (RSI:{rsi_val:.0f})")
-            self.execute_trade(symbol, price, atr=top_atr, trade_type='SCOUT', small_position=True)
+            self.execute_buy(symbol, {'price': price, 'trade_type': 'SCOUT', 'strength': 0.5})
 
     # ════════════════════════════════════════════════════════════════════
     # UNIFIED EXIT
