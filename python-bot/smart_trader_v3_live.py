@@ -1168,6 +1168,25 @@ class SmartTrader:
             print(f"   ⚠️ BTC filter error: {e}")
             return True
 
+    def htf_trend_bullish(self, symbol):
+        """1h trend filter — only enter longs when higher-timeframe trend is up.
+        Returns (is_bullish, reason). Bullish = EMA20 > EMA50 on 1h AND price > EMA20."""
+        try:
+            df = self.get_candles(symbol, '1h', 60)
+            if df is None or len(df) < 50:
+                return True, 'insufficient 1h data — allowing'
+            close = df['close']
+            ema20_1h = close.ewm(span=20).mean().iloc[-1]
+            ema50_1h = close.ewm(span=50).mean().iloc[-1]
+            price = close.iloc[-1]
+            bullish = ema20_1h > ema50_1h and price > ema20_1h
+            if bullish:
+                return True, f'1h bullish (EMA20 {ema20_1h:.2f} > EMA50 {ema50_1h:.2f})'
+            return False, f'1h bearish/flat (EMA20 {ema20_1h:.2f} vs EMA50 {ema50_1h:.2f})'
+        except Exception as e:
+            print(f"   ⚠️ 1h trend check error ({symbol}): {e}")
+            return True, 'error — allowing'
+
     def check_signal_layers(self, price, ema20, ema_trend, ema200, rsi, macd,
                              closes, df, adx):
         volumes = df['volume'].tolist()
@@ -1961,6 +1980,14 @@ class SmartTrader:
             return
         if self.daily_trades >= MAX_TRADES_PER_DAY:
             return
+        # Session-restricted entries: only London open & US open windows (UTC)
+        from datetime import timezone as _tz
+        _utc_now = datetime.now(_tz.utc)
+        utc_time = _utc_now.hour + _utc_now.minute / 60.0
+        in_london = 7.0 <= utc_time < 11.0       # London open + first hours
+        in_us     = 13.0 <= utc_time < 17.0      # US open through power hour
+        if not (in_london or in_us):
+            return  # silent skip — outside high-conviction windows
         last_any = max(self.last_trade_time.values()) if self.last_trade_time else 0
         if time.time() - last_any < 900:
             return
@@ -2028,13 +2055,36 @@ class SmartTrader:
         # ── ENTRY ────────────────────────────────────────────────────────
         top_atr = atr.iloc[-1]
         rsi_val = rsi.iloc[-1]
+
+        # 1h trend filter — skip counter-trend entries
+        htf_ok, htf_reason = self.htf_trend_bullish(symbol)
+        if not htf_ok:
+            print(f"   🚫 {symbol} skipped — {htf_reason}")
+            return
+
+        # Conviction-based sizing: A+ aligned with 1h trend = full, scout = small
+        # (passed to execute_buy via signal dict; execute_buy applies session_boost on top)
         if score == 3 and volatility_expanding:
-            print(f"   ⭐ A+ {symbol} score={score}/3 @ {price:.4f} (RSI:{rsi_val:.0f} MACD:{'✓' if macd_cross else '~'})")
-            self.execute_buy(symbol, {'price': price, 'trade_type': 'A+_BREAKOUT', 'strength': 1.0})
+            # A+ confluence + 1h aligned = max conviction
+            conviction_size = 1.20 if macd_cross else 1.00
+            print(f"   ⭐ A+ {symbol} score={score}/3 @ {price:.4f} (RSI:{rsi_val:.0f} MACD:{'✓' if macd_cross else '~'}) [{htf_reason}]")
+            self.execute_buy(symbol, {
+                'price': price,
+                'trade_type': 'A+_BREAKOUT',
+                'strength': 1.0,
+                'atr': top_atr,
+                'position_boost': conviction_size,
+            })
             return
         if score >= _min_score and volatility_expanding and breakout:
-            print(f"   🔍 SCOUT {symbol} score={score}/3 @ {price:.4f} (RSI:{rsi_val:.0f})")
-            self.execute_buy(symbol, {'price': price, 'trade_type': 'SCOUT', 'strength': 0.5})
+            print(f"   🔍 SCOUT {symbol} score={score}/3 @ {price:.4f} (RSI:{rsi_val:.0f}) [{htf_reason}]")
+            self.execute_buy(symbol, {
+                'price': price,
+                'trade_type': 'SCOUT',
+                'strength': 0.5,
+                'atr': top_atr,
+                'position_boost': 0.65,
+            })
 
     # ════════════════════════════════════════════════════════════════════
     # UNIFIED EXIT
