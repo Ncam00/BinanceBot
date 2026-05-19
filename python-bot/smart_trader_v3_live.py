@@ -1696,6 +1696,9 @@ class SmartTrader:
                 'position_type': trade_type,
                 'added': False,
                 'range_high': signal.get('range_high'),
+                # ── diagnostic context captured at entry for weekly review ──
+                'session_at_entry': _current_session,
+                'htf_bullish_at_entry': signal.get('htf_bullish'),
                 'tp1': fill_price + (take_profit - fill_price) * 0.5,
                 'tp2': fill_price * 1.020,
                 'tp3': fill_price * 1.025,
@@ -1861,6 +1864,8 @@ class SmartTrader:
                 self.update_streak(result)
 
             # Log trade
+            _exit_session, _ = self.get_market_session()
+            _pos_dict = self.positions.get(symbol, {})
             self._log_trade({
                 'id': position.get('trade_id'),
                 'pair': symbol,
@@ -1870,12 +1875,24 @@ class SmartTrader:
                 'stop_loss': position['stop_loss'],
                 'take_profit': position['take_profit'],
                 'profit': round(pnl, 4),
+                'pnl_percent': round(pnl_percent, 4),
                 'win': pnl > 0,
                 'entry_time': position.get('entry_time').isoformat() if position.get('entry_time') else None,
                 'exit_time': exit_time.isoformat(),
                 'exit_reason': reason,
                 'market_condition': position.get('market_condition'),
                 'entry_reason': position.get('entry_reason'),
+                # ── diagnostic fields for weekly review ─────────────────
+                'trade_type': position.get('signal', {}).get('trade_type'),
+                'entry_session': position.get('session_at_entry'),
+                'exit_session': _exit_session,
+                'htf_bullish_at_entry': position.get('htf_bullish_at_entry'),
+                'atr_at_entry': position.get('atr'),
+                'position_boost': position.get('signal', {}).get('position_boost'),
+                'strength': position.get('signal', {}).get('strength'),
+                'hold_minutes': round((exit_time - position.get('entry_time')).total_seconds() / 60.0, 1)
+                                if position.get('entry_time') else None,
+                'partial_taken': _pos_dict.get('tp1_hit', False),
             })
 
             emoji = "✅" if pnl >= 0 else "❌"
@@ -2074,6 +2091,7 @@ class SmartTrader:
                 'strength': 1.0,
                 'atr': top_atr,
                 'position_boost': conviction_size,
+                'htf_bullish': htf_ok,
             })
             return
         if score >= _min_score and volatility_expanding and breakout:
@@ -2084,6 +2102,7 @@ class SmartTrader:
                 'strength': 0.5,
                 'atr': top_atr,
                 'position_boost': 0.65,
+                'htf_bullish': htf_ok,
             })
 
     # ════════════════════════════════════════════════════════════════════
