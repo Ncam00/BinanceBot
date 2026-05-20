@@ -19,6 +19,42 @@ TRADE_LOG_PATH = os.path.join(os.path.dirname(__file__), "trade_log.jsonl")
 # DATA HELPERS
 # ──────────────────────────────────────────────────────────────────────
 
+def _normalize(t):
+    """Map new-schema trade entries (live bot) to the old schema used by the dashboard.
+    New schema: pair, profit, entry_price, exit_price, exit_time, exit_reason, trade_type, win
+    Old schema: symbol, pnl_usd, entry, exit, timestamp, reason, tag, status
+    """
+    # Already in old schema (paper-trade entries)
+    if "status" in t and ("pnl_usd" in t or "entry" in t):
+        return t
+
+    out = dict(t)
+    # Field aliases
+    if "pair" in t and "symbol" not in t:
+        out["symbol"] = t["pair"]
+    if "profit" in t and "pnl_usd" not in t:
+        out["pnl_usd"] = t["profit"]
+    if "entry_price" in t and "entry" not in t:
+        out["entry"] = t["entry_price"]
+    if "exit_price" in t and "exit" not in t:
+        out["exit"] = t["exit_price"]
+    if "exit_reason" in t and "reason" not in t:
+        out["reason"] = t["exit_reason"]
+    if "trade_type" in t and "tag" not in t:
+        out["tag"] = t["trade_type"]
+    if "stop_loss" in t and "sl" not in t:
+        out["sl"] = t["stop_loss"]
+    if "take_profit" in t and "tp" not in t:
+        out["tp"] = t["take_profit"]
+    # Timestamp: prefer exit_time, fall back to entry_time
+    if "timestamp" not in t:
+        out["timestamp"] = t.get("exit_time") or t.get("entry_time") or ""
+    # Status: presence of exit_time/exit_price = closed
+    if "status" not in t:
+        out["status"] = "closed" if (t.get("exit_time") or t.get("exit_price") is not None) else "open"
+    return out
+
+
 def load_trades():
     trades = []
     if not os.path.exists(TRADE_LOG_PATH):
@@ -28,7 +64,7 @@ def load_trades():
             line = line.strip()
             if line:
                 try:
-                    trades.append(json.loads(line))
+                    trades.append(_normalize(json.loads(line)))
                 except Exception:
                     pass
     return trades
