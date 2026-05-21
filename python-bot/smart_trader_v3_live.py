@@ -80,6 +80,18 @@ RUNNER_MULTIPLIER  = 4.0
 EU_US_BOOST        = 1.5
 ASIA_REDUCTION     = 0.7
 MIN_ADD_ATR        = 0.5
+
+# ─── OPTION C: Tiered Patient Exit (May 22 2026) ────────────────────────────
+# Tighter SL + ladder out of profit. Designed for A+_BREAKOUT only.
+# Goal: every trade that touches +0.5% locks fee-covering profit,
+# the runner catches the occasional 2-3% move.
+OPTION_C_MODE       = True   # master switch — flip to False to revert
+OPTION_C_TP1_PCT    = 0.005  # +0.5% → close 25%, lock fees + crumbs
+OPTION_C_TP2_PCT    = 0.010  # +1.0% → close 50% (your 0.75% goal zone)
+OPTION_C_TP1_RATIO  = 0.25
+OPTION_C_TP2_RATIO  = 0.50
+OPTION_C_MAX_SL_PCT = 0.020  # cap stop loss at -2% (was -3%)
+OPTION_C_TRAIL_PCT  = 0.005  # 0.5% trail on the last 25% runner
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1717,6 +1729,16 @@ class SmartTrader:
                 'signal': signal
             }
 
+            # ── OPTION C: override SL/TP with tiered patient-exit values ──
+            if OPTION_C_MODE:
+                _min_sl_price = fill_price * (1 - OPTION_C_MAX_SL_PCT)
+                if stop_loss < _min_sl_price:
+                    stop_loss = _min_sl_price
+                    position['stop_loss'] = _min_sl_price
+                position['tp1'] = fill_price * (1 + OPTION_C_TP1_PCT)
+                position['tp2'] = fill_price * (1 + OPTION_C_TP2_PCT)
+                print(f"   \U0001f170 Option C: TP1 ${position['tp1']:.4f} (+{OPTION_C_TP1_PCT*100:.2f}%) | TP2 ${position['tp2']:.4f} (+{OPTION_C_TP2_PCT*100:.2f}%) | SL ${stop_loss:.4f} (-{OPTION_C_MAX_SL_PCT*100:.1f}% cap) | runner trail {OPTION_C_TRAIL_PCT*100:.2f}%")
+
             self.open_positions.append(position)
             self.position_open[symbol] = True
             self.last_trade_time[symbol] = time.time()
@@ -1727,8 +1749,8 @@ class SmartTrader:
                 'qty':        quantity,
                 'initial_qty': quantity,
                 'sl':         stop_loss,
-                'tp1':        fill_price + (_atr_for_targets * TP1_MULTIPLIER),
-                'runner_tp':  fill_price + (_atr_for_targets * tp_multiplier),
+                'tp1':        (fill_price * (1 + OPTION_C_TP1_PCT)) if OPTION_C_MODE else (fill_price + (_atr_for_targets * TP1_MULTIPLIER)),
+                'runner_tp':  float('inf') if OPTION_C_MODE else (fill_price + (_atr_for_targets * tp_multiplier)),
                 'max_price':  fill_price,
                 'candles':    0,
                 'added':      False,
@@ -2183,7 +2205,8 @@ class SmartTrader:
 
             # STAGE 1: TP1 hit — sell partial, move SL to breakeven buffer
             if not pos['tp1_hit'] and current_price >= pos['tp1']:
-                sell_qty = self.format_quantity(symbol, pos['qty'] * PARTIAL_TP_RATIO)
+                _tp1_ratio = OPTION_C_TP1_RATIO if OPTION_C_MODE else PARTIAL_TP_RATIO
+                sell_qty = self.format_quantity(symbol, pos['qty'] * _tp1_ratio)
                 open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
                 order = self.execute_sell(open_pos, 'TP1', quantity=sell_qty) if open_pos else None
                 if order:
@@ -2212,8 +2235,11 @@ class SmartTrader:
             if current_price > pos['max_price']:
                 pos['max_price'] = current_price
 
-            # RUNNER: trail 3% below max after TP1; 1.5% before
-            trail_pct = RUNNER_TRAIL if pos['tp1_hit'] else TRAILING_STOP
+            # RUNNER: trail 3% below max after TP1; 1.5% before (Option C: 0.5% tight trail post-TP1)
+            if OPTION_C_MODE and pos['tp1_hit']:
+                trail_pct = 1 - OPTION_C_TRAIL_PCT
+            else:
+                trail_pct = RUNNER_TRAIL if pos['tp1_hit'] else TRAILING_STOP
             trailing_sl = pos['max_price'] * trail_pct
             if current_price <= trailing_sl:
                 self.exit_trade(symbol, 'RUNNER EXIT', current_price)
@@ -2362,34 +2388,42 @@ class SmartTrader:
             if _add_sess2.get('allow_adds', True) and trade_in_profit and breakout_continues and not position.get('scaled_in'):
                 self.add_small_position(position, current_price)
 
-            # 8. TP1: sell PARTIAL_TP_RATIO, move SL to entry + BREAKEVEN_BUFFER
+            # 8. TP1: sell partial, move SL to entry + BREAKEVEN_BUFFER
             if not position.get('tp1_hit') and current_price >= position['tp1']:
-                qty = position['original_quantity'] * PARTIAL_TP_RATIO
+                _tp1_ratio = OPTION_C_TP1_RATIO if OPTION_C_MODE else PARTIAL_TP_RATIO
+                qty = position['original_quantity'] * _tp1_ratio
                 result = self.execute_sell(position, 'TP1', quantity=qty)
                 if result:
                     position['tp1_hit'] = True
-                    position['remaining_size'] = position.get('remaining_size', position['original_quantity']) * (1 - PARTIAL_TP_RATIO)
+                    position['remaining_size'] = position.get('remaining_size', position['original_quantity']) * (1 - _tp1_ratio)
                     position['stop_loss'] = position['entry_price'] * (1 + BREAKEVEN_BUFFER)
-                    print(f"   🎯 TP1 {symbol} → sold {PARTIAL_TP_RATIO:.0%}, SL → breakeven+{BREAKEVEN_BUFFER:.1%}")
+                    print(f"   🎯 TP1 {symbol} → sold {_tp1_ratio:.0%}, SL → breakeven+{BREAKEVEN_BUFFER:.1%}")
                 continue
 
-            # 9. TP2 (+2%): sell another 30% (80% total closed)
+            # 9. TP2: sell another tier (Option C: 50% / legacy: 30%)
             if position.get('tp1_hit') and not position.get('tp2_hit') and current_price >= position['tp2']:
-                qty = position['original_quantity'] * 0.3
+                _tp2_ratio = OPTION_C_TP2_RATIO if OPTION_C_MODE else 0.3
+                qty = position['original_quantity'] * _tp2_ratio
                 result = self.execute_sell(position, 'TP2', quantity=qty)
                 if result:
                     position['tp2_hit'] = True
-                    position['runner_trailing'] = current_price * self.trailing_stop_multiplier
-                    print(f"   🎯 TP2 {symbol} +2% → sold 30%, runner trailing @ ${position['runner_trailing']:.4f}")
+                    if OPTION_C_MODE:
+                        position['runner_trailing'] = current_price * (1 - OPTION_C_TRAIL_PCT)
+                    else:
+                        position['runner_trailing'] = current_price * self.trailing_stop_multiplier
+                    print(f"   🎯 TP2 {symbol} → sold {_tp2_ratio:.0%}, runner trailing @ ${position['runner_trailing']:.4f}")
                 continue
 
-            # 10. RUNNER (last 20%): 2% ATR-based trail — wide enough for crypto volatility
+            # 10. RUNNER: trail the remainder (Option C: 0.5% tight / legacy: 1.5*ATR)
             if position.get('tp2_hit'):
-                atr = position.get('atr')
-                if atr:
-                    runner_trail = position['highest_price'] - atr * 1.5
+                if OPTION_C_MODE:
+                    runner_trail = position['highest_price'] * (1 - OPTION_C_TRAIL_PCT)
                 else:
-                    runner_trail = current_price * 0.980  # 2% fallback
+                    atr = position.get('atr')
+                    if atr:
+                        runner_trail = position['highest_price'] - atr * 1.5
+                    else:
+                        runner_trail = current_price * 0.980
                 position['runner_trailing'] = max(position.get('runner_trailing', 0), runner_trail)
                 if current_price <= position['runner_trailing']:
                     print(f"\n   🏁 RUNNER EXIT {symbol} @ ${current_price:.4f}")
