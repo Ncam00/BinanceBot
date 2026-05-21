@@ -70,7 +70,7 @@ DRY_RUN               = False  # LIVE mode — real orders placed. Set True to r
 
 # ─── SMOOTH MODE ────────────────────────────────────────────────────────────
 # These settings reduce equity-curve volatility and remove fear-inducing swings.
-A_PLUS_ONLY        = False   # Allow B+ entries (60% size); SCOUT still skipped at scoring
+A_PLUS_ONLY        = True    # RECOVERY MODE: only A+ breakouts. Skips CANDIDATE_SMALL and CANDIDATE_SCOUT.
 KILL_TRADE_CANDLES = 10      # Exit losing trade after N candles of no progress (was 3)
 
 # PHASE 2 CONFIG
