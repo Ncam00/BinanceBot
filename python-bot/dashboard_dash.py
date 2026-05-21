@@ -362,6 +362,17 @@ app.layout = html.Div(
             dcc.Graph(id="bar-chart", config={"displayModeBar": False}, style={"height": "260px"}),
         ], style={**CARD_STYLE, "marginBottom": "20px"}),
 
+        # 🅲 Option C performance widget
+        html.Div([
+            _section_header("\U0001f170  Option C · Tiered Exit Performance", NEON_GREEN),
+            html.Div(id="option-c-stats", style={
+                "display": "grid",
+                "gridTemplateColumns": "repeat(auto-fit, minmax(140px, 1fr))",
+                "gap": "12px",
+            }),
+        ], style={**CARD_STYLE, "marginBottom": "20px",
+                  "borderLeft": f"2px solid {NEON_GREEN}"}),
+
         # Open positions
         html.Div([
             _section_header("◉ Active Positions", NEON_AMBER),
@@ -462,6 +473,7 @@ def _table_header(cols):
     Output("session-chart", "figure"),
     Output("exit-chart", "figure"),
     Output("bar-chart", "figure"),
+    Output("option-c-stats", "children"),
     Output("open-positions", "children"),
     Output("trade-table", "children"),
     Input("interval", "n_intervals"),
@@ -680,9 +692,40 @@ def refresh(_):
             style={"maxHeight": "440px", "overflowY": "auto"},
         )
 
+    # ── Option C performance widget ────────────────────────────────────
+    def _r(t):
+        return (t.get("reason") or "").upper().replace(" ", "_")
+    tp1_hits    = sum(1 for t in closed if _r(t) == "TP1")
+    tp2_hits    = sum(1 for t in closed if _r(t) == "TP2")
+    runner_hits = sum(1 for t in closed if _r(t) in ("RUNNER_TP", "RUNNER_TRAIL", "RUNNER_EXIT"))
+    sl_hits     = sum(1 for t in closed if _r(t).startswith("STOP") or _r(t) == "TIMEOUT_LOSS")
+    other_hits  = sum(1 for t in closed if _r(t) in ("TIME_EXIT", "TIME EXIT", "BE_STOP"))
+    total_exits = max(1, tp1_hits + tp2_hits + runner_hits + sl_hits + other_hits)
+
+    tp1_pnl     = sum(t.get("pnl_usd", 0) for t in closed if _r(t) == "TP1")
+    tp2_pnl     = sum(t.get("pnl_usd", 0) for t in closed if _r(t) == "TP2")
+    runner_pnl  = sum(t.get("pnl_usd", 0) for t in closed if _r(t) in ("RUNNER_TP", "RUNNER_TRAIL", "RUNNER_EXIT"))
+    sl_pnl      = sum(t.get("pnl_usd", 0) for t in closed if _r(t).startswith("STOP") or _r(t) == "TIMEOUT_LOSS")
+
+    profit_exits = tp1_hits + tp2_hits + runner_hits
+    fee_cover_rate = profit_exits / total_exits * 100
+
+    option_c_stats = [
+        _stat("TP1 · +0.5%", str(tp1_hits), NEON_CYAN,
+              sub=f"${tp1_pnl:+.2f} · fee cover"),
+        _stat("TP2 · +1.0%", str(tp2_hits), NEON_GREEN,
+              sub=f"${tp2_pnl:+.2f} · main profit"),
+        _stat("RUNNER", str(runner_hits), NEON_AMBER,
+              sub=f"${runner_pnl:+.2f} · trailed exit"),
+        _stat("STOP LOSS", str(sl_hits), NEON_RED,
+              sub=f"${sl_pnl:+.2f} · -2% cap"),
+        _stat("PROFIT EXIT %", f"{fee_cover_rate:.0f}%", NEON_PINK,
+              sub=f"{profit_exits}/{total_exits} closes paid"),
+    ]
+
     return (header_meta, status_pill, progress, cards,
             pnl_fig, wl_fig, symbol_fig, session_fig, exit_fig, bar_fig,
-            open_div, table_div)
+            option_c_stats, open_div, table_div)
 
 
 def _chart_layout():
