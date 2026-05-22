@@ -423,7 +423,7 @@ class EntryEngine:
                 continue
 
             # Re-entry: pullback from last exit price + breakout confirmed
-            if pullback_from_exit:
+            if pullback_from_exit and not A_PLUS_ONLY:
                 print(f"   🔁 RE-ENTRY {symbol} @ {price:.4f} (pullback from exit {last_exit:.4f})")
                 self.execute_trade(symbol, price, small_position=False,
                                    atr=top_atr, trade_type='PULLBACK_ENTRY')
@@ -432,7 +432,7 @@ class EntryEngine:
                 continue
 
             # Pullback into EMA9 and bounce
-            if pullback_ema:
+            if pullback_ema and not A_PLUS_ONLY:
                 print(f"   ↩️ PULLBACK ENTRY {symbol} @ {price:.4f}")
                 self.execute_trade(symbol, price, small_position=False,
                                    atr=top_atr, trade_type='PULLBACK')
@@ -459,7 +459,7 @@ class EntryEngine:
                     price > ma,
                     ema9 is not None and ema21 is not None and ema9 > ema21,
                 ])
-                if price <= breakout_level * 1.002 and score >= 2:
+                if price <= breakout_level * 1.002 and score >= 2 and not A_PLUS_ONLY:
                     print(f"   ✅ PULLBACK_ENTRY {symbol} @ {price:.4f} (score={score})")
                     self.execute_trade(symbol, price, small_position=False,
                                        atr=top_atr, trade_type='PULLBACK_ENTRY',
@@ -1767,12 +1767,14 @@ class SmartTrader:
             if signal.get('clear_breakout_wait'):
                 self.reset_breakout_state(symbol)
 
+            _sl_pct_disp = (1 - stop_loss / fill_price) * 100 if fill_price else 0.0
+            _tp_pct_disp = (take_profit / fill_price - 1) * 100 if fill_price else 0.0
             msg = (f"🚀 TRADE OPENED\n"
                    f"Pair: {symbol}\n"
                    f"Type: {signal.get('entry_type', 'PULLBACK')}\n"
                    f"Entry: ${fill_price:.4f}\n"
-                   f"SL: ${stop_loss:.4f} ({self.stop_loss_percent}%)\n"
-                   f"TP: ${take_profit:.4f} ({self.take_profit_percent}%)\n"
+                   f"SL: ${stop_loss:.4f} ({_sl_pct_disp:.2f}%)\n"
+                   f"TP: ${take_profit:.4f} ({_tp_pct_disp:.2f}%)\n"
                    f"R:R target: {rr_target}")
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
