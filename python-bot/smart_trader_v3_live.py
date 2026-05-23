@@ -18,7 +18,7 @@ Key Features:
 11. Partial TP (70%) then trailing runner
 12. Trailing stop: activates at 1.5%, trails 0.8%
 
-Pairs: BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, BNBUSDT
+Pairs: BTCUSDT, ETHUSDT, BNBUSDT
 """
 
 import logging
@@ -46,7 +46,7 @@ logging.basicConfig(
     format="%(asctime)s - %(message)s"
 )
 
-TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']
+TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']
 TRAILING_STOP         = 0.985
 RUNNER_TRAIL          = 0.970   # 3% below max_price — wide enough to let winners run
 MAX_TRADES_PER_DAY    = 3
