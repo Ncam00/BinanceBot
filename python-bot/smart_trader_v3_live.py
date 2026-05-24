@@ -94,6 +94,22 @@ OPTION_C_MAX_SL_PCT = 0.020  # cap stop loss at -2% (was -3%)
 OPTION_C_TRAIL_PCT  = 0.005  # 0.5% trail on the last 25% runner
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─── STRATEGY V2: Pullback-into-trend (May 24 2026) ────────────────────────
+# Replaces breakout-chasing. Buys pullbacks to 5m EMA20 in confirmed 1h uptrend
+# with a bullish reversal candle + volume confirmation. Tighter risk, breakeven
+# move on TP1 (already wired), 60-min time stop, daily loss circuit breaker.
+STRATEGY_V2_PULLBACK    = True   # master switch — turn off to revert to breakout entries
+V2_MAX_SL_PCT           = 0.015  # cap SL at -1.5% (tighter than Option C's -2%)
+V2_TIME_STOP_MIN        = 60     # close if no movement (within ±0.5R) after N min
+V2_MAX_LOSSES_PER_DAY   = 3      # halt new entries for the day after N losses
+V2_CONSEC_LOSSES_PAUSE  = 2      # pause after N consecutive losses
+V2_PAUSE_HOURS          = 4      # how long to pause after consec-loss trigger
+V2_RSI_MIN              = 40     # pullback RSI floor — below = collapse, skip
+V2_RSI_MAX              = 60     # pullback RSI ceiling — above = chasing, skip
+V2_VOLUME_MULTIPLIER    = 1.3    # entry candle volume vs 20-avg
+V2_PULLBACK_LOOKBACK    = 6      # last N candles must contain a dip to EMA20
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 class EntryEngine:
     MAX_RETEST_CANDLES = 25
@@ -581,8 +597,14 @@ class SmartTrader:
         self.max_trades_per_day = MAX_TRADES_PER_DAY
         self.hard_max_trades = MAX_TRADES_PER_DAY
         self.trade_cooldown_seconds = 300     # 5 min between trades
-        self.max_consecutive_losses = 4       # Pause trading after 4 losses in a row
-        self.loss_streak_pause_hours = 2      # Hours to pause after hitting streak limit
+        # V2: tighter loss-streak rules when V2 mode is active
+        if STRATEGY_V2_PULLBACK:
+            self.max_consecutive_losses = V2_CONSEC_LOSSES_PAUSE   # pause after N consec losses
+            self.loss_streak_pause_hours = V2_PAUSE_HOURS          # pause duration
+        else:
+            self.max_consecutive_losses = 4       # Pause trading after 4 losses in a row
+            self.loss_streak_pause_hours = 2      # Hours to pause after hitting streak limit
+        self.v2_daily_losses = 0                  # V2 daily loss count (resets at day rollover)
 
         # ════════════════════════════════════════════════════════════════════
         # CIRCUIT BREAKER
@@ -907,6 +929,68 @@ class SmartTrader:
         price     = df['close'].iloc[-1]
         prev      = df['close'].iloc[-2]
         return price > ema.iloc[-1] and prev < ema.iloc[-2]
+
+    def quality_pullback_signal(self, df):
+        """V2 pullback-into-trend detector.
+
+        Returns (True, reason) when:
+          - within the last V2_PULLBACK_LOOKBACK candles, price touched or
+            dipped below the 5m EMA20 (the pullback)
+          - the *current* candle is bullish (close > open) and closes in the
+            upper third of its range (rejection of lower prices)
+          - RSI(14) sits in [V2_RSI_MIN, V2_RSI_MAX] (cooling, not collapsing)
+          - current candle volume > V2_VOLUME_MULTIPLIER x 20-candle average
+        Else returns (False, reason).
+        """
+        if len(df) < 30:
+            return False, "not enough candles"
+        close = df['close']
+        high  = df['high']
+        low   = df['low']
+        op    = df['open']
+        vol   = df['volume']
+
+        ema20 = close.ewm(span=20).mean()
+        # Pullback test: any of the last N candles closed at/below EMA20
+        lookback = max(2, V2_PULLBACK_LOOKBACK)
+        recent_lows_vs_ema = close.iloc[-lookback:-1] <= ema20.iloc[-lookback:-1]
+        if not recent_lows_vs_ema.any():
+            return False, "no recent pullback to EMA20"
+
+        # Current candle: bullish + closes in upper third of range
+        c_open  = op.iloc[-1]
+        c_close = close.iloc[-1]
+        c_high  = high.iloc[-1]
+        c_low   = low.iloc[-1]
+        if c_close <= c_open:
+            return False, "current candle not bullish"
+        c_range = c_high - c_low
+        if c_range <= 0:
+            return False, "zero-range candle"
+        upper_third = c_low + c_range * (2.0 / 3.0)
+        if c_close < upper_third:
+            return False, "weak close (not in upper third)"
+
+        # Must be reclaiming the EMA20 (close above)
+        if c_close < ema20.iloc[-1]:
+            return False, "close below EMA20 — pullback not finished"
+
+        # RSI window
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, np.nan)
+        rsi   = 100 - (100 / (1 + rs))
+        rsi_now = rsi.iloc[-1]
+        if not (V2_RSI_MIN <= rsi_now <= V2_RSI_MAX):
+            return False, f"RSI {rsi_now:.0f} outside [{V2_RSI_MIN},{V2_RSI_MAX}]"
+
+        # Volume confirmation
+        avg_vol = vol.rolling(20).mean().iloc[-1]
+        if vol.iloc[-1] < avg_vol * V2_VOLUME_MULTIPLIER:
+            return False, f"low volume ({vol.iloc[-1]/avg_vol:.2f}x avg)"
+
+        return True, f"pullback+reclaim @ EMA20, RSI {rsi_now:.0f}, vol {vol.iloc[-1]/avg_vol:.2f}x"
 
     def detect_range(self, df):
         if len(df) < 20:
@@ -1731,13 +1815,15 @@ class SmartTrader:
 
             # ── OPTION C: override SL/TP with tiered patient-exit values ──
             if OPTION_C_MODE:
-                _min_sl_price = fill_price * (1 - OPTION_C_MAX_SL_PCT)
+                # V2 uses a tighter SL cap (-1.5%) than Option C alone (-2%)
+                _sl_cap_pct = V2_MAX_SL_PCT if STRATEGY_V2_PULLBACK else OPTION_C_MAX_SL_PCT
+                _min_sl_price = fill_price * (1 - _sl_cap_pct)
                 if stop_loss < _min_sl_price:
                     stop_loss = _min_sl_price
                     position['stop_loss'] = _min_sl_price
                 position['tp1'] = fill_price * (1 + OPTION_C_TP1_PCT)
                 position['tp2'] = fill_price * (1 + OPTION_C_TP2_PCT)
-                print(f"   \U0001f170 Option C: TP1 ${position['tp1']:.4f} (+{OPTION_C_TP1_PCT*100:.2f}%) | TP2 ${position['tp2']:.4f} (+{OPTION_C_TP2_PCT*100:.2f}%) | SL ${stop_loss:.4f} (-{OPTION_C_MAX_SL_PCT*100:.1f}% cap) | runner trail {OPTION_C_TRAIL_PCT*100:.2f}%")
+                print(f"   \U0001f170 Option C: TP1 ${position['tp1']:.4f} (+{OPTION_C_TP1_PCT*100:.2f}%) | TP2 ${position['tp2']:.4f} (+{OPTION_C_TP2_PCT*100:.2f}%) | SL ${stop_loss:.4f} (-{_sl_cap_pct*100:.1f}% cap) | runner trail {OPTION_C_TRAIL_PCT*100:.2f}%")
 
             self.open_positions.append(position)
             self.position_open[symbol] = True
@@ -2103,6 +2189,28 @@ class SmartTrader:
             print(f"   🚫 {symbol} skipped — {htf_reason}")
             return
 
+        # ── STRATEGY V2: pullback-into-trend ──────────────────────────────
+        # When V2 is on, *only* the quality pullback setup can enter. The
+        # A+ breakout / SCOUT branches below are skipped entirely.
+        if STRATEGY_V2_PULLBACK:
+            # Daily loss circuit breaker
+            if getattr(self, 'v2_daily_losses', 0) >= V2_MAX_LOSSES_PER_DAY:
+                return  # silent — already logged once at the trigger
+            v2_ok, v2_reason = self.quality_pullback_signal(df)
+            if not v2_ok:
+                # Only print at debug level to avoid log spam — pullbacks are rare
+                return
+            print(f"   🎯 V2 PULLBACK {symbol} @ {price:.4f} — {v2_reason} [{htf_reason}]")
+            self.execute_buy(symbol, {
+                'price': price,
+                'trade_type': 'V2_PULLBACK',
+                'strength': 1.0,
+                'atr': atr.iloc[-1],
+                'position_boost': 1.0,
+                'htf_bullish': htf_ok,
+            })
+            return
+
         # Conviction-based sizing: A+ aligned with 1h trend = full, scout = small
         # (passed to execute_buy via signal dict; execute_buy applies session_boost on top)
         if score == 3 and volatility_expanding:
@@ -2281,6 +2389,16 @@ class SmartTrader:
                 print(f"\n   ⏱️ TIME EXIT {symbol}: {candles_open} candles, no progress")
                 self.execute_sell(position, 'TIME_EXIT')
                 continue
+
+            # V2 60-MIN TIME STOP: if V2 trade hasn't moved meaningfully and TP1 not hit, cut it
+            if STRATEGY_V2_PULLBACK and not position.get('tp1_hit', False):
+                _age_min = (datetime.now() - position['entry_time']).total_seconds() / 60.0
+                if _age_min >= V2_TIME_STOP_MIN:
+                    _pnl_pct = (current_price - position['entry_price']) / position['entry_price']
+                    if abs(_pnl_pct) < 0.005:   # stuck within ±0.5%
+                        print(f"\n   ⏱️ V2 TIME STOP {symbol}: {_age_min:.0f}min, PnL {_pnl_pct*100:+.2f}% — cutting")
+                        self.execute_sell(position, 'V2_TIME_STOP')
+                        continue
 
             # Session-specific kill timer: cut EU losers fast, give US runners more room
             _monitor_session, _ = self.get_market_session()
@@ -2472,6 +2590,7 @@ class SmartTrader:
             self.daily_profit = 0.0
             self.daily_loss = 0.0
             self.daily_pnl = 0.0
+            self.v2_daily_losses = 0
             self.daily_loss_ratio = 0.0
             self.consecutive_losses = 0
             self.last_trade_time = {}
@@ -2590,6 +2709,11 @@ class SmartTrader:
     def update_streak(self, result):
         if result == 'LOSS':
             self.consecutive_losses += 1
+            self.v2_daily_losses    += 1
+            if STRATEGY_V2_PULLBACK and self.v2_daily_losses >= V2_MAX_LOSSES_PER_DAY:
+                self.send_telegram(
+                    f"🛑 V2 daily loss cap hit ({self.v2_daily_losses}/{V2_MAX_LOSSES_PER_DAY}) — no new entries until tomorrow"
+                )
         else:
             self.consecutive_losses = 0
         if self.consecutive_losses >= self.max_consecutive_losses:
