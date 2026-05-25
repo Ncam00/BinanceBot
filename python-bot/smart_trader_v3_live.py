@@ -2198,7 +2198,13 @@ class SmartTrader:
                 return  # silent — already logged once at the trigger
             v2_ok, v2_reason = self.quality_pullback_signal(df)
             if not v2_ok:
-                # Only print at debug level to avoid log spam — pullbacks are rare
+                # Print only when reason changes per symbol — avoids log spam
+                # while still showing what's blocking V2
+                if not hasattr(self, '_v2_last_reason'):
+                    self._v2_last_reason = {}
+                if self._v2_last_reason.get(symbol) != v2_reason:
+                    self._v2_last_reason[symbol] = v2_reason
+                    print(f"   ⏭️  V2 {symbol}: {v2_reason}")
                 return
             print(f"   🎯 V2 PULLBACK {symbol} @ {price:.4f} — {v2_reason} [{htf_reason}]")
             self.execute_buy(symbol, {
