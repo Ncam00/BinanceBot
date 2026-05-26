@@ -99,15 +99,15 @@ OPTION_C_TRAIL_PCT  = 0.005  # 0.5% trail on the last 25% runner
 # with a bullish reversal candle + volume confirmation. Tighter risk, breakeven
 # move on TP1 (already wired), 60-min time stop, daily loss circuit breaker.
 STRATEGY_V2_PULLBACK    = True   # master switch — turn off to revert to breakout entries
-V2_MAX_SL_PCT           = 0.015  # cap SL at -1.5% (tighter than Option C's -2%)
+V2_MAX_SL_PCT           = 0.010  # cap SL at -1.0% (scalp mode May 26 2026)
 V2_TIME_STOP_MIN        = 60     # close if no movement (within ±0.5R) after N min
 V2_MAX_LOSSES_PER_DAY   = 3      # halt new entries for the day after N losses
 V2_CONSEC_LOSSES_PAUSE  = 2      # pause after N consecutive losses
 V2_PAUSE_HOURS          = 4      # how long to pause after consec-loss trigger
 V2_RSI_MIN              = 40     # pullback RSI floor — below = collapse, skip
 V2_RSI_MAX              = 60     # pullback RSI ceiling — above = chasing, skip
-V2_VOLUME_MULTIPLIER    = 1.3    # entry candle volume vs 20-avg
-V2_PULLBACK_LOOKBACK    = 6      # last N candles must contain a dip to EMA20
+V2_VOLUME_MULTIPLIER    = 1.0    # volume gate OFF (scalp mode May 26 2026)
+V2_PULLBACK_LOOKBACK    = 10     # last N candles must contain a dip to EMA20 (widened May 26)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -580,10 +580,10 @@ class SmartTrader:
         self.max_positions = 1  # One position at a time - quality over quantity
 
         # ════════════════════════════════════════════════════════════════════
-        # CORE RISK SETTINGS
+        # CORE RISK SETTINGS — SCALP MODE (May 26 2026)
         # ════════════════════════════════════════════════════════════════════
-        self.stop_loss_percent = 1.5          # 1.5% stop loss
-        self.take_profit_percent = 2.5        # 2.5% take profit
+        self.stop_loss_percent = 1.0          # 1.0% stop loss (scalp)
+        self.take_profit_percent = 1.2        # 1.2% take profit (scalp) — R:R 1.2:1
         self.position_size_percent = 15       # 15% of balance per trade (~$70)
         self.max_position_cap = 0.25          # Hard cap at 25% of balance
         self.strong_setup_threshold = 0.85    # strength >= 0.85 → full size; below → half size
