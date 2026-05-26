@@ -2006,7 +2006,15 @@ class SmartTrader:
             sell_quantity = self.format_quantity(symbol, sell_quantity)
 
             if sell_quantity <= 0:
-                print(f"   ⚠️ Sell quantity too small for {symbol}")
+                # Ghost position: position dict says we own X but exchange free
+                # balance is dust/zero (e.g. previous sell left rounding remainder).
+                # Force-remove from open_positions so the position cap doesn't
+                # block new entries forever.
+                print(f"   ⚠️ Sell quantity too small for {symbol} — clearing ghost position")
+                self.open_positions = [p for p in self.open_positions
+                                       if p.get('trade_id') != position.get('trade_id')]
+                self.position_open[symbol] = False
+                self.positions.pop(symbol, None)
                 return None
 
             if DRY_RUN:
