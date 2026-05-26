@@ -110,6 +110,16 @@ V2_VOLUME_MULTIPLIER    = 1.0    # volume gate OFF (scalp mode May 26 2026)
 V2_PULLBACK_LOOKBACK    = 10     # last N candles must contain a dip to EMA20 (widened May 26)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─── STRATEGY B: Range mean-reversion (May 26 2026) ─────────────────────────
+# Activates when 15m regime is RANGING. Buys oversold bounces off rolling
+# 20-bar support. Shares V2's exit infrastructure + daily loss cap.
+STRATEGY_B_RANGE        = True   # master switch for range mean-reversion
+B_RSI_MAX               = 35     # buy only when RSI ≤ this (oversold inside range)
+B_SUPPORT_PROXIMITY     = 0.005  # price within 0.5% of 20-bar low to count as 'at support'
+B_MIN_RANGE_PCT         = 0.008  # range (high-low)/low must be ≥ 0.8% to be a tradable range
+B_LOOKBACK              = 20     # bars for support/resistance detection
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 class EntryEngine:
     MAX_RETEST_CANDLES = 25
@@ -991,6 +1001,65 @@ class SmartTrader:
             return False, f"low volume ({vol.iloc[-1]/avg_vol:.2f}x avg)"
 
         return True, f"pullback+reclaim @ EMA20, RSI {rsi_now:.0f}, vol {vol.iloc[-1]/avg_vol:.2f}x"
+
+    def quality_range_signal(self, df):
+        """Strategy B — range mean-reversion entry detector.
+
+        Returns (True, reason) when ALL of:
+          - the 20-bar range is wide enough (≥ B_MIN_RANGE_PCT) to be tradable
+          - current price is within B_SUPPORT_PROXIMITY of the 20-bar low
+          - RSI(14) ≤ B_RSI_MAX (oversold)
+          - the current candle is bullish (close > open) and closes in the
+            upper third of its own range (confirmation, not catching knives)
+        Else returns (False, reason).
+        """
+        if len(df) < B_LOOKBACK + 5:
+            return False, "not enough candles"
+        close = df['close']
+        high  = df['high']
+        low   = df['low']
+        op    = df['open']
+
+        # Identify the range
+        rng_high = high.rolling(B_LOOKBACK).max().iloc[-1]
+        rng_low  = low.rolling(B_LOOKBACK).min().iloc[-1]
+        if rng_low <= 0:
+            return False, "invalid range low"
+        range_pct = (rng_high - rng_low) / rng_low
+        if range_pct < B_MIN_RANGE_PCT:
+            return False, f"range too tight ({range_pct*100:.2f}%)"
+
+        # Proximity to support
+        price_now = close.iloc[-1]
+        dist_pct  = (price_now - rng_low) / rng_low
+        if dist_pct > B_SUPPORT_PROXIMITY:
+            return False, f"too far from support ({dist_pct*100:.2f}% above low)"
+
+        # RSI oversold
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, np.nan)
+        rsi   = 100 - (100 / (1 + rs))
+        rsi_now = rsi.iloc[-1]
+        if rsi_now > B_RSI_MAX:
+            return False, f"RSI {rsi_now:.0f} not oversold (need ≤{B_RSI_MAX})"
+
+        # Reversal-candle confirmation
+        c_open  = op.iloc[-1]
+        c_close = close.iloc[-1]
+        c_high  = high.iloc[-1]
+        c_low   = low.iloc[-1]
+        if c_close <= c_open:
+            return False, "current candle not bullish"
+        c_range = c_high - c_low
+        if c_range <= 0:
+            return False, "zero-range candle"
+        upper_third = c_low + c_range * (2.0 / 3.0)
+        if c_close < upper_third:
+            return False, "weak close (not in upper third)"
+
+        return True, f"range-low bounce, RSI {rsi_now:.0f}, range {range_pct*100:.2f}%"
 
     def detect_range(self, df):
         if len(df) < 20:
@@ -2183,7 +2252,40 @@ class SmartTrader:
         top_atr = atr.iloc[-1]
         rsi_val = rsi.iloc[-1]
 
-        # 1h trend filter — skip counter-trend entries
+        # ── STRATEGY B: range mean-reversion (runs BEFORE htf trend gate) ──
+        # B activates when the 15m market regime is RANGING. It deliberately
+        # bypasses htf_trend_bullish — that gate is what blocks every entry
+        # in sideways markets, which is exactly where B is meant to trade.
+        # Shares V2's daily loss cap so the combined daily loss budget stays 3.
+        if STRATEGY_B_RANGE:
+            try:
+                _regime_now = detect_market_regime(df)
+            except Exception:
+                _regime_now = 'UNKNOWN'
+            if _regime_now == 'RANGING':
+                if getattr(self, 'v2_daily_losses', 0) >= V2_MAX_LOSSES_PER_DAY:
+                    return  # shared daily loss cap
+                b_ok, b_reason = self.quality_range_signal(df)
+                if not b_ok:
+                    if not hasattr(self, '_b_last_reason'):
+                        self._b_last_reason = {}
+                    if self._b_last_reason.get(symbol) != b_reason:
+                        self._b_last_reason[symbol] = b_reason
+                        print(f"   ⏭️  B {symbol}: {b_reason}")
+                    return
+                print(f"   🎯 B RANGE {symbol} @ {price:.4f} — {b_reason}")
+                self.execute_buy(symbol, {
+                    'price': price,
+                    'trade_type': 'B_RANGE',
+                    'strength': 1.0,
+                    'atr': atr.iloc[-1],
+                    'position_boost': 1.0,
+                    'htf_bullish': True,   # bypass — range trade, no trend gate
+                })
+                return
+            # Not a ranging market — fall through to V2/htf path below
+
+        # 1h trend filter — skip counter-trend entries (V2 only)
         htf_ok, htf_reason = self.htf_trend_bullish(symbol)
         if not htf_ok:
             print(f"   🚫 {symbol} skipped — {htf_reason}")
