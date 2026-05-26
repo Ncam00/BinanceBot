@@ -118,6 +118,10 @@ B_RSI_MAX               = 35     # buy only when RSI ≤ this (oversold inside r
 B_SUPPORT_PROXIMITY     = 0.005  # price within 0.5% of 20-bar low to count as 'at support'
 B_MIN_RANGE_PCT         = 0.008  # range (high-low)/low must be ≥ 0.8% to be a tradable range
 B_LOOKBACK              = 20     # bars for support/resistance detection
+B_TP_PCT                = 0.008  # B take-profit at +0.8% (tighter than V2 — ranges don't run)
+B_SL_PCT                = 0.005  # B stop-loss at -0.5% (tighter than V2 — below support = invalidated)
+B_TIME_STOP_MIN         = 45     # B trades cut after N min if not at TP1
+B_MAX_LOSSES_PER_DAY    = 2      # B daily loss cap (separate from V2's 3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -615,6 +619,8 @@ class SmartTrader:
             self.max_consecutive_losses = 4       # Pause trading after 4 losses in a row
             self.loss_streak_pause_hours = 2      # Hours to pause after hitting streak limit
         self.v2_daily_losses = 0                  # V2 daily loss count (resets at day rollover)
+        self.b_daily_losses  = 0                  # B daily loss count (resets at day rollover)
+        self.b_daily_trades  = 0                  # B trades opened today (info only)
 
         # ════════════════════════════════════════════════════════════════════
         # CIRCUIT BREAKER
@@ -713,6 +719,10 @@ class SmartTrader:
         print(f"   Circuit breaker:${self.circuit_breaker_limit:.2f}")
         print(f"   Position size:  {self.position_size_percent}%")
         print(f"   SL: {self.stop_loss_percent}% | TP: {self.take_profit_percent}%")
+        if STRATEGY_V2_PULLBACK:
+            print(f"   V2 PULLBACK:    ON | SL cap {V2_MAX_SL_PCT*100:.1f}% | time-stop {V2_TIME_STOP_MIN}min | loss cap {V2_MAX_LOSSES_PER_DAY}/day")
+        if STRATEGY_B_RANGE:
+            print(f"   B RANGE:        ON | TP {B_TP_PCT*100:.2f}% / SL {B_SL_PCT*100:.2f}% | time-stop {B_TIME_STOP_MIN}min | loss cap {B_MAX_LOSSES_PER_DAY}/day")
         session, settings = self.get_market_session()
         print(f"   Session:        {session.upper()} ({settings['mode']})")
         print("=" * 60)
@@ -1894,6 +1904,20 @@ class SmartTrader:
                 position['tp2'] = fill_price * (1 + OPTION_C_TP2_PCT)
                 print(f"   \U0001f170 Option C: TP1 ${position['tp1']:.4f} (+{OPTION_C_TP1_PCT*100:.2f}%) | TP2 ${position['tp2']:.4f} (+{OPTION_C_TP2_PCT*100:.2f}%) | SL ${stop_loss:.4f} (-{_sl_cap_pct*100:.1f}% cap) | runner trail {OPTION_C_TRAIL_PCT*100:.2f}%")
 
+            # ── STRATEGY B: override SL/TP with tight range-trade values ──
+            # B trades are short-duration mean-reversion plays — tight TP +0.8%,
+            # tight SL -0.5% (below support = thesis invalidated). Overrides any
+            # Option C tiering above so the trade exits cleanly at the range target.
+            if trade_type == 'B_RANGE':
+                b_tp = fill_price * (1 + B_TP_PCT)
+                b_sl = fill_price * (1 - B_SL_PCT)
+                position['take_profit'] = b_tp
+                position['stop_loss']   = b_sl
+                position['tp1']         = b_tp     # single exit — no tiering for range trades
+                position['tp2']         = b_tp
+                stop_loss = b_sl                   # so the positions[symbol] dict below picks it up
+                print(f"   🎯 B exits: TP ${b_tp:.4f} (+{B_TP_PCT*100:.2f}%) | SL ${b_sl:.4f} (-{B_SL_PCT*100:.2f}%) | time-stop {B_TIME_STOP_MIN}min")
+
             self.open_positions.append(position)
             self.position_open[symbol] = True
             self.last_trade_time[symbol] = time.time()
@@ -2040,6 +2064,13 @@ class SmartTrader:
                     self.daily_loss_ratio += abs(pnl) / safe_balance
                 result = 'LOSS' if pnl < 0 else 'WIN'
                 self.log_trade(result)
+                # Per-strategy loss tracking
+                if result == 'LOSS' and position.get('position_type') == 'B_RANGE':
+                    self.b_daily_losses += 1
+                    if STRATEGY_B_RANGE and self.b_daily_losses >= B_MAX_LOSSES_PER_DAY:
+                        self.send_telegram(
+                            f"🛑 B daily loss cap hit ({self.b_daily_losses}/{B_MAX_LOSSES_PER_DAY}) — no new B entries until tomorrow"
+                        )
                 self.update_streak(result)
 
             # Log trade
@@ -2263,8 +2294,8 @@ class SmartTrader:
             except Exception:
                 _regime_now = 'UNKNOWN'
             if _regime_now == 'RANGING':
-                if getattr(self, 'v2_daily_losses', 0) >= V2_MAX_LOSSES_PER_DAY:
-                    return  # shared daily loss cap
+                if getattr(self, 'b_daily_losses', 0) >= B_MAX_LOSSES_PER_DAY:
+                    return  # B daily loss cap
                 b_ok, b_reason = self.quality_range_signal(df)
                 if not b_ok:
                     if not hasattr(self, '_b_last_reason'):
@@ -2498,8 +2529,19 @@ class SmartTrader:
                 self.execute_sell(position, 'TIME_EXIT')
                 continue
 
+            # B 45-MIN TIME STOP: range trades that don't reach TP fast get cut
+            if STRATEGY_B_RANGE and position.get('position_type') == 'B_RANGE':
+                _age_min_b = (datetime.now() - position['entry_time']).total_seconds() / 60.0
+                if _age_min_b >= B_TIME_STOP_MIN:
+                    _pnl_pct_b = (current_price - position['entry_price']) / position['entry_price']
+                    print(f"\n   ⏱️ B TIME STOP {symbol}: {_age_min_b:.0f}min, PnL {_pnl_pct_b*100:+.2f}% — cutting")
+                    self.execute_sell(position, 'B_TIME_STOP')
+                    continue
+
             # V2 60-MIN TIME STOP: if V2 trade hasn't moved meaningfully and TP1 not hit, cut it
-            if STRATEGY_V2_PULLBACK and not position.get('tp1_hit', False):
+            # (skip for B — B has its own time stop above)
+            if (STRATEGY_V2_PULLBACK and not position.get('tp1_hit', False)
+                    and position.get('position_type') != 'B_RANGE'):
                 _age_min = (datetime.now() - position['entry_time']).total_seconds() / 60.0
                 if _age_min >= V2_TIME_STOP_MIN:
                     _pnl_pct = (current_price - position['entry_price']) / position['entry_price']
@@ -2699,6 +2741,8 @@ class SmartTrader:
             self.daily_loss = 0.0
             self.daily_pnl = 0.0
             self.v2_daily_losses = 0
+            self.b_daily_losses  = 0
+            self.b_daily_trades  = 0
             self.daily_loss_ratio = 0.0
             self.consecutive_losses = 0
             self.last_trade_time = {}
