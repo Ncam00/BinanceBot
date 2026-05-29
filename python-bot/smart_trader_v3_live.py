@@ -586,6 +586,15 @@ class SmartTrader:
             os.getenv('BINANCE_API_KEY'),
             os.getenv('BINANCE_SECRET_KEY')
         )
+        # Align local timestamp offset with Binance server (defends against -1021).
+        # python-binance applies self.client.timestamp_offset to every signed call.
+        try:
+            server_time = self.client.get_server_time()['serverTime']
+            local_time = int(time.time() * 1000)
+            self.client.timestamp_offset = server_time - local_time
+            print(f"   \u23f1\ufe0f  Clock offset vs Binance: {self.client.timestamp_offset} ms")
+        except Exception as e:
+            print(f"   \u26a0\ufe0f  Could not sync clock offset: {e}")
 
         # ════════════════════════════════════════════════════════════════════
         # TRADING PAIRS
@@ -629,6 +638,9 @@ class SmartTrader:
         self.starting_balance = 316.00
         self.circuit_breaker_percent = 0.05
         self.circuit_breaker_limit = self.starting_balance * (1 - self.circuit_breaker_percent)
+        self._last_balance_error = None       # set by get_balance() on API failure
+        self._breaker_strikes = 0             # consecutive sub-limit reads
+        self._breaker_strikes_required = 3    # need 3 in a row before tripping
 
         # ════════════════════════════════════════════════════════════════════
         # EXIT MANAGEMENT
@@ -814,11 +826,13 @@ class SmartTrader:
     def get_balance(self):
         try:
             account = self.client.get_account()
+            self._last_balance_error = None
             for asset in account['balances']:
                 if asset['asset'] == 'USDT':
                     return float(asset['free'])
             return 0.0
         except Exception as e:
+            self._last_balance_error = e
             print(f"   ❌ Balance error: {e}")
             return 0.0
 
@@ -2713,14 +2727,25 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     def check_circuit_breaker(self):
         total = self.get_total_balance()
+        # Ignore reads when the underlying balance API call failed (clock drift,
+        # network blip, etc.) — a transient error should not trip the breaker.
+        if self._last_balance_error is not None:
+            print(f"   ⚠️  Skipping circuit breaker check — balance read failed: {self._last_balance_error}")
+            return True
         if total <= self.circuit_breaker_limit:
+            self._breaker_strikes += 1
+            print(f"   ⚠️  Sub-limit balance read {self._breaker_strikes}/{self._breaker_strikes_required} (${total:.2f} <= ${self.circuit_breaker_limit:.2f})")
+            if self._breaker_strikes < self._breaker_strikes_required:
+                return True
             msg = (f"🚨 CIRCUIT BREAKER TRIGGERED\n"
                    f"Balance: ${total:.2f}\n"
                    f"Limit: ${self.circuit_breaker_limit:.2f}\n"
+                   f"Strikes: {self._breaker_strikes} consecutive sub-limit reads\n"
                    f"Bot stopped to protect capital.")
             print(f"\n   {msg}")
             self.send_telegram(msg)
             return False
+        self._breaker_strikes = 0
         return True
 
     # ════════════════════════════════════════════════════════════════════
@@ -3059,9 +3084,19 @@ class SmartTrader:
         print(f"\n   💰 Balance: ${balance:.2f} USDT")
 
         last_heartbeat = datetime.now()
+        last_clock_sync = datetime.now()
 
         while True:
             try:
+                # ── Periodic clock resync (hourly) to avoid -1021 drift ──
+                if (datetime.now() - last_clock_sync).seconds > 3600:
+                    try:
+                        st = self.client.get_server_time()['serverTime']
+                        self.client.timestamp_offset = st - int(time.time() * 1000)
+                    except Exception:
+                        pass
+                    last_clock_sync = datetime.now()
+
                 # ── Circuit breaker ───────────────────────────────────
                 if not self.check_circuit_breaker():
                     break
