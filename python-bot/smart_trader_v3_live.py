@@ -124,6 +124,23 @@ B_TIME_STOP_MIN         = 45     # B trades cut after N min if not at TP1
 B_MAX_LOSSES_PER_DAY    = 2      # B daily loss cap (separate from V2's 3)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─── STRATEGY C: Volatility wick reversal / liquidity-sweep fade (May 31 2026) ─
+# Activates when 15m regime is VOLATILE (mutually exclusive with B's RANGING).
+# Buys flash dumps that get reclaimed quickly. Designed for the BTC/ETH-style
+# 30 May wicks B was missing — sharp dump ≥ N×ATR, price recovers, bullish
+# confirmation candle prints. Tight SL because the thesis dies fast if wrong.
+STRATEGY_C_FADE         = True   # master switch for volatility-fade strategy
+C_LOOKBACK              = 5      # bars to scan for the dump leg
+C_WICK_ATR_MULT         = 1.5    # dump leg must be ≥ this × ATR(14) to qualify
+C_RECLAIM_PCT           = 0.003  # current close must be ≥ 0.3% above the wick low
+C_TP_PCT                = 0.010  # +1.0% take-profit (volatility plays move bigger than B)
+C_SL_PCT                = 0.007  # -0.7% stop-loss (R:R 1.43:1)
+C_TIME_STOP_MIN         = 30     # cut fast if the reclaim doesn't pay
+C_MAX_LOSSES_PER_DAY    = 2      # daily loss cap
+C_MAX_TRADES_PER_DAY    = 2      # cap trade count separately — these are higher variance
+C_COOLDOWN_MIN          = 60     # per-symbol cooldown after a C entry
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 class EntryEngine:
     MAX_RETEST_CANDLES = 25
@@ -630,6 +647,9 @@ class SmartTrader:
         self.v2_daily_losses = 0                  # V2 daily loss count (resets at day rollover)
         self.b_daily_losses  = 0                  # B daily loss count (resets at day rollover)
         self.b_daily_trades  = 0                  # B trades opened today (info only)
+        self.c_daily_losses  = 0                  # C daily loss count (resets at day rollover)
+        self.c_daily_trades  = 0                  # C trades opened today (counts toward C cap)
+        self._c_last_entry_ts = {}                # per-symbol unix-ts of last C entry (cooldown)
 
         # ════════════════════════════════════════════════════════════════════
         # CIRCUIT BREAKER
@@ -735,6 +755,8 @@ class SmartTrader:
             print(f"   V2 PULLBACK:    ON | SL cap {V2_MAX_SL_PCT*100:.1f}% | time-stop {V2_TIME_STOP_MIN}min | loss cap {V2_MAX_LOSSES_PER_DAY}/day")
         if STRATEGY_B_RANGE:
             print(f"   B RANGE:        ON | TP {B_TP_PCT*100:.2f}% / SL {B_SL_PCT*100:.2f}% | time-stop {B_TIME_STOP_MIN}min | loss cap {B_MAX_LOSSES_PER_DAY}/day")
+        if STRATEGY_C_FADE:
+            print(f"   C FADE:         ON | TP {C_TP_PCT*100:.2f}% / SL {C_SL_PCT*100:.2f}% | time-stop {C_TIME_STOP_MIN}min | wick ≥{C_WICK_ATR_MULT}×ATR | max {C_MAX_TRADES_PER_DAY}/day")
         session, settings = self.get_market_session()
         print(f"   Session:        {session.upper()} ({settings['mode']})")
         print("=" * 60)
@@ -1084,6 +1106,65 @@ class SmartTrader:
             return False, "weak close (not in upper third)"
 
         return True, f"range-low bounce, RSI {rsi_now:.0f}, range {range_pct*100:.2f}%"
+
+    def quality_fade_signal(self, df):
+        """Strategy C — volatility wick-reversal entry detector.
+
+        Returns (True, reason) when ALL of:
+          - the last C_LOOKBACK candles contain a dump leg ≥ C_WICK_ATR_MULT × ATR(14)
+            (i.e. min(low) of the window is far below the close that opened the window)
+          - current close has reclaimed: ≥ C_RECLAIM_PCT above that wick low
+          - current candle is bullish (close > open) and closes in the upper half
+            of its own range (we want the recovery to be holding, not a dead-cat)
+        Else returns (False, reason).
+        """
+        if len(df) < C_LOOKBACK + 20:
+            return False, "not enough candles"
+        close = df['close']
+        high  = df['high']
+        low   = df['low']
+        op    = df['open']
+
+        # ATR(14)
+        tr = pd.concat([
+            (high - low),
+            (high - close.shift()).abs(),
+            (low  - close.shift()).abs(),
+        ], axis=1).max(axis=1)
+        atr14 = tr.rolling(14).mean().iloc[-1]
+        if not (atr14 > 0):
+            return False, "invalid ATR"
+
+        # Look for the dump leg in the last C_LOOKBACK candles
+        window_low      = low.iloc[-C_LOOKBACK:].min()
+        ref_close       = close.iloc[-(C_LOOKBACK + 1)]   # close just before the window
+        dump_distance   = ref_close - window_low
+        if dump_distance < C_WICK_ATR_MULT * atr14:
+            return False, f"no dump leg ({dump_distance/atr14:.2f}×ATR < {C_WICK_ATR_MULT})"
+
+        # Reclaim: current close must be back above the wick low by C_RECLAIM_PCT
+        price_now = close.iloc[-1]
+        if window_low <= 0:
+            return False, "invalid window low"
+        reclaim_pct = (price_now - window_low) / window_low
+        if reclaim_pct < C_RECLAIM_PCT:
+            return False, f"not reclaimed ({reclaim_pct*100:.2f}% above wick low, need ≥{C_RECLAIM_PCT*100:.2f}%)"
+
+        # Confirmation candle — bullish, closes in upper half
+        c_open  = op.iloc[-1]
+        c_close = close.iloc[-1]
+        c_high  = high.iloc[-1]
+        c_low   = low.iloc[-1]
+        if c_close <= c_open:
+            return False, "current candle not bullish"
+        c_range = c_high - c_low
+        if c_range <= 0:
+            return False, "zero-range candle"
+        upper_half = c_low + c_range * 0.5
+        if c_close < upper_half:
+            return False, "weak close (below upper half)"
+
+        return True, f"wick {dump_distance/atr14:.2f}×ATR reclaimed +{reclaim_pct*100:.2f}%"
 
     def detect_range(self, df):
         if len(df) < 20:
@@ -1932,6 +2013,20 @@ class SmartTrader:
                 stop_loss = b_sl                   # so the positions[symbol] dict below picks it up
                 print(f"   🎯 B exits: TP ${b_tp:.4f} (+{B_TP_PCT*100:.2f}%) | SL ${b_sl:.4f} (-{B_SL_PCT*100:.2f}%) | time-stop {B_TIME_STOP_MIN}min")
 
+            # ── STRATEGY C: override SL/TP with volatility-fade values ──
+            # C trades are short-duration sweep reclaims — wider TP +1.0%,
+            # tight SL -0.7%, single-exit (no tiering, no runner).
+            if trade_type == 'C_FADE':
+                c_tp = fill_price * (1 + C_TP_PCT)
+                c_sl = fill_price * (1 - C_SL_PCT)
+                position['take_profit'] = c_tp
+                position['stop_loss']   = c_sl
+                position['tp1']         = c_tp
+                position['tp2']         = c_tp
+                stop_loss = c_sl
+                self.c_daily_trades += 1
+                print(f"   🎯 C exits: TP ${c_tp:.4f} (+{C_TP_PCT*100:.2f}%) | SL ${c_sl:.4f} (-{C_SL_PCT*100:.2f}%) | time-stop {C_TIME_STOP_MIN}min")
+
             self.open_positions.append(position)
             self.position_open[symbol] = True
             self.last_trade_time[symbol] = time.time()
@@ -2092,6 +2187,12 @@ class SmartTrader:
                     if STRATEGY_B_RANGE and self.b_daily_losses >= B_MAX_LOSSES_PER_DAY:
                         self.send_telegram(
                             f"🛑 B daily loss cap hit ({self.b_daily_losses}/{B_MAX_LOSSES_PER_DAY}) — no new B entries until tomorrow"
+                        )
+                if result == 'LOSS' and position.get('position_type') == 'C_FADE':
+                    self.c_daily_losses += 1
+                    if STRATEGY_C_FADE and self.c_daily_losses >= C_MAX_LOSSES_PER_DAY:
+                        self.send_telegram(
+                            f"🛑 C daily loss cap hit ({self.c_daily_losses}/{C_MAX_LOSSES_PER_DAY}) — no new C entries until tomorrow"
                         )
                 self.update_streak(result)
 
@@ -2336,7 +2437,36 @@ class SmartTrader:
                     'htf_bullish': True,   # bypass — range trade, no trend gate
                 })
                 return
-            # Not a ranging market — fall through to V2/htf path below
+            # ── STRATEGY C: volatility wick reversal (runs in VOLATILE regime) ──
+            if STRATEGY_C_FADE and _regime_now == 'VOLATILE':
+                if getattr(self, 'c_daily_losses', 0) >= C_MAX_LOSSES_PER_DAY:
+                    return  # C daily loss cap
+                if getattr(self, 'c_daily_trades', 0) >= C_MAX_TRADES_PER_DAY:
+                    return  # C daily trade cap
+                # Per-symbol cooldown
+                _last_c = self._c_last_entry_ts.get(symbol, 0)
+                if time.time() - _last_c < C_COOLDOWN_MIN * 60:
+                    return  # silent — within cooldown
+                c_ok, c_reason = self.quality_fade_signal(df)
+                if not c_ok:
+                    if not hasattr(self, '_c_last_reason'):
+                        self._c_last_reason = {}
+                    if self._c_last_reason.get(symbol) != c_reason:
+                        self._c_last_reason[symbol] = c_reason
+                        print(f"   ⏭️  C {symbol}: {c_reason}")
+                    return
+                print(f"   🎯 C FADE {symbol} @ {price:.4f} — {c_reason}")
+                self._c_last_entry_ts[symbol] = time.time()
+                self.execute_buy(symbol, {
+                    'price': price,
+                    'trade_type': 'C_FADE',
+                    'strength': 1.0,
+                    'atr': atr.iloc[-1],
+                    'position_boost': 1.0,
+                    'htf_bullish': True,   # bypass — sweep play, no trend gate
+                })
+                return
+            # Not RANGING or VOLATILE — fall through to V2/htf path below
 
         # 1h trend filter — skip counter-trend entries (V2 only)
         htf_ok, htf_reason = self.htf_trend_bullish(symbol)
@@ -2560,10 +2690,20 @@ class SmartTrader:
                     self.execute_sell(position, 'B_TIME_STOP')
                     continue
 
+            # C 30-MIN TIME STOP: volatility fades that don't pay off fast get cut
+            if STRATEGY_C_FADE and position.get('position_type') == 'C_FADE':
+                _age_min_c = (datetime.now() - position['entry_time']).total_seconds() / 60.0
+                if _age_min_c >= C_TIME_STOP_MIN:
+                    _pnl_pct_c = (current_price - position['entry_price']) / position['entry_price']
+                    print(f"\n   ⏱️ C TIME STOP {symbol}: {_age_min_c:.0f}min, PnL {_pnl_pct_c*100:+.2f}% — cutting")
+                    self.execute_sell(position, 'C_TIME_STOP')
+                    continue
+
             # V2 60-MIN TIME STOP: if V2 trade hasn't moved meaningfully and TP1 not hit, cut it
-            # (skip for B — B has its own time stop above)
+            # (skip for B and C — they have their own time stops above)
             if (STRATEGY_V2_PULLBACK and not position.get('tp1_hit', False)
-                    and position.get('position_type') != 'B_RANGE'):
+                    and position.get('position_type') != 'B_RANGE'
+                    and position.get('position_type') != 'C_FADE'):
                 _age_min = (datetime.now() - position['entry_time']).total_seconds() / 60.0
                 if _age_min >= V2_TIME_STOP_MIN:
                     _pnl_pct = (current_price - position['entry_price']) / position['entry_price']
@@ -2776,6 +2916,8 @@ class SmartTrader:
             self.v2_daily_losses = 0
             self.b_daily_losses  = 0
             self.b_daily_trades  = 0
+            self.c_daily_losses  = 0
+            self.c_daily_trades  = 0
             self.daily_loss_ratio = 0.0
             self.consecutive_losses = 0
             self.last_trade_time = {}
