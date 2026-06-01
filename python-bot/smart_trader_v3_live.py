@@ -117,6 +117,7 @@ STRATEGY_B_RANGE        = True   # master switch for range mean-reversion
 B_RSI_MAX               = 35     # buy only when RSI ≤ this (oversold inside range)
 B_SUPPORT_PROXIMITY     = 0.005  # price within 0.5% of 20-bar low to count as 'at support'
 B_MIN_RANGE_PCT         = 0.008  # range (high-low)/low must be ≥ 0.8% to be a tradable range
+B_STALE_LOWS_MIN_BARS   = 3      # 20-bar low must be ≥ this many bars old (skip fresh-low knife catches)
 B_LOOKBACK              = 20     # bars for support/resistance detection
 B_TP_PCT                = 0.008  # B take-profit at +0.8% (tighter than V2 — ranges don't run)
 B_SL_PCT                = 0.005  # B stop-loss at -0.5% (tighter than V2 — below support = invalidated)
@@ -1080,6 +1081,14 @@ class SmartTrader:
         dist_pct  = (price_now - rng_low) / rng_low
         if dist_pct > B_SUPPORT_PROXIMITY:
             return False, f"too far from support ({dist_pct*100:.2f}% above low)"
+
+        # Stale-lows gate: the 20-bar low must be at least N bars old.
+        # If price is still printing fresh lows in the last few candles, the
+        # range is breaking down, not bouncing — skip the knife catch.
+        recent_lows = low.iloc[-B_LOOKBACK:]
+        bars_since_low = (B_LOOKBACK - 1) - int(recent_lows.values.argmin())
+        if bars_since_low < B_STALE_LOWS_MIN_BARS:
+            return False, f"fresh low ({bars_since_low} bars ago, need ≥{B_STALE_LOWS_MIN_BARS})"
 
         # RSI oversold
         delta = close.diff()
