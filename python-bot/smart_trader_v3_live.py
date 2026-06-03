@@ -114,7 +114,7 @@ V2_PULLBACK_LOOKBACK    = 10     # last N candles must contain a dip to EMA20 (w
 # Activates when 15m regime is RANGING. Buys oversold bounces off rolling
 # 20-bar support. Shares V2's exit infrastructure + daily loss cap.
 STRATEGY_B_RANGE        = True   # master switch for range mean-reversion
-B_RSI_MAX               = 35     # buy only when RSI ≤ this (oversold inside range)
+B_RSI_MAX               = 30     # buy only when RSI ≤ this (oversold inside range) — tightened from 35, wins clustered ≤30
 B_SUPPORT_PROXIMITY     = 0.005  # price within 0.5% of 20-bar low to count as 'at support'
 B_MIN_RANGE_PCT         = 0.008  # range (high-low)/low must be ≥ 0.8% to be a tradable range
 B_STALE_LOWS_MIN_BARS   = 3      # 20-bar low must be ≥ this many bars old (skip fresh-low knife catches)
