@@ -1,62 +1,407 @@
 #!/usr/bin/env python3
 """
-BinanceBot Trading Dashboard
+BinanceBot Copy Trading Dashboard
 Run:  python dashboard.py
 Open: http://localhost:8050
 """
-import sqlite3
+import re
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 
-import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, dcc, html, dash_table
+from dash import Dash, dcc, html
 from dash.dependencies import Input, Output
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DB_PATH    = Path(__file__).parent / "data" / "trades.db"
-REFRESH_MS = 5_000
+LOG_PATH   = Path(__file__).parent / "copy_alerts.log"
+REFRESH_MS = 10_000
+DAILY_TARGET = 5.0
+MAX_DEPLOYED = 500.0
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 BG     = "#0a0a0a"
 CARD   = "#141414"
 BORDER = "#242424"
 YELLOW = "#F5C518"
+GREEN  = "#00C853"
 RED    = "#FF4444"
+BLUE   = "#2196F3"
 TEXT   = "#FFFFFF"
 MUTED  = "#888888"
 FONT   = "'Inter', 'Segoe UI', Arial, sans-serif"
 
-# ── Data helpers ──────────────────────────────────────────────────────────────
-def _db():
-    if not DB_PATH.exists():
-        return None
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    return conn
+# ── Log parser ────────────────────────────────────────────────────────────────
+_TS   = r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]"
+_HOLD = re.compile(_TS + r" \[HOLDING\] (.+?): ROI ([\d.+-]+)%\s+MDD ([\d.]+)%\s+Sharpe ([\d.+-]+)\s+WinRate ([\d.]+)%\s+~\$([\d.+-]+)/day\s+~\$([\d.+-]+)/wk\s+Score:(\d+)")
+_PNL  = re.compile(_TS + r" \[P&L\] Est daily across (\d+) trader\(s\): \$([\d.+-]+)\s+Target: \$([\d.]+)/day\s+Gap: \$([\d.+-]+)\s+Total deployed: \$([\d.]+)/\$([\d.]+)")
+_ENTER= re.compile(_TS + r" \[AUTO-ENTER\] (.+?) \(score (\d+)/100\)")
+_EXIT = re.compile(_TS + r" \[AUTO-EXIT\] (.+?): (.+)")
+_START= re.compile(_TS + r" \[AUTO-START\] .+ -> (\w+): (.+)")
 
-def _sql(query, params=()):
-    conn = _db()
-    if not conn:
-        return pd.DataFrame()
+def parse_log():
+    if not LOG_PATH.exists():
+        return {}, [], [], []
+
+    lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    holders   = {}   # name -> latest HOLDING data
+    pnl_series= []   # list of (ts, daily_est)
+    events    = []   # recent notable events (enter/exit/alert)
+    raw_lines = lines[-120:]  # last 120 lines for event feed
+
+    for line in lines:
+        m = _HOLD.search(line)
+        if m:
+            ts, name, roi, mdd, sharpe, wr, daily, weekly, score = m.groups()
+            holders[name] = {
+                "name": name, "ts": ts,
+                "roi": float(roi), "mdd": float(mdd),
+                "sharpe": float(sharpe), "win_rate": float(wr),
+                "daily": float(daily), "weekly": float(weekly),
+                "score": int(score),
+            }
+            continue
+
+        m = _PNL.search(line)
+        if m:
+            ts, n_traders, daily, target, gap, deployed, max_dep = m.groups()
+            pnl_series.append({
+                "ts": ts, "daily": float(daily),
+                "n": int(n_traders), "deployed": float(deployed),
+            })
+            continue
+
+        m = _ENTER.search(line)
+        if m:
+            events.append({"ts": m.group(1), "type": "ENTER", "text": f"Auto-entered {m.group(2)} (score {m.group(3)})"})
+            continue
+
+        m = _EXIT.search(line)
+        if m:
+            events.append({"ts": m.group(1), "type": "EXIT", "text": f"Auto-exited {m.group(2)}: {m.group(3)[:60]}"})
+            continue
+
+    return holders, pnl_series, events, raw_lines
+
+
+def latest_pnl(pnl_series):
+    return pnl_series[-1] if pnl_series else {"daily": 0.0, "n": 0, "deployed": 0.0}
+
+
+# ── Chart builders ────────────────────────────────────────────────────────────
+def daily_chart(pnl_series):
+    fig = go.Figure()
+    if not pnl_series:
+        fig.add_annotation(text="No data yet", xref="paper", yref="paper",
+                           x=0.5, y=0.5, showarrow=False,
+                           font=dict(color=MUTED, size=13, family=FONT))
+    else:
+        # Group by date, take last reading of each day
+        by_day = {}
+        for p in pnl_series:
+            day = p["ts"][:10]
+            by_day[day] = p["daily"]
+        days  = sorted(by_day.keys())[-14:]
+        vals  = [by_day[d] for d in days]
+        colors = [GREEN if v >= DAILY_TARGET else YELLOW if v > 0 else RED for v in vals]
+        fig.add_trace(go.Bar(
+            x=days, y=vals, marker_color=colors,
+            hovertemplate="<b>%{x}</b><br>Est daily: $%{y:.2f}<extra></extra>",
+        ))
+        fig.add_hline(y=DAILY_TARGET, line_color=GREEN, line_width=1,
+                      annotation_text=f"${DAILY_TARGET} target",
+                      annotation_font_color=GREEN, annotation_font_size=11)
+        fig.add_hline(y=0, line_color=BORDER, line_width=1)
+
+    fig.update_layout(
+        paper_bgcolor=CARD, plot_bgcolor=CARD,
+        font=dict(color=MUTED, family=FONT, size=11),
+        margin=dict(l=45, r=15, t=15, b=40),
+        xaxis=dict(gridcolor=BORDER, zeroline=False, tickfont=dict(size=10, color=MUTED)),
+        yaxis=dict(gridcolor=BORDER, zeroline=False, tickformat="$,.2f",
+                   tickfont=dict(size=10, color=MUTED)),
+        showlegend=False, height=240, bargap=0.3,
+    )
+    return fig
+
+
+def target_gauge(daily_est):
+    pct = min(daily_est / DAILY_TARGET * 100, 100)
+    color = GREEN if pct >= 100 else YELLOW if pct >= 50 else RED
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=daily_est,
+        number={"prefix": "$", "suffix": "/day", "font": {"size": 26, "color": TEXT, "family": FONT}},
+        gauge={
+            "axis": {"range": [0, DAILY_TARGET], "tickcolor": MUTED,
+                     "tickfont": {"size": 10, "color": MUTED, "family": FONT}},
+            "bar":  {"color": color, "thickness": 0.25},
+            "bgcolor": BORDER, "borderwidth": 0,
+            "steps": [{"range": [0, DAILY_TARGET], "color": CARD}],
+            "threshold": {"line": {"color": GREEN, "width": 2},
+                          "thickness": 0.75, "value": DAILY_TARGET},
+        },
+        domain={"x": [0, 1], "y": [0, 1]},
+    ))
+    fig.update_layout(
+        paper_bgcolor=CARD, font_family=FONT,
+        margin=dict(l=20, r=20, t=30, b=10), height=160,
+    )
+    return fig
+
+
+# ── UI helpers ────────────────────────────────────────────────────────────────
+def card(children, extra_style=None):
+    style = {
+        "background": CARD, "border": f"1px solid {BORDER}",
+        "borderRadius": "12px", "padding": "20px 24px",
+    }
+    if extra_style:
+        style.update(extra_style)
+    return html.Div(children, style=style)
+
+
+def label(text):
+    return html.Div(text, style={
+        "color": MUTED, "fontFamily": FONT, "fontSize": "11px", "fontWeight": "600",
+        "letterSpacing": "0.8px", "marginBottom": "8px", "textTransform": "uppercase",
+    })
+
+
+def big_number(value, prefix="$", color=None):
     try:
-        return pd.read_sql(query, conn, params=params)
+        v = float(value)
     except Exception:
-        return pd.DataFrame()
-    finally:
-        conn.close()
+        return html.Div("—", style={"color": MUTED, "fontFamily": FONT, "fontSize": "32px", "fontWeight": "700"})
+    c = color or (GREEN if v >= 0 else RED)
+    sign = "+" if v > 0 else ""
+    return html.Div(f"{sign}{prefix}{abs(v):,.2f}",
+                    style={"color": c, "fontFamily": FONT, "fontSize": "32px",
+                           "fontWeight": "700", "lineHeight": "1.1"})
 
-def load_closed_trades():
-    return _sql("SELECT * FROM trades WHERE exit_time IS NOT NULL ORDER BY exit_time DESC LIMIT 200")
 
-def load_open_trades():
-    return _sql("SELECT * FROM trades WHERE exit_time IS NULL ORDER BY entry_time DESC")
+def sub(text, color=None):
+    return html.Div(text, style={"color": color or MUTED, "fontFamily": FONT,
+                                  "fontSize": "13px", "marginTop": "6px"})
 
-def load_balance_history():
-    return _sql("SELECT * FROM balance_history ORDER BY recorded_at ASC LIMIT 1000")
 
-def load_signals():
-    return _sql("SELECT * FROM signals ORDER BY created_at DESC LIMIT 12")
+def score_badge(score):
+    color = GREEN if score >= 80 else YELLOW if score >= 55 else RED
+    return html.Span(f"{score}", style={
+        "background": color, "color": BG, "fontFamily": FONT,
+        "fontSize": "11px", "fontWeight": "700", "borderRadius": "4px",
+        "padding": "2px 7px",
+    })
+
+
+def active_trader_card(t):
+    roi_color = GREEN if t["roi"] >= 20 else YELLOW if t["roi"] >= 0 else RED
+    return html.Div([
+        html.Div([
+            html.Span(t["name"], style={"color": TEXT, "fontFamily": FONT,
+                                        "fontSize": "14px", "fontWeight": "600"}),
+            score_badge(t["score"]),
+        ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center",
+                  "marginBottom": "10px"}),
+        html.Div([
+            html.Div([
+                html.Div("ROI 30D", style={"color": MUTED, "fontFamily": FONT, "fontSize": "10px", "fontWeight": "600", "letterSpacing": "0.5px"}),
+                html.Div(f"{t['roi']:+.1f}%", style={"color": roi_color, "fontFamily": FONT, "fontSize": "18px", "fontWeight": "700"}),
+            ], style={"flex": "1"}),
+            html.Div([
+                html.Div("MDD", style={"color": MUTED, "fontFamily": FONT, "fontSize": "10px", "fontWeight": "600", "letterSpacing": "0.5px"}),
+                html.Div(f"{t['mdd']:.1f}%", style={"color": YELLOW if t['mdd'] < 10 else RED, "fontFamily": FONT, "fontSize": "18px", "fontWeight": "700"}),
+            ], style={"flex": "1"}),
+            html.Div([
+                html.Div("Sharpe", style={"color": MUTED, "fontFamily": FONT, "fontSize": "10px", "fontWeight": "600", "letterSpacing": "0.5px"}),
+                html.Div(f"{t['sharpe']:.2f}", style={"color": TEXT, "fontFamily": FONT, "fontSize": "18px", "fontWeight": "700"}),
+            ], style={"flex": "1"}),
+            html.Div([
+                html.Div("Est Daily", style={"color": MUTED, "fontFamily": FONT, "fontSize": "10px", "fontWeight": "600", "letterSpacing": "0.5px"}),
+                html.Div(f"${t['daily']:+.2f}", style={"color": GREEN, "fontFamily": FONT, "fontSize": "18px", "fontWeight": "700"}),
+            ], style={"flex": "1"}),
+        ], style={"display": "flex", "gap": "8px"}),
+        html.Div(f"Last update: {t['ts']}", style={"color": MUTED, "fontFamily": FONT,
+                                                    "fontSize": "11px", "marginTop": "8px"}),
+    ], style={
+        "background": BG, "border": f"1px solid {BORDER}",
+        "borderRadius": "8px", "padding": "14px 16px", "marginBottom": "10px",
+    })
+
+
+# ── App ───────────────────────────────────────────────────────────────────────
+app = Dash(__name__, title="Copy Trading Dashboard")
+
+app.index_string = '''
+<!DOCTYPE html><html><head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0a0a0a; font-family: 'Inter', sans-serif; }
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #141414; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+</style></head><body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>
+'''
+
+app.layout = html.Div([
+    dcc.Interval(id="tick", interval=REFRESH_MS, n_intervals=0),
+
+    # Header
+    html.Div([
+        html.Div([
+            html.Span("COPY TRADING", style={"color": YELLOW, "fontFamily": FONT,
+                                              "fontSize": "16px", "fontWeight": "700", "letterSpacing": "2px"}),
+            html.Span(" · ", style={"color": BORDER, "margin": "0 10px"}),
+            html.Span("● LIVE", style={"color": GREEN, "fontFamily": FONT, "fontSize": "13px", "fontWeight": "700"}),
+        ], style={"display": "flex", "alignItems": "center"}),
+        html.Div(id="hdr-time", style={"color": MUTED, "fontFamily": FONT, "fontSize": "13px"}),
+    ], style={
+        "display": "flex", "justifyContent": "space-between", "alignItems": "center",
+        "padding": "16px 24px", "borderBottom": f"1px solid {BORDER}",
+        "background": CARD, "marginBottom": "20px", "borderRadius": "12px",
+    }),
+
+    # Top stat row
+    html.Div([
+        card([
+            label("Est Daily P&L"),
+            html.Div(id="card-daily"),
+            html.Div(id="card-daily-sub"),
+        ], extra_style={"flex": "1"}),
+        card([
+            label("Daily Target Progress"),
+            dcc.Graph(id="gauge", config={"displayModeBar": False},
+                      style={"marginTop": "-10px"}),
+        ], extra_style={"flex": "1"}),
+        card([
+            label("Deployed Capital"),
+            html.Div(id="card-deployed"),
+            html.Div(id="card-deployed-sub"),
+        ], extra_style={"flex": "1"}),
+        card([
+            label("Active Traders"),
+            html.Div(id="card-traders"),
+            html.Div(id="card-traders-sub"),
+        ], extra_style={"flex": "1"}),
+    ], style={"display": "flex", "gap": "16px", "marginBottom": "16px"}),
+
+    # Middle row: active copies + daily chart
+    html.Div([
+        card([
+            label("Active Copies"),
+            html.Div(id="active-copies"),
+        ], extra_style={"width": "38%", "flexShrink": "0", "overflowY": "auto", "maxHeight": "340px"}),
+        card([
+            label("Estimated Daily P&L — Last 14 Days"),
+            dcc.Graph(id="daily-chart", config={"displayModeBar": False}),
+        ], extra_style={"flex": "1"}),
+    ], style={"display": "flex", "gap": "16px", "marginBottom": "16px"}),
+
+    # Event log
+    card([
+        label("Recent Events"),
+        html.Div(id="event-log"),
+    ]),
+
+], style={"padding": "20px", "minHeight": "100vh", "background": BG})
+
+
+# ── Callback ──────────────────────────────────────────────────────────────────
+@app.callback(
+    Output("hdr-time",          "children"),
+    Output("card-daily",        "children"),
+    Output("card-daily-sub",    "children"),
+    Output("gauge",             "figure"),
+    Output("card-deployed",     "children"),
+    Output("card-deployed-sub", "children"),
+    Output("card-traders",      "children"),
+    Output("card-traders-sub",  "children"),
+    Output("active-copies",     "children"),
+    Output("daily-chart",       "figure"),
+    Output("event-log",         "children"),
+    Input("tick",               "n_intervals"),
+)
+def refresh(_):
+    holders, pnl_series, events, raw_lines = parse_log()
+    latest = latest_pnl(pnl_series)
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    daily_est = latest["daily"]
+    deployed  = latest["deployed"]
+    n_traders = latest["n"]
+
+    # Daily P&L card
+    gap = DAILY_TARGET - daily_est
+    daily_color = GREEN if daily_est >= DAILY_TARGET else YELLOW if daily_est > 0 else RED
+    card_daily     = big_number(daily_est, color=daily_color)
+    card_daily_sub = sub(f"Gap to ${DAILY_TARGET:.0f} target: ${gap:+.2f}/day",
+                         GREEN if gap <= 0 else MUTED)
+
+    # Deployed card
+    dep_pct = (deployed / MAX_DEPLOYED * 100) if MAX_DEPLOYED else 0
+    card_dep     = html.Div(f"${deployed:.0f}", style={"color": TEXT, "fontFamily": FONT,
+                                                        "fontSize": "32px", "fontWeight": "700"})
+    card_dep_sub = sub(f"{dep_pct:.0f}% of ${MAX_DEPLOYED:.0f} max  ·  ${MAX_DEPLOYED-deployed:.0f} available")
+
+    # Traders card
+    card_tr     = html.Div(str(n_traders), style={"color": TEXT, "fontFamily": FONT,
+                                                    "fontSize": "32px", "fontWeight": "700"})
+    card_tr_sub = sub(f"of 5 max  ·  {5 - n_traders} slot(s) open")
+
+    # Active copy cards
+    if holders:
+        copy_cards = [active_trader_card(t) for t in sorted(holders.values(),
+                                                              key=lambda x: x["score"], reverse=True)]
+    else:
+        copy_cards = [html.Div("No active copies yet", style={"color": MUTED, "fontFamily": FONT,
+                                                               "fontSize": "13px"})]
+
+    # Event log (last 30 lines, coloured)
+    event_rows = []
+    for line in reversed(raw_lines[-30:]):
+        line = line.strip()
+        if not line:
+            continue
+        if "AUTO-ENTER" in line or "AUTO-EXIT" in line:
+            color = GREEN if "ENTER" in line else RED
+        elif "HOLDING" in line or "P&L" in line:
+            color = MUTED
+        elif "ERROR" in line or "failed" in line.lower():
+            color = RED
+        elif "ALERT" in line:
+            color = YELLOW
+        else:
+            color = MUTED
+        event_rows.append(html.Div(line, style={
+            "color": color, "fontFamily": "monospace", "fontSize": "12px",
+            "padding": "3px 0", "borderBottom": f"1px solid {BORDER}",
+            "whiteSpace": "nowrap", "overflow": "hidden", "textOverflow": "ellipsis",
+        }))
+
+    return (
+        now,
+        card_daily, card_daily_sub,
+        target_gauge(daily_est),
+        card_dep, card_dep_sub,
+        card_tr, card_tr_sub,
+        copy_cards,
+        daily_chart(pnl_series),
+        html.Div(event_rows, style={"maxHeight": "320px", "overflowY": "auto"}),
+    )
+
+
+if __name__ == "__main__":
+    print("\n" + "=" * 50)
+    print("   COPY TRADING DASHBOARD")
+    print("=" * 50)
+    print(f"   Log:  {LOG_PATH}")
+    print(f"   URL:  http://localhost:8050")
+    print(f"   Auto-refresh every {REFRESH_MS // 1000}s")
+    print("=" * 50 + "\n")
+    app.run(debug=False, host="0.0.0.0", port=8050)
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
 def _nzst():
