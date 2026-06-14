@@ -48,9 +48,10 @@ MIN_WIN_RATE  = 55.0   # minimum win rate % (if available)
 MIN_SHARPE    = 1.2    # minimum Sharpe ratio (raised for more consistent picks)
 MIN_SLOTS     = 1      # must have at least 1 free slot
 MIN_SCORE     = 65     # minimum composite score (0-100)
-REQUIRE_ROI_7D = False  # 7D ROI feed currently returns -999 for all; requiring
-                        # it would block every entry. Re-enable once the 7D
-                        # merge reliably populates roi_7.
+REQUIRE_ROI_7D = True   # Require a positive recent-form signal to enter. Uses
+                        # official 7D ROI when the trader is in the 7D top-list,
+                        # else the chartItems momentum slope (rising last 7 days).
+                        # Only blocks when BOTH signals are missing.
 
 # ---- Exit thresholds (auto-stop when ANY hit) ------------------------------
 EXIT_MDD           = 20.0   # hard exit: MDD crosses this
@@ -1503,13 +1504,42 @@ def fetch_traders() -> list:
     except Exception as e:
         log(f"[Fetch] 7D ROI merge failed: {e}")
 
-    log(f"Fetched {len(all_traders)} traders (with 7D ROI).")
+    matched = sum(1 for t in all_traders if "roi7D" in t)
+    log(f"Fetched {len(all_traders)} traders "
+        f"({matched} with official 7D ROI; rest use momentum slope).")
     return all_traders
 
 
 # ---------------------------------------------------------------------------
 # Trader normalisation
 # ---------------------------------------------------------------------------
+
+def _momentum_7d(chart_items):
+    """Recent-form signal from the 30D cumulative-ROI curve embedded in every
+    leaderboard row (chartItems = ~30 daily cumulative-ROI points).
+
+    Returns the change in cumulative ROI over the last ~7 calendar days, i.e.
+    how much the trader gained/lost this week measured on the 30D basis.
+    This is NOT Binance's official 7D ROI (different capital basis) — it is a
+    consistent, always-available momentum/direction signal for ranking. None
+    when the curve is missing/too short.
+    """
+    if not isinstance(chart_items, list) or len(chart_items) < 2:
+        return None
+    pts = [c for c in chart_items
+           if isinstance(c, dict) and c.get("value") is not None]
+    if len(pts) < 2:
+        return None
+    last = pts[-1]
+    today_v = float(last["value"])
+    last_ts = last.get("dateTime")
+    if last_ts:
+        target = last_ts - 7 * 86400000  # 7 days in ms
+        prev = min(pts, key=lambda c: abs((c.get("dateTime") or 0) - target))
+    else:
+        prev = pts[max(0, len(pts) - 8)]
+    return today_v - float(prev["value"])
+
 
 def parse_trader(t: dict) -> dict:
     pid = str(t.get("leadPortfolioId") or "")
@@ -1531,6 +1561,7 @@ def parse_trader(t: dict) -> dict:
         "days":        days,
         "roi_30":      roi,
         "roi_7":       float(t.get("roi7D") or t.get("roi_7d") or t.get("sevenDayRoi") or -999),
+        "mom_7":       _momentum_7d(t.get("chartItems")),
         "mdd":         mdd,
         "sharpe":      sharpe,
         "pnl_30":      pnl,
@@ -1569,6 +1600,15 @@ def score(p: dict) -> int:
         elif roi7 >= 0.0:  s += 5    # positive this week
         elif roi7 < -5.0:  s -= 15   # losing this week — big penalty
         elif roi7 < 0.0:   s -= 5    # slightly negative
+    # Recent-form momentum from the cumulative curve (available for everyone,
+    # even traders absent from the official 7D top-list). Confirms/denies that
+    # the 30D edge is still intact this week.
+    mom = p.get("mom_7")
+    if mom is not None:
+        if mom   >= 10.0: s += 10   # accelerating hard over the last week
+        elif mom >=  2.0: s += 5    # rising
+        elif mom <= -10.0: s -= 12  # falling sharply — momentum rolling over
+        elif mom <   0.0: s -= 5    # drifting down
     # Penalties
     if p["roi_30"] > MAX_ROI_30D:   s -= 25   # martingale / extreme leverage
     if p["mdd"]    > MAX_MDD:       s -= 30
@@ -1580,6 +1620,35 @@ def score(p: dict) -> int:
 def _is_already_copying(name: str) -> bool:
     return any(name.lower() in k.lower() or k.lower() in name.lower()
                for k in ACTIVE_COPIES)
+
+
+def _passes_momentum(p: dict) -> bool:
+    """Recent-form entry gate combining official 7D ROI and the momentum slope.
+
+    Priority 1: official 7D ROI (exact) — if known, the trader must not be
+                losing this week (>= MIN_ROI_7D).
+    Priority 2: when the official 7D ROI is unavailable (trader not in the 7D
+                top-list), fall back to the cumulative-curve momentum slope:
+                the last-7-day trend must be rising (>= 0).
+    If neither signal exists, honour REQUIRE_ROI_7D (block when required).
+    """
+    roi7 = p.get("roi_7", -999)
+    if roi7 != -999:
+        return roi7 >= MIN_ROI_7D
+    mom = p.get("mom_7")
+    if mom is not None:
+        return mom >= 0.0
+    return not REQUIRE_ROI_7D
+
+
+def _roi7_str(p: dict) -> str:
+    r = p.get("roi_7", -999)
+    return f"{r:5.1f}%" if r != -999 else "  n/a "
+
+
+def _mom7_str(p: dict) -> str:
+    m = p.get("mom_7")
+    return f"{m:+5.1f}" if m is not None else "  n/a"
 
 
 def _total_deployed() -> float:
@@ -1723,8 +1792,7 @@ def check(traders: list) -> None:
                 if (
                     p["mdd"]       <= MAX_MDD
                     and MIN_ROI_30D <= p["roi_30"] <= MAX_ROI_30D
-                    and (not REQUIRE_ROI_7D or p.get("roi_7", -999) != -999)
-                    and (p.get("roi_7", -999) == -999 or p.get("roi_7", 0) >= MIN_ROI_7D)
+                    and _passes_momentum(p)
                     and p["days"]  >= MIN_DAYS
                     and p["sharpe"] >= MIN_SHARPE
                     and p["slots_free"] >= MIN_SLOTS
@@ -1750,7 +1818,7 @@ def check(traders: list) -> None:
             proj_daily = CAPITAL_PER_TRADER * (p["roi_30"] / 100) / 30
             log(
                 f"[AUTO-ENTER] {p['name']} (score {sc}/100)\n"
-                f"  ROI30:{p['roi_30']:.1f}%  ROI7:{p.get('roi_7', float('nan')):.1f}%  MDD:{p['mdd']:.1f}%  Days:{p['days']}  "
+                f"  ROI30:{p['roi_30']:.1f}%  ROI7:{_roi7_str(p)}  Mom7:{_mom7_str(p)}  MDD:{p['mdd']:.1f}%  Days:{p['days']}  "
                 f"Sharpe:{p['sharpe']:.2f}  WinRate:{p['win_rate']:.0f}%  Slots:{p['slots_free']}\n"
                 f"  Deploying ${CAPITAL_PER_TRADER:.0f} → est ${proj_daily:.2f}/day",
                 alert=True,
@@ -1764,7 +1832,7 @@ def check(traders: list) -> None:
             top5 = sorted(parsed, key=score, reverse=True)[:5]
             log("  No auto-enter candidates this poll. Top 5 by score:")
             for p in top5:
-                log(f"    {p['name']:25} ROI30:{p['roi_30']:6.1f}%  ROI7:{p.get('roi_7', float('nan')):6.1f}%  MDD:{p['mdd']:5.1f}%  "
+                log(f"    {p['name']:25} ROI30:{p['roi_30']:6.1f}%  ROI7:{_roi7_str(p)}  Mom7:{_mom7_str(p)}  MDD:{p['mdd']:5.1f}%  "
                     f"Days:{p['days']:4}  Score:{score(p):3}  Slots:{p['slots_free']}")
     else:
         reason = f"slots full ({len(ACTIVE_COPIES)}/{MAX_COPIES})" if slots_available <= 0 \
@@ -1780,8 +1848,7 @@ def check(traders: list) -> None:
             (p for p in parsed
              if p["mdd"] <= MAX_MDD
              and MIN_ROI_30D <= p["roi_30"] <= MAX_ROI_30D
-             and (not REQUIRE_ROI_7D or p.get("roi_7", -999) != -999)
-             and (p.get("roi_7", -999) == -999 or p.get("roi_7", 0) >= MIN_ROI_7D)
+             and _passes_momentum(p)
              and p["days"] >= MIN_DAYS
              and p["sharpe"] >= MIN_SHARPE
              and p["slots_free"] >= MIN_SLOTS
