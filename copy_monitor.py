@@ -58,6 +58,16 @@ EXIT_ROI_FLOOR     = -5.0   # hard exit: 30D ROI goes negative beyond this
 EXIT_MDD_SPIKE     = 7.0    # exit if MDD rises by this much since we started copying
 EXIT_ROI_DROP      = 10.0   # exit if ROI drops by this much since peak
 
+# ---- Auto-rotation (upgrade weak idle holdings without a deposit) -----------
+# When at capacity and free balance is too low to add a new slot, swap an
+# IDLE, low-scoring holding for a much stronger available trader. Stopping the
+# weak copy frees its USDT, which funds the replacement — net deployment and
+# slot count are unchanged. Guardrails keep this conservative:
+ENABLE_ROTATION       = True
+ROTATION_SCORE_MARGIN = 12        # candidate must beat the held trader by ≥ this many points
+ROTATION_COOLDOWN     = 6 * 3600  # don't rotate the same slot more than once per 6 h
+ROTATION_FLAT_BAND    = 1.0       # only rotate when held REAL P&L is within ±$ this (idle/flat)
+
 # ---------------------------------------------------------------------------
 # Trader IDs for fully automated stop/start (no browser needed)
 # lead_id  = from the trader's profile URL
@@ -187,6 +197,9 @@ def _blacklist_trader(name: str, reason: str) -> None:
 # retrying a copy it can't fund every single poll. {name: epoch_seconds_until}.
 _INSUFFICIENT_FUNDS_UNTIL: dict = {}
 INSUFFICIENT_FUNDS_COOLDOWN = 3600  # 1 hour
+
+# Last time each slot was rotated (name -> epoch), to throttle auto-rotation.
+_LAST_ROTATION: dict = {}
 
 ENDPOINT = (
     "https://www.binance.com/bapi/futures/v1/friendly/"
@@ -1757,6 +1770,66 @@ def check(traders: list) -> None:
         reason = f"slots full ({len(ACTIVE_COPIES)}/{MAX_COPIES})" if slots_available <= 0 \
                  else f"budget exhausted (${_total_deployed():.0f}/${MAX_DEPLOYED:.0f})"
         log(f"  Auto-enter paused: {reason}")
+
+    # ── 4. Auto-rotation: upgrade an idle, low-scoring holding ──────────────
+    # The only no-deposit way to improve the portfolio when free balance is too
+    # low to add a slot: stop an idle weak copy (frees its USDT) and start a much
+    # stronger one. Conservative — never touches a copy with real profit/loss.
+    if ENABLE_ROTATION and ACTIVE_COPIES:
+        rot_candidates = sorted(
+            (p for p in parsed
+             if p["mdd"] <= MAX_MDD
+             and MIN_ROI_30D <= p["roi_30"] <= MAX_ROI_30D
+             and (not REQUIRE_ROI_7D or p.get("roi_7", -999) != -999)
+             and (p.get("roi_7", -999) == -999 or p.get("roi_7", 0) >= MIN_ROI_7D)
+             and p["days"] >= MIN_DAYS
+             and p["sharpe"] >= MIN_SHARPE
+             and p["slots_free"] >= MIN_SLOTS
+             and (p["win_rate"] == 0 or p["win_rate"] >= MIN_WIN_RATE)
+             and score(p) >= MIN_SCORE
+             and not _is_already_copying(p["name"])
+             and p["name"] not in BLACKLIST),
+            key=score, reverse=True,
+        )
+        best = rot_candidates[0] if rot_candidates else None
+        if best is not None:
+            best_sc = score(best)
+            # Pick the weakest IDLE held trader eligible to be replaced.
+            weakest = None
+            weakest_sc = None
+            for active_name in ACTIVE_COPIES:
+                held = next((p for n, p in by_name.items()
+                             if active_name.lower() in n.lower()), None)
+                if held is None:
+                    continue
+                rp = _real_for(active_name)
+                rp_val = rp.get("pnl") if rp else None
+                # Only rotate idle/flat positions — leave winners and real losers
+                # to ride / be handled by the risk-based exit logic.
+                if rp_val is not None and abs(rp_val) > ROTATION_FLAT_BAND:
+                    continue
+                if time.time() - _LAST_ROTATION.get(active_name, 0) < ROTATION_COOLDOWN:
+                    continue
+                held_sc = score(held)
+                if weakest_sc is None or held_sc < weakest_sc:
+                    weakest, weakest_sc = active_name, held_sc
+            if weakest is not None and best_sc - weakest_sc >= ROTATION_SCORE_MARGIN:
+                proj_daily = CAPITAL_PER_TRADER * (best["roi_30"] / 100) / 30
+                log(
+                    f"[AUTO-ROTATE] Upgrading slot: stopping {weakest} "
+                    f"(score {weakest_sc}, idle $0) → starting {best['name']} "
+                    f"(score {best_sc}, ROI {best['roi_30']:.1f}%, est ${proj_daily:.2f}/day).",
+                    alert=True,
+                )
+                beep(4)
+                _LAST_ROTATION[weakest] = time.time()
+                execute_stop(weakest)
+                # Only deploy the replacement if the stop actually freed the slot.
+                if weakest not in ACTIVE_COPIES:
+                    # Funds were just freed — clear any stale low-balance cooldown
+                    # so the replacement can fund immediately this poll.
+                    _INSUFFICIENT_FUNDS_UNTIL.pop(best["name"], None)
+                    execute_start(best["name"], best["pid"], CAPITAL_PER_TRADER)
 
 
 # ---------------------------------------------------------------------------
