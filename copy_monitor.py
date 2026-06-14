@@ -36,7 +36,7 @@ ACTIVE_COPIES = {
 CAPITAL_PER_TRADER = 125.0   # base USDT per trader
 MAX_COPIES         = 4        # never hold more than this many at once
 MAX_DEPLOYED       = 500.0    # hard cap on total USDT deployed across all copies
-DAILY_TARGET       = 2.14     # $15/wk goal ($2.14/day)
+DAILY_TARGET       = 5.0      # daily profit goal (aligned with dashboard)
 
 # ---- Entry thresholds (auto-start when ALL met) ----------------------------
 MIN_DAYS      = 30     # ≥30 days history (relaxed to find more candidates)
@@ -45,9 +45,12 @@ MIN_ROI_30D   = 15.0   # minimum 30-day ROI % (quality gate)
 MIN_ROI_7D    = 0.0    # minimum 7-day ROI % (momentum gate — must not be losing this week)
 MAX_ROI_30D   = 150.0  # cap — filters obvious martingale blow-ups
 MIN_WIN_RATE  = 55.0   # minimum win rate % (if available)
-MIN_SHARPE    = 1.0    # minimum Sharpe ratio
+MIN_SHARPE    = 1.2    # minimum Sharpe ratio (raised for more consistent picks)
 MIN_SLOTS     = 1      # must have at least 1 free slot
 MIN_SCORE     = 65     # minimum composite score (0-100)
+REQUIRE_ROI_7D = False  # 7D ROI feed currently returns -999 for all; requiring
+                        # it would block every entry. Re-enable once the 7D
+                        # merge reliably populates roi_7.
 
 # ---- Exit thresholds (auto-stop when ANY hit) ------------------------------
 EXIT_MDD           = 20.0   # hard exit: MDD crosses this
@@ -127,14 +130,9 @@ def _load_active_copies() -> None:
     except Exception as e:
         print(f"[WARN] Could not load ACTIVE_COPIES: {e}")
 
-MIN_DAYS      = 30     # kept for compatibility (now in config block above)
-MAX_MDD       = 15.0
-MIN_ROI_30D   = 8.0
-MAX_ROI_30D   = 150.0
-
-# Exit thresholds for traders you are actively copying
-EXIT_MDD      = 20.0
-EXIT_ROI_FLOOR = -5.0
+# NOTE: entry/exit thresholds are defined once in the config block above.
+# The previous duplicate definitions here silently lowered MIN_ROI_30D to 8%
+# — removed so the intended 15% quality gate actually applies.
 
 POLL_INTERVAL = 300    # seconds between polls (5 min)
 LOG_FILE      = r"C:\BinanceBot\copy_alerts.log"
@@ -1541,11 +1539,16 @@ def score(p: dict) -> int:
     elif p["roi_30"] >= MIN_ROI_30D: s += 15
     if p["days"]   >= 90:           s += 15
     elif p["days"] >= MIN_DAYS:     s += 8
-    if p["sharpe"] >= 1.0:          s += 10
+    if p["sharpe"] >= 1.5:          s += 10
     elif p["sharpe"] >= MIN_SHARPE: s += 5
     if p["win_rate"] >= 70.0:       s += 10
     elif p["win_rate"] >= MIN_WIN_RATE: s += 5
     if p["pnl_30"] >= 0:            s += 5
+    # Calmar-style risk-adjusted bonus: reward high ROI relative to drawdown.
+    calmar = p["roi_30"] / max(p["mdd"], 1.0)
+    if calmar   >= 5.0: s += 15   # strong return for very little drawdown
+    elif calmar >= 3.0: s += 8
+    elif calmar <  1.0: s -= 10   # ROI barely covers the drawdown taken
     # 7D momentum bonus/penalty
     roi7 = p.get("roi_7", -999)
     if roi7 != -999:
@@ -1707,6 +1710,7 @@ def check(traders: list) -> None:
                 if (
                     p["mdd"]       <= MAX_MDD
                     and MIN_ROI_30D <= p["roi_30"] <= MAX_ROI_30D
+                    and (not REQUIRE_ROI_7D or p.get("roi_7", -999) != -999)
                     and (p.get("roi_7", -999) == -999 or p.get("roi_7", 0) >= MIN_ROI_7D)
                     and p["days"]  >= MIN_DAYS
                     and p["sharpe"] >= MIN_SHARPE
