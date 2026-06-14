@@ -38,15 +38,17 @@ _PNL  = re.compile(_TS + r" \[P&L\] Est daily across (\d+) trader\(s\): \$([\d.+
 _ENTER= re.compile(_TS + r" \[AUTO-ENTER\] (.+?) \(score (\d+)/100\)")
 _EXIT = re.compile(_TS + r" \[AUTO-EXIT\] (.+?): (.+)")
 _START= re.compile(_TS + r" \[AUTO-START\] .+ -> (\w+): (.+)")
+_REALPNL = re.compile(_TS + r" \[REAL-PNL\] Actual copy P&L across (\d+) position\(s\): \$([\d.+-]+)(?: on \$([\d.]+) principal)?")
 
 def parse_log():
     if not LOG_PATH.exists():
-        return {}, [], [], []
+        return {}, [], [], [], []
 
     lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
 
     holders   = {}   # name -> latest HOLDING data
     pnl_series= []   # list of (ts, daily_est)
+    real_series = []  # list of {ts, total_pnl, principal} from REAL-PNL lines
     events    = []   # recent notable events (enter/exit/alert)
     raw_lines = lines[-120:]  # last 120 lines for event feed
 
@@ -72,6 +74,16 @@ def parse_log():
             })
             continue
 
+        m = _REALPNL.search(line)
+        if m:
+            ts, n_pos, total_pnl, principal = m.groups()
+            real_series.append({
+                "ts": ts, "total_pnl": float(total_pnl),
+                "principal": float(principal) if principal else 0.0,
+                "n": int(n_pos),
+            })
+            continue
+
         m = _ENTER.search(line)
         if m:
             events.append({"ts": m.group(1), "type": "ENTER", "text": f"Auto-entered {m.group(2)} (score {m.group(3)})"})
@@ -82,11 +94,15 @@ def parse_log():
             events.append({"ts": m.group(1), "type": "EXIT", "text": f"Auto-exited {m.group(2)}: {m.group(3)[:60]}"})
             continue
 
-    return holders, pnl_series, events, raw_lines
+    return holders, pnl_series, real_series, events, raw_lines
 
 
 def latest_pnl(pnl_series):
     return pnl_series[-1] if pnl_series else {"daily": 0.0, "n": 0, "deployed": 0.0}
+
+
+def latest_real(real_series):
+    return real_series[-1] if real_series else None
 
 
 # ── Chart builders ────────────────────────────────────────────────────────────
@@ -122,6 +138,88 @@ def daily_chart(pnl_series):
         yaxis=dict(gridcolor=BORDER, zeroline=False, tickformat="$,.2f",
                    tickfont=dict(size=10, color=MUTED)),
         showlegend=False, height=240, bargap=0.3,
+    )
+    return fig
+
+
+def growth_chart(pnl_series, base_capital, real_series=None):
+    """Cumulative portfolio growth (observed) plus a forward projection at the
+    current daily rate, compared against the target-rate trajectory.
+    When real copier P&L is available, overlay actual portfolio value."""
+    fig = go.Figure()
+    if not pnl_series:
+        fig.add_annotation(text="No data yet", xref="paper", yref="paper",
+                           x=0.5, y=0.5, showarrow=False,
+                           font=dict(color=MUTED, size=13, family=FONT))
+    else:
+        # One reading per day (last of that day) -> per-day $ earn estimate.
+        by_day = {}
+        for p in pnl_series:
+            by_day[p["ts"][:10]] = p["daily"]
+        days = sorted(by_day.keys())
+        dts  = [datetime.strptime(d, "%Y-%m-%d") for d in days]
+
+        # Observed cumulative value = base capital + running sum of daily est.
+        cum = []
+        running = float(base_capital)
+        for d in days:
+            running += by_day[d]
+            cum.append(running)
+
+        # Observed growth line.
+        fig.add_trace(go.Scatter(
+            x=dts, y=cum, mode="lines+markers", name="Portfolio",
+            line=dict(color=YELLOW, width=2.5),
+            marker=dict(size=5, color=YELLOW),
+            fill="tozeroy", fillcolor="rgba(245,197,24,0.07)",
+            hovertemplate="<b>%{x|%d %b}</b><br>Value: $%{y:,.2f}<extra></extra>",
+        ))
+
+        # Forward projection at the latest daily rate (next 90 days).
+        latest_daily = pnl_series[-1]["daily"]
+        horizon = 90
+        proj_dts = [dts[-1] + timedelta(days=i) for i in range(0, horizon + 1)]
+        proj_y   = [cum[-1] + latest_daily * i for i in range(0, horizon + 1)]
+        fig.add_trace(go.Scatter(
+            x=proj_dts, y=proj_y, mode="lines", name="Projection (current rate)",
+            line=dict(color=GREEN, width=2, dash="dash"),
+            hovertemplate="<b>%{x|%d %b}</b><br>Projected: $%{y:,.2f}<extra></extra>",
+        ))
+
+        # Target-rate trajectory across the full horizon.
+        all_dts = dts + proj_dts[1:]
+        target_y = [float(base_capital) + DAILY_TARGET * i for i in range(len(all_dts))]
+        fig.add_trace(go.Scatter(
+            x=all_dts, y=target_y, mode="lines", name=f"${DAILY_TARGET:.0f}/day target",
+            line=dict(color=MUTED, width=1, dash="dot"),
+            hovertemplate="<b>%{x|%d %b}</b><br>Target: $%{y:,.2f}<extra></extra>",
+        ))
+
+        # REAL portfolio value overlay (actual copier P&L from Binance).
+        if real_series:
+            real_by_day = {}
+            for r in real_series:
+                real_by_day[r["ts"][:10]] = r
+            rdays = sorted(real_by_day.keys())
+            rdts  = [datetime.strptime(d, "%Y-%m-%d") for d in rdays]
+            ry    = [float(base_capital) + real_by_day[d]["total_pnl"] for d in rdays]
+            fig.add_trace(go.Scatter(
+                x=rdts, y=ry, mode="lines+markers", name="REAL portfolio",
+                line=dict(color=BLUE, width=2.5),
+                marker=dict(size=6, color=BLUE),
+                hovertemplate="<b>%{x|%d %b}</b><br>Real value: $%{y:,.2f}<extra></extra>",
+            ))
+
+    fig.update_layout(
+        paper_bgcolor=CARD, plot_bgcolor=CARD,
+        font=dict(color=MUTED, family=FONT, size=11),
+        margin=dict(l=55, r=15, t=15, b=40),
+        xaxis=dict(gridcolor=BORDER, zeroline=False, tickfont=dict(size=10, color=MUTED)),
+        yaxis=dict(gridcolor=BORDER, zeroline=False, tickformat="$,.0f",
+                   tickfont=dict(size=10, color=MUTED)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
+                    font=dict(size=10, color=MUTED), bgcolor="rgba(0,0,0,0)"),
+        height=300, hovermode="x unified",
     )
     return fig
 
@@ -300,6 +398,12 @@ app.layout = html.Div([
         ], extra_style={"flex": "1"}),
     ], style={"display": "flex", "gap": "16px", "marginBottom": "16px"}),
 
+    # Growth trajectory
+    card([
+        label("Growth Trajectory — Cumulative & 90-Day Projection"),
+        dcc.Graph(id="growth-chart", config={"displayModeBar": False}),
+    ], extra_style={"marginBottom": "16px"}),
+
     # Event log
     card([
         label("Recent Events"),
@@ -321,12 +425,14 @@ app.layout = html.Div([
     Output("card-traders-sub",  "children"),
     Output("active-copies",     "children"),
     Output("daily-chart",       "figure"),
+    Output("growth-chart",      "figure"),
     Output("event-log",         "children"),
     Input("tick",               "n_intervals"),
 )
 def refresh(_):
-    holders, pnl_series, events, raw_lines = parse_log()
+    holders, pnl_series, real_series, events, raw_lines = parse_log()
     latest = latest_pnl(pnl_series)
+    real = latest_real(real_series)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     daily_est = latest["daily"]
@@ -337,8 +443,14 @@ def refresh(_):
     gap = DAILY_TARGET - daily_est
     daily_color = GREEN if daily_est >= DAILY_TARGET else YELLOW if daily_est > 0 else RED
     card_daily     = big_number(daily_est, color=daily_color)
-    card_daily_sub = sub(f"Gap to ${DAILY_TARGET:.0f} target: ${gap:+.2f}/day",
-                         GREEN if gap <= 0 else MUTED)
+    if real is not None:
+        rp = real["total_pnl"]
+        card_daily_sub = sub(
+            f"REAL P&L: ${rp:+.2f} on ${real['principal']:.0f}  ·  est gap ${gap:+.2f}/day",
+            GREEN if rp >= 0 else RED)
+    else:
+        card_daily_sub = sub(f"Gap to ${DAILY_TARGET:.0f} target: ${gap:+.2f}/day",
+                             GREEN if gap <= 0 else MUTED)
 
     # Deployed card
     dep_pct = (deployed / MAX_DEPLOYED * 100) if MAX_DEPLOYED else 0
@@ -388,8 +500,7 @@ def refresh(_):
         card_dep, card_dep_sub,
         card_tr, card_tr_sub,
         copy_cards,
-        daily_chart(pnl_series),
-        html.Div(event_rows, style={"maxHeight": "320px", "overflowY": "auto"}),
+        daily_chart(pnl_series),        growth_chart(pnl_series, deployed if deployed > 0 else MAX_DEPLOYED, real_series),        html.Div(event_rows, style={"maxHeight": "320px", "overflowY": "auto"}),
     )
 
 

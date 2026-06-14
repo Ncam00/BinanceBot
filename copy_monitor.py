@@ -14,6 +14,7 @@ Run: C:\\python314\\python.exe -u C:\\BinanceBot\\copy_monitor.py
 """
 
 import os
+import re
 import time
 import winsound
 from datetime import datetime
@@ -25,7 +26,11 @@ from datetime import datetime
 WATCHLIST     = {}   # manual watchlist (auto-discovery now handles entry)
 
 # Traders you are CURRENTLY copying. Updated automatically on auto-start/stop.
-ACTIVE_COPIES = {"\u9ed1\u76ae\u54e5\u54e5": 100.0}   # name -> USDT allocated
+# Source of truth is active_copies.json (loaded at startup); this is only the
+# fallback seed if that file is missing.
+ACTIVE_COPIES = {
+    "低调交易员": 125.0,
+}   # name -> USDT allocated
 
 # ---- Position sizing -------------------------------------------------------
 CAPITAL_PER_TRADER = 125.0   # base USDT per trader
@@ -91,6 +96,37 @@ def _load_trader_ids() -> None:
     except Exception as e:
         print(f"[WARN] Could not load TRADER_IDS: {e}")
 
+
+def _persist_active_copies() -> None:
+    """Save ACTIVE_COPIES to disk so live positions survive restarts."""
+    try:
+        import json as _j
+        with open(ACTIVE_COPIES_FILE, "w", encoding="utf-8") as f:
+            _j.dump(ACTIVE_COPIES, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[WARN] Could not persist ACTIVE_COPIES: {e}")
+
+
+def _load_active_copies() -> None:
+    """Load active copies from disk (source of truth across restarts).
+    If no file exists yet, seed it from the hardcoded defaults."""
+    try:
+        import json as _j
+        if os.path.exists(ACTIVE_COPIES_FILE):
+            with open(ACTIVE_COPIES_FILE, encoding="utf-8") as f:
+                saved = _j.load(f)
+            if isinstance(saved, dict):
+                ACTIVE_COPIES.clear()
+                for name, amt in saved.items():
+                    try:
+                        ACTIVE_COPIES[name] = float(amt)
+                    except Exception:
+                        continue
+        else:
+            _persist_active_copies()
+    except Exception as e:
+        print(f"[WARN] Could not load ACTIVE_COPIES: {e}")
+
 MIN_DAYS      = 30     # kept for compatibility (now in config block above)
 MAX_MDD       = 15.0
 MIN_ROI_30D   = 8.0
@@ -105,8 +141,10 @@ LOG_FILE      = r"C:\BinanceBot\copy_alerts.log"
 DATA_DIR      = r"C:\BinanceBot\playwright_session"   # logged-in Chrome profile
 COOKIE_FILE   = r"C:\BinanceBot\session_cookies.json" # backup cookies
 TRADER_IDS_FILE = r"C:\BinanceBot\trader_ids.json"     # persisted copy_ids
+ACTIVE_COPIES_FILE = r"C:\BinanceBot\active_copies.json"  # persisted live positions
 SCREENSHOT_DIR = r"C:\BinanceBot\screenshots"          # UI-action proof shots
 BLACKLIST_FILE = r"C:\BinanceBot\blacklist.json"        # traders we cannot copy (private/error)
+REAL_PNL_FILE  = r"C:\BinanceBot\real_pnl.json"         # latest REAL copier P&L snapshot (for dashboard)
 
 # When True, the bot performs every step of a copy/stop EXCEPT clicking the
 # final Confirm button. Use to verify selectors before risking real money.
@@ -145,6 +183,12 @@ def _blacklist_trader(name: str, reason: str) -> None:
         log(f"[BLACKLIST] {name} added ({reason}).", alert=True)
     except Exception:
         print(f"[BLACKLIST] {name} added ({reason}).")
+
+
+# Per-trader cooldown after an insufficient-balance abort, so the bot stops
+# retrying a copy it can't fund every single poll. {name: epoch_seconds_until}.
+_INSUFFICIENT_FUNDS_UNTIL: dict = {}
+INSUFFICIENT_FUNDS_COOLDOWN = 3600  # 1 hour
 
 ENDPOINT = (
     "https://www.binance.com/bapi/futures/v1/friendly/"
@@ -288,16 +332,25 @@ def _clear_auth_failure() -> None:
 # JS helper for authenticated BAPI calls (reuses copy_monitor's own page)
 _TRADE_JS = """
 async (args) => {
+    const getCookie = (name) => {
+        const m = document.cookie.match('(^|;)\\\\s*' + name + '\\\\s*=\\\\s*([^;]+)');
+        return m ? m.pop() : '';
+    };
+    const headers = {
+        'content-type': 'application/json',
+        'clienttype': 'web',
+        'x-source': 'web',
+        'bnc-location': 'BINANCE',
+        'lang': 'en',
+    };
+    const csrf = getCookie('csrftoken') || getCookie('cr00');
+    if (csrf) headers['csrftoken'] = csrf;
+    const uuid = getCookie('bnc-uuid');
+    if (uuid) headers['bnc-uuid'] = uuid;
     const r = await fetch(args.url, {
         method: 'POST',
         credentials: 'include',
-        headers: {
-            'content-type': 'application/json',
-            'clienttype': 'web',
-            'x-source': 'web',
-            'bnc-location': 'BINANCE',
-            'lang': 'en',
-        },
+        headers: headers,
         body: JSON.stringify(args.body),
     });
     try { return await r.json(); }
@@ -362,6 +415,224 @@ def _screenshot(label: str, full_page: bool = True, page=None) -> str:
     except Exception as e:
         log(f"[screenshot] failed: {e}")
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Real copy-portfolio P&L (reads YOUR actual positions, not lead estimates)
+# ---------------------------------------------------------------------------
+
+# Candidate field names Binance uses for copier PnL / principal / roi.
+# Confirmed live fields (user-spot-copy-detail-list): realizedPnl, unrealizedPnl,
+# netProfit, copyBalance, currentAvailableAmount, leadNickName. Scanned in
+# priority order with a fuzzy contains-match fallback for resilience.
+_PNL_FIELD_KEYS = [
+    "netProfit", "totalCopyPnl", "copyPnl", "totalPnl", "totalProfit",
+    "totalIncome", "income", "profit", "pnl",
+]
+_PRINCIPAL_FIELD_KEYS = [
+    "copyBalance", "currentAvailableAmount", "totalCopyAmount", "copyAmount",
+    "marginBalance", "initInvestAsset", "investAmount", "principal",
+    "totalAmount", "amount",
+]
+_ROI_FIELD_KEYS = ["copyRoi", "totalRoi", "roiValue", "roi"]
+
+
+def _coerce_float(v):
+    try:
+        if v in (None, ""):
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
+def _extract_pnl_fields(item: dict) -> dict:
+    """Defensively pull PnL / principal / ROI numbers from a portfolio item."""
+    out = {"pnl": None, "principal": None, "roi": None}
+
+    # Preferred: true total P&L = realized + unrealized (confirmed fields).
+    realized = _coerce_float(item.get("realizedPnl"))
+    unrealized = _coerce_float(item.get("unrealizedPnl"))
+    if realized is not None or unrealized is not None:
+        out["pnl"] = (realized or 0.0) + (unrealized or 0.0)
+
+    for keys, dest in ((_PNL_FIELD_KEYS, "pnl"),
+                       (_PRINCIPAL_FIELD_KEYS, "principal"),
+                       (_ROI_FIELD_KEYS, "roi")):
+        if out[dest] is not None:
+            continue
+        for k in keys:
+            if k in item:
+                val = _coerce_float(item[k])
+                if val is not None:
+                    out[dest] = val
+                    break
+    # Fuzzy fallback for PnL if no known key matched
+    if out["pnl"] is None:
+        for k, v in item.items():
+            kl = str(k).lower()
+            if ("pnl" in kl or "profit" in kl or "income" in kl) and "rate" not in kl:
+                val = _coerce_float(v)
+                if val is not None:
+                    out["pnl"] = val
+                    break
+    # Derive ROI from pnl/principal when not provided directly.
+    if out["roi"] is None and out["pnl"] is not None and out["principal"]:
+        try:
+            out["roi"] = out["pnl"] / out["principal"] * 100
+        except Exception:
+            pass
+    return out
+
+
+def _parse_copy_items(items, result: dict) -> None:
+    """Parse a list of copy-portfolio items into the result dict (in place)."""
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        # Only real position rows carry balance/PnL fields. Skip noise endpoints
+        # like get-lead-slot-reminder (nickname/leadPortfolioId only).
+        if not any(k in item for k in
+                   ("copyBalance", "realizedPnl", "unrealizedPnl", "netProfit")):
+            continue
+        # Skip CLOSED/ENDED copies. The detail-list returns full history; a
+        # finished copy has a truthy endTime and/or a closedReason set.
+        status = item.get("portfolioStatus") or item.get("status")
+        if isinstance(status, str) and status.upper() in (
+                "CLOSED", "ENDED", "STOP", "STOPPED", "FINISHED"):
+            continue
+        end_time = item.get("endTime")
+        try:
+            if end_time and float(end_time) > 0:
+                continue
+        except Exception:
+            pass
+        if item.get("closedReason"):
+            continue
+        name = (item.get("leadNickName") or item.get("nickname")
+                or item.get("leadNickname") or item.get("name") or "")
+        fields = _extract_pnl_fields(item)
+        entry = {
+            **fields,
+            "lead_id": str(item.get("leadPortfolioId") or ""),
+            "copy_id": str(item.get("copyPortfolioId")
+                           or item.get("portfolioId") or item.get("id") or ""),
+            "name": name,
+        }
+        key = name or entry["copy_id"]
+        if key:
+            result[key] = entry
+
+
+def _fetch_my_copy_positions() -> dict:
+    """Return {name: {pnl, principal, roi, lead_id, copy_id, name}} for YOUR
+    real ongoing copy portfolios. Empty dict if unauthenticated/unavailable.
+
+    The futures-private BAPI rejects hand-crafted fetches ("Please log in
+    first") because the SPA attaches signing headers we can't reproduce. So
+    instead we capture the copy-portfolio responses the page itself fires when
+    we open the "my copies" page, and parse those.
+    """
+    if not _check_auth():
+        return {}
+    result: dict = {}
+    captured: list = []
+
+    def _on_response(resp):
+        try:
+            url = resp.url
+            if resp.status == 200 and ("copy-portfolio" in url
+                                       or "copy-detail" in url
+                                       or "detail-list" in url):
+                captured.append(resp)
+        except Exception:
+            pass
+
+    def _has_detail(resp_list):
+        """True once the real position detail-list response is captured."""
+        for r in resp_list:
+            if "detail-list" in r.url or "copy-detail" in r.url:
+                return True
+        return False
+
+    page = _get_page()
+    page.on("response", _on_response)
+    try:
+        for url in (
+            "https://www.binance.com/en/copy-trading/copy-management?biz=spot",
+            "https://www.binance.com/en/copy-trading/spot?tab=mine",
+        ):
+            try:
+                page.goto(url, wait_until="networkidle", timeout=25000)
+            except Exception:
+                continue
+            # Detect a logged-out redirect to the accounts/login domain.
+            if "accounts.binance.com" in (page.url or ""):
+                if not getattr(_fetch_my_copy_positions, "_warned_logout", False):
+                    log("[REAL-PNL] Binance session is logged out for private "
+                        "actions — please log in again in the bot's browser "
+                        "window. Real P&L and auto-entry are blocked until then.",
+                        alert=True)
+                    _fetch_my_copy_positions._warned_logout = True
+                    _record_auth_failure()
+                return {}
+            try:
+                page.wait_for_timeout(4000)
+            except Exception:
+                pass
+            # Only stop once we have the real detail-list (not just noise XHRs).
+            if _has_detail(captured):
+                break
+    finally:
+        try:
+            page.remove_listener("response", _on_response)
+        except Exception:
+            pass
+
+    # A successful read means the private session works again — clear warning.
+    _fetch_my_copy_positions._warned_logout = False
+
+    for resp in captured:
+        try:
+            data = resp.json()
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        tail = resp.url.split("/")[-1].split("?")[0]
+        code = data.get("code")
+        payload = data.get("data") or {}
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = payload.get("list") or payload.get("portfolios") or []
+        else:
+            items = []
+        # Only the detail-list carries real positions; ignore other XHRs.
+        if code == "000000" and items and ("detail-list" in resp.url
+                                           or "copy-detail" in resp.url):
+            _parse_copy_items(items, result)
+
+    return result
+
+
+def _persist_real_pnl(positions: dict, total_pnl: float, total_principal: float) -> None:
+    """Write the latest real-PnL snapshot to disk for the dashboard."""
+    try:
+        import json as _j
+        snap = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "total_pnl": round(total_pnl, 4),
+            "total_principal": round(total_principal, 4),
+            "positions": {
+                k: {kk: vv for kk, vv in v.items() if kk in ("pnl", "principal", "roi")}
+                for k, v in positions.items()
+            },
+        }
+        with open(REAL_PNL_FILE, "w", encoding="utf-8") as f:
+            _j.dump(snap, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log(f"[REAL-PNL] persist failed: {e}")
 
 
 def _click_first_visible(page, selectors, timeout_each_ms: int = 4000) -> bool:
@@ -464,6 +735,14 @@ def execute_start(trader_name: str, lead_portfolio_id: str, amount_usdt: float) 
     """Start copying a trader by driving the Binance UI directly."""
     if not _ensure_logged_in():
         log(f"[AUTO-START] {trader_name}: not authenticated — skipping.", alert=True)
+        return
+
+    # Skip if this trader is in an insufficient-funds cooldown.
+    until = _INSUFFICIENT_FUNDS_UNTIL.get(trader_name, 0)
+    if until and time.time() < until:
+        mins = int((until - time.time()) / 60)
+        log(f"[AUTO-START] {trader_name}: skipping — insufficient free balance "
+            f"(cooldown {mins} min remaining). Free up USDT to fund this copy.")
         return
 
     # Hard cap as a safety net regardless of caller
@@ -663,6 +942,38 @@ def execute_start(trader_name: str, lead_portfolio_id: str, amount_usdt: float) 
         beep(5)
         return
 
+    # Step 2c — detect insufficient balance BEFORE the checkbox/Copy step. The
+    # page renders "Your balance is too low to perform this transaction" and
+    # keeps the Copy button disabled, which would otherwise be misreported as a
+    # checkbox failure. Read the available USDT and back off with a cooldown.
+    try:
+        page_text_bal = (page.content() or "")
+    except Exception:
+        page_text_bal = ""
+    low_markers = ("balance is too low", "your balance is too low",
+                   "insufficient balance", "insufficient asset")
+    if any(m in page_text_bal.lower() for m in low_markers):
+        avail = ""
+        try:
+            m = re.search(r"Available\s*([\d.,]+)\s*USDT", page_text_bal)
+            if m:
+                avail = m.group(1)
+        except Exception:
+            pass
+        _INSUFFICIENT_FUNDS_UNTIL[trader_name] = time.time() + INSUFFICIENT_FUNDS_COOLDOWN
+        _screenshot(f"start_low_balance_{trader_name}", page=page)
+        log(f"[AUTO-START] {trader_name}: insufficient free balance to fund "
+            f"${amount_str} copy"
+            + (f" (only {avail} USDT available)" if avail else "")
+            + f". Backing off {INSUFFICIENT_FUNDS_COOLDOWN // 60} min. "
+            "Deposit/free up USDT to add this trader.", alert=True)
+        try:
+            if page.context and len(page.context.pages) > 1:
+                page.close()
+        except Exception:
+            pass
+        return
+
     # Step 3 — tick the agreement checkbox. Verify by polling Copy button enabled state.
     def _copy_button_enabled() -> bool:
         try:
@@ -802,22 +1113,30 @@ def execute_start(trader_name: str, lead_portfolio_id: str, amount_usdt: float) 
 
     log(f"[AUTO-START] {trader_name}: copy started ({amount_usdt} USDT) copy_id={copy_id or '(unknown)'}. Screenshot: {shot}", alert=True)
     ACTIVE_COPIES[trader_name] = amount_usdt
+    _persist_active_copies()
     TRADER_IDS[trader_name] = {"lead_id": lead_portfolio_id, "copy_id": copy_id}
     _persist_trader_ids()
     beep(3)
 
 
 def execute_stop(trader_name: str) -> None:
-    """Stop copying a trader by driving the Binance UI."""
+    """Stop copying a trader via the real copy-management page.
+
+    Binance moved the old /my/copy-trading/spot/portfolios URL (now a 404).
+    The live page is /copy-trading/copy-management?biz=spot, where each ongoing
+    copy is a card with Adjust Balance / Pause / Settings + an icon-only power
+    (Stop) button. Clicking it opens a modal whose primary button closes the
+    copy (POST .../copy-portfolio/close).
+    """
     if not _ensure_logged_in():
         log(f"[AUTO-STOP] {trader_name}: not authenticated — skipping.", alert=True)
         return
 
     page = _get_page()
-    portfolios_url = "https://www.binance.com/en/my/copy-trading/spot/portfolios"
-    log(f"[AUTO-STOP] {trader_name}: opening {portfolios_url}")
+    mgmt_url = "https://www.binance.com/en/copy-trading/copy-management?biz=spot"
+    log(f"[AUTO-STOP] {trader_name}: opening {mgmt_url}")
     try:
-        page.goto(portfolios_url, wait_until="domcontentloaded", timeout=30_000)
+        page.goto(mgmt_url, wait_until="domcontentloaded", timeout=30_000)
     except Exception as e:
         log(f"[AUTO-STOP] {trader_name}: navigation failed: {e}", alert=True)
         return
@@ -826,38 +1145,77 @@ def execute_stop(trader_name: str) -> None:
     except Exception:
         pass
 
-    # Find the row that contains the trader name, then click Stop within it
+    # Let the ongoing-copies list render and lazy-load.
+    for _ in range(4):
+        try:
+            page.mouse.wheel(0, 1200)
+        except Exception:
+            pass
+        time.sleep(0.8)
     try:
-        row = page.locator(f"text={trader_name}").first
-        row.wait_for(state="visible", timeout=8000)
+        page.evaluate("window.scrollTo(0, 0)")
     except Exception:
-        log(f"[AUTO-STOP] {trader_name}: trader row not found on portfolios page.", alert=True)
+        pass
+    time.sleep(0.8)
+
+    try:
+        page_text = page.content() or ""
+    except Exception:
+        page_text = ""
+
+    # If the trader is no longer in the ongoing list, the copy is already
+    # closed — clear it so the exit logic stops re-firing every poll.
+    if trader_name not in page_text:
+        log(f"[AUTO-STOP] {trader_name}: not in ongoing copies — already closed. "
+            f"Clearing from ACTIVE_COPIES.", alert=True)
+        _screenshot(f"stop_already_closed_{trader_name}")
+        ACTIVE_COPIES.pop(trader_name, None)
+        _entry_snapshots.pop(trader_name, None)
+        _persist_active_copies()
+        beep(2)
+        return
+
+    # Isolate THIS trader's card: nearest ancestor div that owns a Settings
+    # button. This avoids grabbing a parent that spans multiple cards.
+    try:
+        name_el = page.get_by_text(trader_name, exact=False).first
+        name_el.wait_for(state="visible", timeout=6000)
+        card = name_el.locator(
+            "xpath=ancestor::div[.//button[contains(normalize-space(.),'Settings')]][1]"
+        ).first
+        card.wait_for(state="visible", timeout=4000)
+    except Exception:
+        log(f"[AUTO-STOP] {trader_name}: card not isolated on management page. "
+            f"MANUAL ACTION NEEDED — stop this copy on Binance by hand.", alert=True)
         _screenshot(f"stop_fail_row_{trader_name}")
         beep(5)
         return
 
-    # Walk up to the row container then click stop within it
-    clicked = False
+    # The Stop control is the icon-only (empty-text) button in this card.
+    stop_btn = None
     try:
-        container = row.locator("xpath=ancestor::*[self::tr or self::div][1]")
-        for sel in _STOP_BUTTON_SELECTORS:
-            btn = container.locator(sel).first
+        cbtns = card.locator("button")
+        for i in range(cbtns.count()):
+            b = cbtns.nth(i)
             try:
-                btn.wait_for(state="visible", timeout=2000)
-                btn.click()
-                clicked = True
-                break
+                if b.is_visible() and (b.inner_text() or "").strip() == "":
+                    stop_btn = b  # last empty-text visible button = power icon
             except Exception:
                 continue
     except Exception:
         pass
 
-    if not clicked:
-        # Fallback: click any visible Stop button on the page
-        clicked = _click_first_visible(page, _STOP_BUTTON_SELECTORS, timeout_each_ms=4000)
+    if stop_btn is None:
+        log(f"[AUTO-STOP] {trader_name}: Stop (power) icon not found in card.", alert=True)
+        _screenshot(f"stop_fail_btn_{trader_name}")
+        beep(5)
+        return
 
-    if not clicked:
-        log(f"[AUTO-STOP] {trader_name}: 'Stop' button not found.", alert=True)
+    try:
+        stop_btn.scroll_into_view_if_needed()
+        stop_btn.click()
+    except Exception as e:
+        log(f"[AUTO-STOP] {trader_name}: could not click Stop icon: {e}", alert=True)
         _screenshot(f"stop_fail_btn_{trader_name}")
         beep(5)
         return
@@ -874,17 +1232,54 @@ def execute_stop(trader_name: str) -> None:
         beep(2)
         return
 
-    confirm_clicked = _click_first_visible(page, _CONFIRM_BUTTON_SELECTORS, timeout_each_ms=4000)
-    if not confirm_clicked:
-        log(f"[AUTO-STOP] {trader_name}: confirm button not found in stop modal.", alert=True)
-        _screenshot(f"stop_fail_confirm_{trader_name}")
+    # Click the modal's primary button and verify via the close API response.
+    confirm_selectors = [
+        "div[role='dialog'] button.bn-button__primary",
+        "button.bn-button__primary:has-text('Stop')",
+        "button.bn-button__primary:has-text('Confirm')",
+        "button:has-text('Stop')",
+        "button:has-text('Confirm')",
+    ]
+    api_ok = False
+    api_msg = ""
+    try:
+        with page.expect_response(
+            lambda r: ("copy-portfolio/close" in r.url or
+                       ("copy" in r.url and r.request.method == "POST" and
+                        any(k in r.url.lower() for k in ("close", "stop", "end", "cancel")))),
+            timeout=20_000,
+        ) as resp_info:
+            if not _click_first_visible(page, confirm_selectors, timeout_each_ms=4000):
+                log(f"[AUTO-STOP] {trader_name}: confirm button not found in stop modal.", alert=True)
+                _screenshot(f"stop_fail_confirm_{trader_name}")
+                beep(5)
+                return
+        resp = resp_info.value
+        try:
+            data = resp.json() or {}
+            api_msg = str(data.get("message") or data.get("msg") or "")
+            code = data.get("code")
+            if data.get("success") is True or code in (None, "000000", 0, "0"):
+                api_ok = True
+        except Exception:
+            api_ok = resp.ok
+    except Exception as e:
+        log(f"[AUTO-STOP] {trader_name}: stop response not captured: {e}", alert=True)
+        _screenshot(f"stop_fail_response_{trader_name}")
         beep(5)
         return
 
     time.sleep(3)
     shot = _screenshot(f"stop_after_{trader_name}")
-    log(f"[AUTO-STOP] {trader_name}: stop submitted. Screenshot: {shot}", alert=True)
+    if not api_ok:
+        log(f"[AUTO-STOP] {trader_name}: stop API rejected ({api_msg or 'no message'}). Screenshot: {shot}", alert=True)
+        beep(5)
+        return
+
+    log(f"[AUTO-STOP] {trader_name}: stop confirmed (copy closed). Screenshot: {shot}", alert=True)
     ACTIVE_COPIES.pop(trader_name, None)
+    _entry_snapshots.pop(trader_name, None)
+    _persist_active_copies()
     beep(3)
 
 
@@ -1183,6 +1578,15 @@ def check(traders: list) -> None:
     parsed  = [parse_trader(t) for t in traders]
     by_name = {p["name"]: p for p in parsed}
 
+    # Read YOUR real copier P&L once per poll (actual positions, not estimates).
+    real_positions = _fetch_my_copy_positions()
+
+    def _real_for(active_name: str):
+        for k, v in real_positions.items():
+            if active_name.lower() in k.lower() or k.lower() in active_name.lower():
+                return v
+        return None
+
     # ── 1. Exit checks for active copies ────────────────────────────────────
     for active_name, allocated in list(ACTIVE_COPIES.items()):
         match = next(
@@ -1232,7 +1636,10 @@ def check(traders: list) -> None:
             exit_reason = f"ROI dropped {roi_peak-match['roi_30']:.1f}% from peak {roi_peak:.1f}% → {match['roi_30']:.1f}% (floor: {floor_label})"
 
         if exit_reason:
-            key = f"exit_{match['name']}_{exit_reason[:20]}"
+            # Key by reason TYPE (first word) so a repeatedly-failing stop
+            # does not spam a new alert every poll as the ROI number changes.
+            reason_type = exit_reason.split()[0]
+            key = f"exit_{match['name']}_{reason_type}"
             if key not in previous_alerts:
                 previous_alerts.add(key)
                 log(
@@ -1245,10 +1652,16 @@ def check(traders: list) -> None:
         else:
             proj_daily  = cap * (match["roi_30"] / 100) / 30
             proj_weekly = proj_daily * 7
+            real = _real_for(active_name)
+            real_str = ""
+            if real and real.get("pnl") is not None:
+                real_str = f"  | REAL PnL ${real['pnl']:+.2f}"
+                if real.get("roi") is not None:
+                    real_str += f" ({real['roi']:+.1f}%)"
             log(
                 f"[HOLDING] {active_name}: ROI {match['roi_30']:.1f}%  MDD {match['mdd']:.1f}%  "
                 f"Sharpe {match['sharpe']:.2f}  WinRate {match['win_rate']:.0f}%  "
-                f"~${proj_daily:+.2f}/day  ~${proj_weekly:+.2f}/wk  Score:{score(match)}"
+                f"~${proj_daily:+.2f}/day  ~${proj_weekly:+.2f}/wk  Score:{score(match)}{real_str}"
             )
 
     # ── 2. Daily P&L estimate vs $5 target ──────────────────────────────────
@@ -1264,6 +1677,24 @@ def check(traders: list) -> None:
         f"Total deployed: ${_total_deployed():.0f}/${MAX_DEPLOYED:.0f}"
     )
 
+    # ── 2b. REAL copier P&L (actual Binance positions, not estimates) ───────
+    if real_positions:
+        total_real_pnl = sum(
+            v["pnl"] for v in real_positions.values() if v.get("pnl") is not None
+        )
+        total_real_principal = sum(
+            v["principal"] for v in real_positions.values() if v.get("principal") is not None
+        )
+        _persist_real_pnl(real_positions, total_real_pnl, total_real_principal)
+        names = ", ".join(sorted(real_positions.keys()))
+        principal_str = (
+            f" on ${total_real_principal:.0f} principal" if total_real_principal else ""
+        )
+        log(
+            f"[REAL-PNL] Actual copy P&L across {len(real_positions)} position(s): "
+            f"${total_real_pnl:+.2f}{principal_str}  ({names})"
+        )
+
     # ── 3. Auto-entry: find best qualifying traders not yet copied ───────────
     slots_available = MAX_COPIES - len(ACTIVE_COPIES)
     budget_remaining = MAX_DEPLOYED - _total_deployed()
@@ -1276,7 +1707,7 @@ def check(traders: list) -> None:
                 if (
                     p["mdd"]       <= MAX_MDD
                     and MIN_ROI_30D <= p["roi_30"] <= MAX_ROI_30D
-                    and p.get("roi_7", 0) >= MIN_ROI_7D
+                    and (p.get("roi_7", -999) == -999 or p.get("roi_7", 0) >= MIN_ROI_7D)
                     and p["days"]  >= MIN_DAYS
                     and p["sharpe"] >= MIN_SHARPE
                     and p["slots_free"] >= MIN_SLOTS
@@ -1331,6 +1762,7 @@ def check(traders: list) -> None:
 def main() -> None:
     global _login_failed_this_poll
     _load_trader_ids()
+    _load_active_copies()
     _load_blacklist()
     log("=== Binance Copy Monitor starting ===")
     log(f"  Goal: ${DAILY_TARGET:.2f}/day | Max {MAX_COPIES} traders | Max ${MAX_DEPLOYED:.0f} deployed")
