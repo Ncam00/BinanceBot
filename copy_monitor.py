@@ -65,9 +65,9 @@ EXIT_ROI_DROP      = 10.0   # exit if ROI drops by this much since peak
 # weak copy frees its USDT, which funds the replacement — net deployment and
 # slot count are unchanged. Guardrails keep this conservative:
 ENABLE_ROTATION       = True
-ROTATION_SCORE_MARGIN = 12        # candidate must beat the held trader by ≥ this many points
-ROTATION_COOLDOWN     = 6 * 3600  # don't rotate the same slot more than once per 6 h
-ROTATION_FLAT_BAND    = 1.0       # only rotate when held REAL P&L is within ±$ this (idle/flat)
+ROTATION_SCORE_MARGIN = 8         # candidate must beat the held trader by ≥ this many points (middle: more responsive)
+ROTATION_COOLDOWN     = 3 * 3600  # don't rotate the same slot more than once per 3 h (middle setting)
+ROTATION_FLAT_BAND    = 1.0       # only rotate when held REAL P&L is within ±$ this (idle/flat — never cut a loss)
 
 # ---------------------------------------------------------------------------
 # Trader IDs for fully automated stop/start (no browser needed)
