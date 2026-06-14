@@ -34,3 +34,35 @@ Thumbs.db
 # Build outputs
 dist/
 build/
+
+# ---------------------------------------------------------------------------
+# Sensitive — Binance session / cookies. NEVER commit these.
+# ---------------------------------------------------------------------------
+session_cookies.json
+playwright_session/
+browser_data/
+chrome_trade_profile/
+
+# Runtime state written by the bot
+real_pnl.json
+active_copies.json
+blacklist.json
+trader_ids.json
+bapi_endpoints.json
+
+# Captured artifacts
+screenshots/
+*.png
+python-bot/*.bak
+python-bot/*.log.*
+
+# Debug / scratch scripts (not part of the bot)
+debug*.py
+debug_page.html
+probe_*.py
+patch_*.py
+copy_monitor_new.py
+fix_active_copies.py
+stop_*.py
+take_profit_*.py
+

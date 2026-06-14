@@ -18,12 +18,13 @@ Key Features:
 11. Partial TP (70%) then trailing runner
 12. Trailing stop: activates at 1.5%, trails 0.8%
 
-Pairs: BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, BNBUSDT
+Pairs: BTCUSDT, ETHUSDT, BNBUSDT
 """
 
 import logging
 import os
 import time
+import math
 import json
 from datetime import datetime
 from binance.client import Client
@@ -34,6 +35,7 @@ import numpy as np
 from dotenv import load_dotenv
 import requests
 import pytz
+from utils import detect_market_regime
 
 load_dotenv()
 
@@ -44,17 +46,18 @@ logging.basicConfig(
     format="%(asctime)s - %(message)s"
 )
 
-TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT']
+TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']
 TRAILING_STOP         = 0.985
 RUNNER_TRAIL          = 0.970   # 3% below max_price — wide enough to let winners run
 MAX_TRADES_PER_DAY    = 3
 MAX_SLIPPAGE          = 0.002  # 0.2% — reject fills worse than this
-MIN_VOLUME_MULTIPLIER = 1.1    # minimum volume vs avg to confirm signal
+MIN_VOLUME_MULTIPLIER = 1.05   # minimum volume vs avg to confirm signal (was 1.1)
 POSITION_SIZE_PCT     = 0.12   # ~12% of balance per trade (~$50 on $400)
 RISK_PER_TRADE        = 0.01   # 1% of balance risked per trade
 TIME_EXIT_CANDLES     = 25     # exit if no progress after this many candles
 PARTIAL_TP_RATIO      = 0.5    # 50% of position closes at TP1
-BREAKEVEN_BUFFER      = 0.001  # move SL to entry + 0.1% after partial TP
+BREAK_EVEN_BUFFER     = 0.0015
+BREAKEVEN_BUFFER      = BREAK_EVEN_BUFFER  # backward-compatible alias
 ATR_SL_MULTIPLIER     = 1.5    # stop loss = entry - ATR * 1.5
 ATR_TP_MULTIPLIER     = 2.0    # no longer used directly; TP = sl_distance * 2
 FEE_RATE              = 0.001  # 0.1% per side
@@ -63,7 +66,82 @@ TP_FEE_BUFFER         = FEE_RATE * 2 + SLIPPAGE_RATE  # 0.0025 — adds fee cost
 POSITION_USDT_MIN     = 55.0   # minimum position value in USDT
 POSITION_USDT_MAX     = 65.0   # maximum position value in USDT
 POSITION_USDT_TARGET  = 60.0   # target position value in USDT per trade
-DRY_RUN               = True   # Paper mode: signals fire, NO real orders placed. Set False to go live.
+DRY_RUN               = False  # LIVE mode — real orders placed. Set True to return to paper mode.
+
+# ─── SMOOTH MODE ────────────────────────────────────────────────────────────
+# These settings reduce equity-curve volatility and remove fear-inducing swings.
+A_PLUS_ONLY        = True    # RECOVERY MODE: only A+ breakouts. Skips CANDIDATE_SMALL and CANDIDATE_SCOUT.
+KILL_TRADE_CANDLES = 10      # Exit losing trade after N candles of no progress (was 3)
+
+# PHASE 2 CONFIG
+ENABLE_RUNNERS     = True
+TP1_MULTIPLIER     = 1.5
+RUNNER_MULTIPLIER  = 4.0
+EU_US_BOOST        = 1.5
+ASIA_REDUCTION     = 0.7
+MIN_ADD_ATR        = 0.5
+
+# ─── OPTION C: Tiered Patient Exit (May 22 2026) ────────────────────────────
+# Tighter SL + ladder out of profit. Designed for A+_BREAKOUT only.
+# Goal: every trade that touches +0.5% locks fee-covering profit,
+# the runner catches the occasional 2-3% move.
+OPTION_C_MODE       = True   # master switch — flip to False to revert
+OPTION_C_TP1_PCT    = 0.005  # +0.5% → close 25%, lock fees + crumbs
+OPTION_C_TP2_PCT    = 0.010  # +1.0% → close 50% (your 0.75% goal zone)
+OPTION_C_TP1_RATIO  = 0.25
+OPTION_C_TP2_RATIO  = 0.50
+OPTION_C_MAX_SL_PCT = 0.020  # cap stop loss at -2% (was -3%)
+OPTION_C_TRAIL_PCT  = 0.005  # 0.5% trail on the last 25% runner
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── STRATEGY V2: Pullback-into-trend (May 24 2026) ────────────────────────
+# Replaces breakout-chasing. Buys pullbacks to 5m EMA20 in confirmed 1h uptrend
+# with a bullish reversal candle + volume confirmation. Tighter risk, breakeven
+# move on TP1 (already wired), 60-min time stop, daily loss circuit breaker.
+STRATEGY_V2_PULLBACK    = True   # master switch — turn off to revert to breakout entries
+V2_MAX_SL_PCT           = 0.010  # cap SL at -1.0% (scalp mode May 26 2026)
+V2_TIME_STOP_MIN        = 60     # close if no movement (within ±0.5R) after N min
+V2_MAX_LOSSES_PER_DAY   = 3      # halt new entries for the day after N losses
+V2_CONSEC_LOSSES_PAUSE  = 2      # pause after N consecutive losses
+V2_PAUSE_HOURS          = 4      # how long to pause after consec-loss trigger
+V2_RSI_MIN              = 40     # pullback RSI floor — below = collapse, skip
+V2_RSI_MAX              = 60     # pullback RSI ceiling — above = chasing, skip
+V2_VOLUME_MULTIPLIER    = 1.0    # volume gate OFF (scalp mode May 26 2026)
+V2_PULLBACK_LOOKBACK    = 10     # last N candles must contain a dip to EMA20 (widened May 26)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── STRATEGY B: Range mean-reversion (May 26 2026) ─────────────────────────
+# Activates when 15m regime is RANGING. Buys oversold bounces off rolling
+# 20-bar support. Shares V2's exit infrastructure + daily loss cap.
+STRATEGY_B_RANGE        = True   # master switch for range mean-reversion
+B_RSI_MAX               = 30     # buy only when RSI ≤ this (oversold inside range) — tightened from 35, wins clustered ≤30
+B_SUPPORT_PROXIMITY     = 0.005  # price within 0.5% of 20-bar low to count as 'at support'
+B_MIN_RANGE_PCT         = 0.008  # range (high-low)/low must be ≥ 0.8% to be a tradable range
+B_STALE_LOWS_MIN_BARS   = 3      # 20-bar low must be ≥ this many bars old (skip fresh-low knife catches)
+B_HTF_BREAKDOWN_VETO    = True   # skip B entries when 1h is below EMA50 AND falling (avoid buying ranges that broke down on HTF)
+B_LOOKBACK              = 20     # bars for support/resistance detection
+B_TP_PCT                = 0.008  # B take-profit at +0.8% (tighter than V2 — ranges don't run)
+B_SL_PCT                = 0.005  # B stop-loss at -0.5% (tighter than V2 — below support = invalidated)
+B_TIME_STOP_MIN         = 45     # B trades cut after N min if not at TP1
+B_MAX_LOSSES_PER_DAY    = 2      # B daily loss cap (separate from V2's 3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── STRATEGY C: Volatility wick reversal / liquidity-sweep fade (May 31 2026) ─
+# Activates when 15m regime is VOLATILE (mutually exclusive with B's RANGING).
+# Buys flash dumps that get reclaimed quickly. Designed for the BTC/ETH-style
+# 30 May wicks B was missing — sharp dump ≥ N×ATR, price recovers, bullish
+# confirmation candle prints. Tight SL because the thesis dies fast if wrong.
+STRATEGY_C_FADE         = True   # master switch for volatility-fade strategy
+C_LOOKBACK              = 5      # bars to scan for the dump leg
+C_WICK_ATR_MULT         = 1.5    # dump leg must be ≥ this × ATR(14) to qualify
+C_RECLAIM_PCT           = 0.003  # current close must be ≥ 0.3% above the wick low
+C_TP_PCT                = 0.010  # +1.0% take-profit (volatility plays move bigger than B)
+C_SL_PCT                = 0.007  # -0.7% stop-loss (R:R 1.43:1)
+C_TIME_STOP_MIN         = 30     # cut fast if the reclaim doesn't pay
+C_MAX_LOSSES_PER_DAY    = 2      # daily loss cap
+C_MAX_TRADES_PER_DAY    = 2      # cap trade count separately — these are higher variance
+C_COOLDOWN_MIN          = 60     # per-symbol cooldown after a C entry
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 class EntryEngine:
@@ -73,6 +151,7 @@ class EntryEngine:
     def __init__(self, pairs, execute_fn=None):
         self.pairs = pairs
         self.execute_fn = execute_fn
+        self.position_open = {pair: False for pair in self.pairs}
         self.signals = {
             pair: {
                 'active': False,
@@ -126,12 +205,18 @@ class EntryEngine:
             confidence += 1
         return confidence
 
-    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=22, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend', recent_volumes=None, range_high=None, is_range=False, ema9=None, ema21=None):
+    def process_pair(self, pair, price, open_price, close, volume, avg_volume, resistance, ma, prev_close=None, atr=None, lows=None, adx=None, adx_threshold=18, atr_avg=None, bullish_timeframes=0, ema20=None, support=None, market_condition='trend', recent_volumes=None, range_high=None, is_range=False, ema9=None, ema21=None):
         sig = self.get(pair)
 
         # ADX filter — skip choppy markets
         if adx is not None and adx < adx_threshold:
             return {'action': 'HOLD', 'pair': pair, 'reason': f'ADX {adx:.1f} < {adx_threshold} (choppy)'}
+
+        # Daily range context — skip longs in the top quartile of today's 24h range
+        ctx = self.get_daily_context(pair)
+        if ctx and ctx['price_position_pct'] > 85:
+            return {'action': 'HOLD', 'pair': pair,
+                    'reason': f"Near 24h high ({ctx['price_position_pct']:.0f}% of daily range)"}
 
         # Market mode
         market_mode = 'CHOPPY' if (atr is not None and atr_avg is not None and atr < atr_avg * 0.8) else 'ACTIVE'
@@ -309,11 +394,6 @@ class EntryEngine:
         return None
 
     def scan_market(self, market_data):
-        # Session guard: only enter during EU (19-23 NZT) or US (1-5 NZT)
-        _nz_hour = datetime.now(pytz.timezone('Pacific/Auckland')).hour
-        if not ((19 <= _nz_hour <= 23) or (1 <= _nz_hour <= 5)):
-            return
-
         candidates = []
         signals = []
 
@@ -392,7 +472,7 @@ class EntryEngine:
                 continue
 
             # Re-entry: pullback from last exit price + breakout confirmed
-            if pullback_from_exit:
+            if pullback_from_exit and not A_PLUS_ONLY:
                 print(f"   🔁 RE-ENTRY {symbol} @ {price:.4f} (pullback from exit {last_exit:.4f})")
                 self.execute_trade(symbol, price, small_position=False,
                                    atr=top_atr, trade_type='PULLBACK_ENTRY')
@@ -401,7 +481,7 @@ class EntryEngine:
                 continue
 
             # Pullback into EMA9 and bounce
-            if pullback_ema:
+            if pullback_ema and not A_PLUS_ONLY:
                 print(f"   ↩️ PULLBACK ENTRY {symbol} @ {price:.4f}")
                 self.execute_trade(symbol, price, small_position=False,
                                    atr=top_atr, trade_type='PULLBACK')
@@ -428,7 +508,7 @@ class EntryEngine:
                     price > ma,
                     ema9 is not None and ema21 is not None and ema9 > ema21,
                 ])
-                if price <= breakout_level * 1.002 and score >= 2:
+                if price <= breakout_level * 1.002 and score >= 2 and not A_PLUS_ONLY:
                     print(f"   ✅ PULLBACK_ENTRY {symbol} @ {price:.4f} (score={score})")
                     self.execute_trade(symbol, price, small_position=False,
                                        atr=top_atr, trade_type='PULLBACK_ENTRY',
@@ -454,7 +534,7 @@ class EntryEngine:
                 atr=data.get('atr'),
                 lows=data.get('lows'),
                 adx=data.get('adx'),
-                adx_threshold=22,
+                adx_threshold=18,
                 atr_avg=data.get('atr_avg'),
                 bullish_timeframes=data.get('bullish_timeframes', 0),
                 ema20=data.get('ema20'),
@@ -484,6 +564,10 @@ class EntryEngine:
                 signals.append(result)
 
         if candidates:
+            if A_PLUS_ONLY:
+                candidates = [c for c in candidates if c['action'] not in ('CANDIDATE_SMALL', 'CANDIDATE_SCOUT')]
+            if not candidates:
+                return signals
             top_pair = max(candidates, key=lambda x: x['confidence'])
             self.get(top_pair['pair'])['active'] = False
             small = top_pair['action'] == 'CANDIDATE_SMALL'
@@ -521,6 +605,15 @@ class SmartTrader:
             os.getenv('BINANCE_API_KEY'),
             os.getenv('BINANCE_SECRET_KEY')
         )
+        # Align local timestamp offset with Binance server (defends against -1021).
+        # python-binance applies self.client.timestamp_offset to every signed call.
+        try:
+            server_time = self.client.get_server_time()['serverTime']
+            local_time = int(time.time() * 1000)
+            self.client.timestamp_offset = server_time - local_time
+            print(f"   \u23f1\ufe0f  Clock offset vs Binance: {self.client.timestamp_offset} ms")
+        except Exception as e:
+            print(f"   \u26a0\ufe0f  Could not sync clock offset: {e}")
 
         # ════════════════════════════════════════════════════════════════════
         # TRADING PAIRS
@@ -529,10 +622,10 @@ class SmartTrader:
         self.max_positions = 1  # One position at a time - quality over quantity
 
         # ════════════════════════════════════════════════════════════════════
-        # CORE RISK SETTINGS
+        # CORE RISK SETTINGS — SCALP MODE (May 26 2026)
         # ════════════════════════════════════════════════════════════════════
-        self.stop_loss_percent = 1.5          # 1.5% stop loss
-        self.take_profit_percent = 2.5        # 2.5% take profit
+        self.stop_loss_percent = 1.0          # 1.0% stop loss (scalp)
+        self.take_profit_percent = 1.2        # 1.2% take profit (scalp) — R:R 1.2:1
         self.position_size_percent = 15       # 15% of balance per trade (~$70)
         self.max_position_cap = 0.25          # Hard cap at 25% of balance
         self.strong_setup_threshold = 0.85    # strength >= 0.85 → full size; below → half size
@@ -540,22 +633,36 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # DAILY / WEEKLY LIMITS
         # ════════════════════════════════════════════════════════════════════
-        self.daily_profit_target = 5.00       # Stop new trades at $5 profit
+        self.daily_profit_target = 7.00       # Stop new trades at $7 profit (matches loss limit)
         self.max_daily_loss = 7.00            # Stop trading at $7 loss
         self.max_weekly_loss = 20.00          # Stop trading at $20 loss this week
         self.max_trades_per_day = MAX_TRADES_PER_DAY
         self.hard_max_trades = MAX_TRADES_PER_DAY
         self.trade_cooldown_seconds = 300     # 5 min between trades
-        self.max_consecutive_losses = 4       # Pause trading after 4 losses in a row
-        self.loss_streak_pause_hours = 2      # Hours to pause after hitting streak limit
+        # V2: tighter loss-streak rules when V2 mode is active
+        if STRATEGY_V2_PULLBACK:
+            self.max_consecutive_losses = V2_CONSEC_LOSSES_PAUSE   # pause after N consec losses
+            self.loss_streak_pause_hours = V2_PAUSE_HOURS          # pause duration
+        else:
+            self.max_consecutive_losses = 4       # Pause trading after 4 losses in a row
+            self.loss_streak_pause_hours = 2      # Hours to pause after hitting streak limit
+        self.v2_daily_losses = 0                  # V2 daily loss count (resets at day rollover)
+        self.b_daily_losses  = 0                  # B daily loss count (resets at day rollover)
+        self.b_daily_trades  = 0                  # B trades opened today (info only)
+        self.c_daily_losses  = 0                  # C daily loss count (resets at day rollover)
+        self.c_daily_trades  = 0                  # C trades opened today (counts toward C cap)
+        self._c_last_entry_ts = {}                # per-symbol unix-ts of last C entry (cooldown)
 
         # ════════════════════════════════════════════════════════════════════
         # CIRCUIT BREAKER
         # 5% drawdown from starting balance kills the bot
         # ════════════════════════════════════════════════════════════════════
-        self.starting_balance = 468.35
+        self.starting_balance = 316.00
         self.circuit_breaker_percent = 0.05
         self.circuit_breaker_limit = self.starting_balance * (1 - self.circuit_breaker_percent)
+        self._last_balance_error = None       # set by get_balance() on API failure
+        self._breaker_strikes = 0             # consecutive sub-limit reads
+        self._breaker_strikes_required = 3    # need 3 in a row before tripping
 
         # ════════════════════════════════════════════════════════════════════
         # EXIT MANAGEMENT
@@ -576,7 +683,7 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         # ADX THRESHOLDS
         # ════════════════════════════════════════════════════════════════════
-        self.adx_range_threshold = 22         # ADX < 22 = market too choppy, skip
+        self.adx_range_threshold = 18         # ADX < 18 = market too choppy, skip (was 22)
         self.adx_trend_threshold = 25         # ADX > 25 = trending market
         self.min_atr_percent = 0.003          # Skip trades when ATR < 0.3% of price
         self.max_spread_percent = 0.001       # Skip trades when spread > 0.1% of price
@@ -589,9 +696,9 @@ class SmartTrader:
         # ════════════════════════════════════════════════════════════════════
         self.nz_timezone = pytz.timezone('Pacific/Auckland')
         self.session_settings = {
-            'asia':   {'mode': 'low_risk',   'max_trades': 1, 'min_strength': 0.85},
-            'london': {'mode': 'normal',     'max_trades': 3, 'min_strength': 0.75},
-            'us':     {'mode': 'aggressive', 'max_trades': 3, 'min_strength': 0.70},
+            'asia':   {'mode': 'low_risk',   'max_trades': 1, 'min_strength': 0.85, 'position_boost': 0.5, 'min_score': 3, 'allow_adds': False, 'runner_mode': False},
+            'london': {'mode': 'normal',     'max_trades': 3, 'min_strength': 0.75, 'position_boost': 1.0, 'min_score': 2, 'allow_adds': True,  'runner_mode': False},
+            'us':     {'mode': 'aggressive', 'max_trades': 3, 'min_strength': 0.70, 'position_boost': 1.5, 'min_score': 2, 'allow_adds': True,  'runner_mode': True},
         }
 
         # ════════════════════════════════════════════════════════════════════
@@ -627,6 +734,9 @@ class SmartTrader:
         self.last_reset_date = datetime.now().date()
         self.last_week_reset_key = self._get_week_key()
         self.daily_start_balance = None       # Set on first balance fetch of the day
+        self.eu_trades_today = 0              # trades taken in EU/London session today
+        self.us_trades_today = 0              # trades taken in US session today
+        self.last_session = None              # track session transitions
 
         # Telegram
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -643,6 +753,12 @@ class SmartTrader:
         print(f"   Circuit breaker:${self.circuit_breaker_limit:.2f}")
         print(f"   Position size:  {self.position_size_percent}%")
         print(f"   SL: {self.stop_loss_percent}% | TP: {self.take_profit_percent}%")
+        if STRATEGY_V2_PULLBACK:
+            print(f"   V2 PULLBACK:    ON | SL cap {V2_MAX_SL_PCT*100:.1f}% | time-stop {V2_TIME_STOP_MIN}min | loss cap {V2_MAX_LOSSES_PER_DAY}/day")
+        if STRATEGY_B_RANGE:
+            print(f"   B RANGE:        ON | TP {B_TP_PCT*100:.2f}% / SL {B_SL_PCT*100:.2f}% | time-stop {B_TIME_STOP_MIN}min | loss cap {B_MAX_LOSSES_PER_DAY}/day")
+        if STRATEGY_C_FADE:
+            print(f"   C FADE:         ON | TP {C_TP_PCT*100:.2f}% / SL {C_SL_PCT*100:.2f}% | time-stop {C_TIME_STOP_MIN}min | wick ≥{C_WICK_ATR_MULT}×ATR | max {C_MAX_TRADES_PER_DAY}/day")
         session, settings = self.get_market_session()
         print(f"   Session:        {session.upper()} ({settings['mode']})")
         print("=" * 60)
@@ -698,6 +814,33 @@ class SmartTrader:
             print(f"   ❌ Candle fetch error {symbol}: {e}")
             return None
 
+    def get_daily_context(self, symbol):
+        """Return price position within today's 24h range (0%=low, 100%=high)."""
+        try:
+            klines = self.client.get_klines(symbol=symbol, interval='1d', limit=2)
+            if not klines:
+                return None
+            today = klines[-1]
+            daily_high  = float(today[2])
+            daily_low   = float(today[3])
+            daily_open  = float(today[1])
+            daily_close = float(today[4])
+            daily_range = daily_high - daily_low
+            if daily_range < 1e-8:
+                return None
+            current_price = float(self.client.get_symbol_ticker(symbol=symbol)['price'])
+            price_position_pct = (current_price - daily_low) / daily_range * 100
+            daily_trend = 'BULLISH' if daily_close > daily_open else 'BEARISH'
+            return {
+                'daily_high':         daily_high,
+                'daily_low':          daily_low,
+                'price_position_pct': price_position_pct,
+                'daily_trend':        daily_trend,
+            }
+        except Exception as e:
+            print(f"   ⚠️ Daily context error {symbol}: {e}")
+            return None
+
     def get_price(self, symbol):
         try:
             return float(self.client.get_symbol_ticker(symbol=symbol)['price'])
@@ -707,11 +850,13 @@ class SmartTrader:
     def get_balance(self):
         try:
             account = self.client.get_account()
+            self._last_balance_error = None
             for asset in account['balances']:
                 if asset['asset'] == 'USDT':
                     return float(asset['free'])
             return 0.0
         except Exception as e:
+            self._last_balance_error = e
             print(f"   ❌ Balance error: {e}")
             return 0.0
 
@@ -843,6 +988,194 @@ class SmartTrader:
         prev      = df['close'].iloc[-2]
         return price > ema.iloc[-1] and prev < ema.iloc[-2]
 
+    def quality_pullback_signal(self, df):
+        """V2 pullback-into-trend detector.
+
+        Returns (True, reason) when:
+          - within the last V2_PULLBACK_LOOKBACK candles, price touched or
+            dipped below the 5m EMA20 (the pullback)
+          - the *current* candle is bullish (close > open) and closes in the
+            upper third of its range (rejection of lower prices)
+          - RSI(14) sits in [V2_RSI_MIN, V2_RSI_MAX] (cooling, not collapsing)
+          - current candle volume > V2_VOLUME_MULTIPLIER x 20-candle average
+        Else returns (False, reason).
+        """
+        if len(df) < 30:
+            return False, "not enough candles"
+        close = df['close']
+        high  = df['high']
+        low   = df['low']
+        op    = df['open']
+        vol   = df['volume']
+
+        ema20 = close.ewm(span=20).mean()
+        # Pullback test: any of the last N candles closed at/below EMA20
+        lookback = max(2, V2_PULLBACK_LOOKBACK)
+        recent_lows_vs_ema = close.iloc[-lookback:-1] <= ema20.iloc[-lookback:-1]
+        if not recent_lows_vs_ema.any():
+            return False, "no recent pullback to EMA20"
+
+        # Current candle: bullish + closes in upper third of range
+        c_open  = op.iloc[-1]
+        c_close = close.iloc[-1]
+        c_high  = high.iloc[-1]
+        c_low   = low.iloc[-1]
+        if c_close <= c_open:
+            return False, "current candle not bullish"
+        c_range = c_high - c_low
+        if c_range <= 0:
+            return False, "zero-range candle"
+        upper_third = c_low + c_range * (2.0 / 3.0)
+        if c_close < upper_third:
+            return False, "weak close (not in upper third)"
+
+        # Must be reclaiming the EMA20 (close above)
+        if c_close < ema20.iloc[-1]:
+            return False, "close below EMA20 — pullback not finished"
+
+        # RSI window
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, np.nan)
+        rsi   = 100 - (100 / (1 + rs))
+        rsi_now = rsi.iloc[-1]
+        if not (V2_RSI_MIN <= rsi_now <= V2_RSI_MAX):
+            return False, f"RSI {rsi_now:.0f} outside [{V2_RSI_MIN},{V2_RSI_MAX}]"
+
+        # Volume confirmation
+        avg_vol = vol.rolling(20).mean().iloc[-1]
+        if vol.iloc[-1] < avg_vol * V2_VOLUME_MULTIPLIER:
+            return False, f"low volume ({vol.iloc[-1]/avg_vol:.2f}x avg)"
+
+        return True, f"pullback+reclaim @ EMA20, RSI {rsi_now:.0f}, vol {vol.iloc[-1]/avg_vol:.2f}x"
+
+    def quality_range_signal(self, df):
+        """Strategy B — range mean-reversion entry detector.
+
+        Returns (True, reason) when ALL of:
+          - the 20-bar range is wide enough (≥ B_MIN_RANGE_PCT) to be tradable
+          - current price is within B_SUPPORT_PROXIMITY of the 20-bar low
+          - RSI(14) ≤ B_RSI_MAX (oversold)
+          - the current candle is bullish (close > open) and closes in the
+            upper third of its own range (confirmation, not catching knives)
+        Else returns (False, reason).
+        """
+        if len(df) < B_LOOKBACK + 5:
+            return False, "not enough candles"
+        close = df['close']
+        high  = df['high']
+        low   = df['low']
+        op    = df['open']
+
+        # Identify the range
+        rng_high = high.rolling(B_LOOKBACK).max().iloc[-1]
+        rng_low  = low.rolling(B_LOOKBACK).min().iloc[-1]
+        if rng_low <= 0:
+            return False, "invalid range low"
+        range_pct = (rng_high - rng_low) / rng_low
+        if range_pct < B_MIN_RANGE_PCT:
+            return False, f"range too tight ({range_pct*100:.2f}%)"
+
+        # Proximity to support
+        price_now = close.iloc[-1]
+        dist_pct  = (price_now - rng_low) / rng_low
+        if dist_pct > B_SUPPORT_PROXIMITY:
+            return False, f"too far from support ({dist_pct*100:.2f}% above low)"
+
+        # Stale-lows gate: the 20-bar low must be at least N bars old.
+        # If price is still printing fresh lows in the last few candles, the
+        # range is breaking down, not bouncing — skip the knife catch.
+        recent_lows = low.iloc[-B_LOOKBACK:]
+        bars_since_low = (B_LOOKBACK - 1) - int(recent_lows.values.argmin())
+        if bars_since_low < B_STALE_LOWS_MIN_BARS:
+            return False, f"fresh low ({bars_since_low} bars ago, need ≥{B_STALE_LOWS_MIN_BARS})"
+
+        # RSI oversold
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, np.nan)
+        rsi   = 100 - (100 / (1 + rs))
+        rsi_now = rsi.iloc[-1]
+        if rsi_now > B_RSI_MAX:
+            return False, f"RSI {rsi_now:.0f} not oversold (need ≤{B_RSI_MAX})"
+
+        # Reversal-candle confirmation
+        c_open  = op.iloc[-1]
+        c_close = close.iloc[-1]
+        c_high  = high.iloc[-1]
+        c_low   = low.iloc[-1]
+        if c_close <= c_open:
+            return False, "current candle not bullish"
+        c_range = c_high - c_low
+        if c_range <= 0:
+            return False, "zero-range candle"
+        upper_third = c_low + c_range * (2.0 / 3.0)
+        if c_close < upper_third:
+            return False, "weak close (not in upper third)"
+
+        return True, f"range-low bounce, RSI {rsi_now:.0f}, range {range_pct*100:.2f}%"
+
+    def quality_fade_signal(self, df):
+        """Strategy C — volatility wick-reversal entry detector.
+
+        Returns (True, reason) when ALL of:
+          - the last C_LOOKBACK candles contain a dump leg ≥ C_WICK_ATR_MULT × ATR(14)
+            (i.e. min(low) of the window is far below the close that opened the window)
+          - current close has reclaimed: ≥ C_RECLAIM_PCT above that wick low
+          - current candle is bullish (close > open) and closes in the upper half
+            of its own range (we want the recovery to be holding, not a dead-cat)
+        Else returns (False, reason).
+        """
+        if len(df) < C_LOOKBACK + 20:
+            return False, "not enough candles"
+        close = df['close']
+        high  = df['high']
+        low   = df['low']
+        op    = df['open']
+
+        # ATR(14)
+        tr = pd.concat([
+            (high - low),
+            (high - close.shift()).abs(),
+            (low  - close.shift()).abs(),
+        ], axis=1).max(axis=1)
+        atr14 = tr.rolling(14).mean().iloc[-1]
+        if not (atr14 > 0):
+            return False, "invalid ATR"
+
+        # Look for the dump leg in the last C_LOOKBACK candles
+        window_low      = low.iloc[-C_LOOKBACK:].min()
+        ref_close       = close.iloc[-(C_LOOKBACK + 1)]   # close just before the window
+        dump_distance   = ref_close - window_low
+        if dump_distance < C_WICK_ATR_MULT * atr14:
+            return False, f"no dump leg ({dump_distance/atr14:.2f}×ATR < {C_WICK_ATR_MULT})"
+
+        # Reclaim: current close must be back above the wick low by C_RECLAIM_PCT
+        price_now = close.iloc[-1]
+        if window_low <= 0:
+            return False, "invalid window low"
+        reclaim_pct = (price_now - window_low) / window_low
+        if reclaim_pct < C_RECLAIM_PCT:
+            return False, f"not reclaimed ({reclaim_pct*100:.2f}% above wick low, need ≥{C_RECLAIM_PCT*100:.2f}%)"
+
+        # Confirmation candle — bullish, closes in upper half
+        c_open  = op.iloc[-1]
+        c_close = close.iloc[-1]
+        c_high  = high.iloc[-1]
+        c_low   = low.iloc[-1]
+        if c_close <= c_open:
+            return False, "current candle not bullish"
+        c_range = c_high - c_low
+        if c_range <= 0:
+            return False, "zero-range candle"
+        upper_half = c_low + c_range * 0.5
+        if c_close < upper_half:
+            return False, "weak close (below upper half)"
+
+        return True, f"wick {dump_distance/atr14:.2f}×ATR reclaimed +{reclaim_pct*100:.2f}%"
+
     def detect_range(self, df):
         if len(df) < 20:
             return False, None, None
@@ -886,8 +1219,8 @@ class SmartTrader:
         range_size = resistance - support
         if range_size <= 0:
             return 'middle'
-        buy_zone_top = support + (range_size * 0.30)
-        sell_zone_bottom = resistance - (range_size * 0.30)
+        buy_zone_top = support + (range_size * 0.45)
+        sell_zone_bottom = resistance - (range_size * 0.45)
         if price <= buy_zone_top:
             return 'buy_zone'
         elif price >= sell_zone_bottom:
@@ -1114,6 +1447,25 @@ class SmartTrader:
         except Exception as e:
             print(f"   ⚠️ BTC filter error: {e}")
             return True
+
+    def htf_trend_bullish(self, symbol):
+        """1h trend filter — only enter longs when higher-timeframe trend is up.
+        Returns (is_bullish, reason). Bullish = EMA20 > EMA50 on 1h AND price > EMA20."""
+        try:
+            df = self.get_candles(symbol, '1h', 60)
+            if df is None or len(df) < 50:
+                return True, 'insufficient 1h data — allowing'
+            close = df['close']
+            ema20_1h = close.ewm(span=20).mean().iloc[-1]
+            ema50_1h = close.ewm(span=50).mean().iloc[-1]
+            price = close.iloc[-1]
+            bullish = ema20_1h > ema50_1h and price > ema20_1h
+            if bullish:
+                return True, f'1h bullish (EMA20 {ema20_1h:.2f} > EMA50 {ema50_1h:.2f})'
+            return False, f'1h bearish/flat (EMA20 {ema20_1h:.2f} vs EMA50 {ema50_1h:.2f})'
+        except Exception as e:
+            print(f"   ⚠️ 1h trend check error ({symbol}): {e}")
+            return True, 'error — allowing'
 
     def check_signal_layers(self, price, ema20, ema_trend, ema200, rsi, macd,
                              closes, df, adx):
@@ -1496,6 +1848,12 @@ class SmartTrader:
         try:
             strong_setup = signal.get('strength', 0) >= self.strong_setup_threshold
 
+            # EU session: only take A+ — the single EU slot is too valuable for marginal setups
+            _entry_session, _ = self.get_market_session()
+            if _entry_session == 'london' and not strong_setup:
+                print(f"   🕐 EU session — A+ required, skipping {signal.get('trade_type', '?')} setup")
+                return None
+
             # Trade frequency gate: free rein for first 2 trades; 3rd only on A+
             if self.daily_trades >= 2 and not strong_setup:
                 print(f"   🛑 Trade #{self.daily_trades + 1} blocked - A+ setup required")
@@ -1511,12 +1869,35 @@ class SmartTrader:
             max_sl = price * 0.97
             stop_loss_price = max(structure_sl, max_sl)
 
-            # Fixed position size: $55–$65 USDT per trade
+            # Position size scales with trade quality
             trade_type = signal.get('trade_type', 'A+')
-            quantity = POSITION_USDT_TARGET / price
+            if trade_type in ('B+',):
+                usdt_target = POSITION_USDT_TARGET * 0.60   # 60% size for B+ setups
+            elif trade_type in ('SCOUT', 'SCOUT_RANGE'):
+                usdt_target = POSITION_USDT_TARGET * 0.40   # 40% size for scout entries
+            else:
+                usdt_target = POSITION_USDT_TARGET           # full size for A+ / BREAKOUT
+
+            # Session-aware sizing driven by per-session position_boost
+            _current_session, _sess_buy = self.get_market_session()
+            _session_boost = _sess_buy.get('position_boost', 1.0)
+            usdt_target *= _session_boost
+            print(f"   📍 {_current_session.upper()} session boost {_session_boost:.2f}x → ${usdt_target:.2f}")
+
+            # Correlation guard: BTC and ETH move together — halve size if the other is already open
+            _correlated = {'BTCUSDT': 'ETHUSDT', 'ETHUSDT': 'BTCUSDT'}.get(symbol)
+            if _correlated and _correlated in self.positions:
+                usdt_target *= 0.5
+                print(f"   🔗 Correlation guard — {_correlated} open, halving {symbol} to ${usdt_target:.2f}")
+
+            # Regime adaptation from run-loop context
+            position_boost = signal.get('position_boost', 1.0)
+            usdt_target *= position_boost
+            if position_boost != 1.0:
+                print(f"   🧠 Regime boost applied — size ${usdt_target:.2f} ({position_boost:.2f}x)")
+
+            quantity = usdt_target / price
             position_value = quantity * price
-            if not (POSITION_USDT_MIN <= position_value <= POSITION_USDT_MAX):
-                quantity = POSITION_USDT_TARGET / price  # re-derive cleanly
             print(f"   📐 {trade_type} | Size: ${position_value:.2f} USDT | Qty: {quantity:.5f}")
 
             # Pre-order slippage check: current price vs signal price
@@ -1540,7 +1921,7 @@ class SmartTrader:
                     symbol=symbol,
                     side=SIDE_BUY,
                     type=ORDER_TYPE_MARKET,
-                    quantity=quantity
+                    quantity=self.qty_to_str(symbol, quantity)
                 )
                 fill_price = float(order['fills'][0]['price'])
                 slippage = abs(fill_price - price) / price
@@ -1549,6 +1930,7 @@ class SmartTrader:
                     return None
                 entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
+            tp_multiplier = signal.get('atr_tp', RUNNER_MULTIPLIER)
             if 'tp_percent_override' in signal:
                 take_profit = fill_price * (1 + signal['tp_percent_override'] / 100)
                 stop_loss   = fill_price * (1 - signal['sl_percent_override'] / 100)
@@ -1558,8 +1940,9 @@ class SmartTrader:
                 if sl_distance < fill_price * 0.003:
                     print(f"   ⚠️ {symbol} SL too tight ({sl_distance/fill_price:.3%}) — skipping")
                     return None
-                stop_loss   = fill_price - sl_distance
-                take_profit = fill_price + (sl_distance * 2) + (fill_price * TP_FEE_BUFFER)  # net 1:2 R:R
+                stop_loss = fill_price - sl_distance
+                print(f"   🎯 Regime TP multiplier: {tp_multiplier:.2f}x")
+                take_profit = fill_price + (sl_distance * tp_multiplier) + (fill_price * TP_FEE_BUFFER)
             else:
                 take_profit, stop_loss = self.set_tp_sl(
                     fill_price,
@@ -1569,6 +1952,7 @@ class SmartTrader:
                 )
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
+            risk_percent = actual_risk / fill_price if fill_price else 0.0
 
             position = {
                 'trade_id': f"{symbol}-{int(entry_time.timestamp())}",
@@ -1592,6 +1976,9 @@ class SmartTrader:
                 'position_type': trade_type,
                 'added': False,
                 'range_high': signal.get('range_high'),
+                # ── diagnostic context captured at entry for weekly review ──
+                'session_at_entry': _current_session,
+                'htf_bullish_at_entry': signal.get('htf_bullish'),
                 'tp1': fill_price + (take_profit - fill_price) * 0.5,
                 'tp2': fill_price * 1.020,
                 'tp3': fill_price * 1.025,
@@ -1610,33 +1997,82 @@ class SmartTrader:
                 'signal': signal
             }
 
+            # ── OPTION C: override SL/TP with tiered patient-exit values ──
+            if OPTION_C_MODE:
+                # V2 uses a tighter SL cap (-1.5%) than Option C alone (-2%)
+                _sl_cap_pct = V2_MAX_SL_PCT if STRATEGY_V2_PULLBACK else OPTION_C_MAX_SL_PCT
+                _min_sl_price = fill_price * (1 - _sl_cap_pct)
+                if stop_loss < _min_sl_price:
+                    stop_loss = _min_sl_price
+                    position['stop_loss'] = _min_sl_price
+                position['tp1'] = fill_price * (1 + OPTION_C_TP1_PCT)
+                position['tp2'] = fill_price * (1 + OPTION_C_TP2_PCT)
+                print(f"   \U0001f170 Option C: TP1 ${position['tp1']:.4f} (+{OPTION_C_TP1_PCT*100:.2f}%) | TP2 ${position['tp2']:.4f} (+{OPTION_C_TP2_PCT*100:.2f}%) | SL ${stop_loss:.4f} (-{_sl_cap_pct*100:.1f}% cap) | runner trail {OPTION_C_TRAIL_PCT*100:.2f}%")
+
+            # ── STRATEGY B: override SL/TP with tight range-trade values ──
+            # B trades are short-duration mean-reversion plays — tight TP +0.8%,
+            # tight SL -0.5% (below support = thesis invalidated). Overrides any
+            # Option C tiering above so the trade exits cleanly at the range target.
+            if trade_type == 'B_RANGE':
+                b_tp = fill_price * (1 + B_TP_PCT)
+                b_sl = fill_price * (1 - B_SL_PCT)
+                position['take_profit'] = b_tp
+                position['stop_loss']   = b_sl
+                position['tp1']         = b_tp     # single exit — no tiering for range trades
+                position['tp2']         = b_tp
+                stop_loss = b_sl                   # so the positions[symbol] dict below picks it up
+                print(f"   🎯 B exits: TP ${b_tp:.4f} (+{B_TP_PCT*100:.2f}%) | SL ${b_sl:.4f} (-{B_SL_PCT*100:.2f}%) | time-stop {B_TIME_STOP_MIN}min")
+
+            # ── STRATEGY C: override SL/TP with volatility-fade values ──
+            # C trades are short-duration sweep reclaims — wider TP +1.0%,
+            # tight SL -0.7%, single-exit (no tiering, no runner).
+            if trade_type == 'C_FADE':
+                c_tp = fill_price * (1 + C_TP_PCT)
+                c_sl = fill_price * (1 - C_SL_PCT)
+                position['take_profit'] = c_tp
+                position['stop_loss']   = c_sl
+                position['tp1']         = c_tp
+                position['tp2']         = c_tp
+                stop_loss = c_sl
+                self.c_daily_trades += 1
+                print(f"   🎯 C exits: TP ${c_tp:.4f} (+{C_TP_PCT*100:.2f}%) | SL ${c_sl:.4f} (-{C_SL_PCT*100:.2f}%) | time-stop {C_TIME_STOP_MIN}min")
+
             self.open_positions.append(position)
             self.position_open[symbol] = True
             self.last_trade_time[symbol] = time.time()
             _sl_distance = fill_price - stop_loss
+            _atr_for_targets = signal.get('atr', _sl_distance)
             self.positions[symbol] = {
-                'entry':     fill_price,
-                'qty':       quantity,
-                'sl':        stop_loss,
-                'tp1':       fill_price + _sl_distance + (fill_price * TP_FEE_BUFFER),          # 1R net
-                'tp2':       fill_price + (_sl_distance * 2) + (fill_price * TP_FEE_BUFFER),   # 2R net
-                'max_price': fill_price,
-                'candles':   0,
-                'added':     False,
-                'tp1_hit':   False,
-                'tp2_hit':   False,
+                'entry':      fill_price,
+                'qty':        quantity,
+                'initial_qty': quantity,
+                'sl':         stop_loss,
+                'tp1':        (fill_price * (1 + OPTION_C_TP1_PCT)) if OPTION_C_MODE else (fill_price + (_atr_for_targets * TP1_MULTIPLIER)),
+                'runner_tp':  float('inf') if OPTION_C_MODE else (fill_price + (_atr_for_targets * tp_multiplier)),
+                'max_price':  fill_price,
+                'candles':    0,
+                'added':      False,
+                'tp1_hit':    False,
+                'entry_time': datetime.now(),
             }
             self.daily_trades += 1
+            _trade_session, _ = self.get_market_session()
+            if _trade_session == 'london':
+                self.eu_trades_today += 1
+            elif _trade_session == 'us':
+                self.us_trades_today += 1
 
             if signal.get('clear_breakout_wait'):
                 self.reset_breakout_state(symbol)
 
+            _sl_pct_disp = (1 - stop_loss / fill_price) * 100 if fill_price else 0.0
+            _tp_pct_disp = (take_profit / fill_price - 1) * 100 if fill_price else 0.0
             msg = (f"🚀 TRADE OPENED\n"
                    f"Pair: {symbol}\n"
                    f"Type: {signal.get('entry_type', 'PULLBACK')}\n"
                    f"Entry: ${fill_price:.4f}\n"
-                   f"SL: ${stop_loss:.4f} ({self.stop_loss_percent}%)\n"
-                   f"TP: ${take_profit:.4f} ({self.take_profit_percent}%)\n"
+                   f"SL: ${stop_loss:.4f} ({_sl_pct_disp:.2f}%)\n"
+                   f"TP: ${take_profit:.4f} ({_tp_pct_disp:.2f}%)\n"
                    f"R:R target: {rr_target}")
             print(f"\n   {msg.replace(chr(10), chr(10) + '   ')}")
             self.send_telegram(msg)
@@ -1654,12 +2090,21 @@ class SmartTrader:
     # EXECUTE SELL
     # ════════════════════════════════════════════════════════════════════
     def format_quantity(self, symbol, qty):
-        if symbol == 'BTCUSDT':
-            return round(qty, 5)
-        elif symbol == 'ETHUSDT':
-            return round(qty, 4)
-        else:
-            return round(qty, 5)
+        try:
+            _, precision = self.get_symbol_precision(symbol)
+        except Exception:
+            precision = 5
+        # Floor to step precision so we never round up over actual balance
+        factor = 10 ** precision
+        floored = math.floor(qty * factor) / factor
+        return floored
+
+    def qty_to_str(self, symbol, qty):
+        try:
+            _, precision = self.get_symbol_precision(symbol)
+        except Exception:
+            precision = 5
+        return f"{qty:.{precision}f}"
 
     def get_available_quantity(self, symbol):
         asset = symbol.replace('USDT', '')
@@ -1680,7 +2125,15 @@ class SmartTrader:
             sell_quantity = self.format_quantity(symbol, sell_quantity)
 
             if sell_quantity <= 0:
-                print(f"   ⚠️ Sell quantity too small for {symbol}")
+                # Ghost position: position dict says we own X but exchange free
+                # balance is dust/zero (e.g. previous sell left rounding remainder).
+                # Force-remove from open_positions so the position cap doesn't
+                # block new entries forever.
+                print(f"   ⚠️ Sell quantity too small for {symbol} — clearing ghost position")
+                self.open_positions = [p for p in self.open_positions
+                                       if p.get('trade_id') != position.get('trade_id')]
+                self.position_open[symbol] = False
+                self.positions.pop(symbol, None)
                 return None
 
             if DRY_RUN:
@@ -1690,7 +2143,7 @@ class SmartTrader:
             else:
                 order = self.client.order_market_sell(
                     symbol=symbol,
-                    quantity=sell_quantity
+                    quantity=self.qty_to_str(symbol, sell_quantity)
                 )
                 fill_price = float(order['fills'][0]['price'])
                 exit_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
@@ -1738,9 +2191,24 @@ class SmartTrader:
                     self.daily_loss_ratio += abs(pnl) / safe_balance
                 result = 'LOSS' if pnl < 0 else 'WIN'
                 self.log_trade(result)
+                # Per-strategy loss tracking
+                if result == 'LOSS' and position.get('position_type') == 'B_RANGE':
+                    self.b_daily_losses += 1
+                    if STRATEGY_B_RANGE and self.b_daily_losses >= B_MAX_LOSSES_PER_DAY:
+                        self.send_telegram(
+                            f"🛑 B daily loss cap hit ({self.b_daily_losses}/{B_MAX_LOSSES_PER_DAY}) — no new B entries until tomorrow"
+                        )
+                if result == 'LOSS' and position.get('position_type') == 'C_FADE':
+                    self.c_daily_losses += 1
+                    if STRATEGY_C_FADE and self.c_daily_losses >= C_MAX_LOSSES_PER_DAY:
+                        self.send_telegram(
+                            f"🛑 C daily loss cap hit ({self.c_daily_losses}/{C_MAX_LOSSES_PER_DAY}) — no new C entries until tomorrow"
+                        )
                 self.update_streak(result)
 
             # Log trade
+            _exit_session, _ = self.get_market_session()
+            _pos_dict = self.positions.get(symbol, {})
             self._log_trade({
                 'id': position.get('trade_id'),
                 'pair': symbol,
@@ -1750,12 +2218,24 @@ class SmartTrader:
                 'stop_loss': position['stop_loss'],
                 'take_profit': position['take_profit'],
                 'profit': round(pnl, 4),
+                'pnl_percent': round(pnl_percent, 4),
                 'win': pnl > 0,
                 'entry_time': position.get('entry_time').isoformat() if position.get('entry_time') else None,
                 'exit_time': exit_time.isoformat(),
                 'exit_reason': reason,
                 'market_condition': position.get('market_condition'),
                 'entry_reason': position.get('entry_reason'),
+                # ── diagnostic fields for weekly review ─────────────────
+                'trade_type': position.get('signal', {}).get('trade_type'),
+                'entry_session': position.get('session_at_entry'),
+                'exit_session': _exit_session,
+                'htf_bullish_at_entry': position.get('htf_bullish_at_entry'),
+                'atr_at_entry': position.get('atr'),
+                'position_boost': position.get('signal', {}).get('position_boost'),
+                'strength': position.get('signal', {}).get('strength'),
+                'hold_minutes': round((exit_time - position.get('entry_time')).total_seconds() / 60.0, 1)
+                                if position.get('entry_time') else None,
+                'partial_taken': _pos_dict.get('tp1_hit', False),
             })
 
             emoji = "✅" if pnl >= 0 else "❌"
@@ -1860,6 +2340,14 @@ class SmartTrader:
             return
         if self.daily_trades >= MAX_TRADES_PER_DAY:
             return
+        # Session-restricted entries: only London open & US open windows (UTC)
+        from datetime import timezone as _tz
+        _utc_now = datetime.now(_tz.utc)
+        utc_time = _utc_now.hour + _utc_now.minute / 60.0
+        in_london = 7.0 <= utc_time < 11.0       # London open + first hours
+        in_us     = 13.0 <= utc_time < 17.0      # US open through power hour
+        if not (in_london or in_us):
+            return  # silent skip — outside high-conviction windows
         last_any = max(self.last_trade_time.values()) if self.last_trade_time else 0
         if time.time() - last_any < 900:
             return
@@ -1880,8 +2368,21 @@ class SmartTrader:
         ema_slow = close.ewm(span=21).mean()
         trend    = ema_fast.iloc[-1] > ema_slow.iloc[-1]
 
-        # ── MOMENTUM ─────────────────────────────────────────────────────
-        momentum = close.iloc[-1] > close.iloc[-3]
+        # ── MOMENTUM ALIGNMENT: RSI rising + MACD cross ──────────────────
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, np.nan)
+        rsi   = 100 - (100 / (1 + rs))
+        rsi_rising = rsi.iloc[-1] > 50 and rsi.iloc[-1] > rsi.iloc[-3]
+
+        ema12       = close.ewm(span=12).mean()
+        ema26       = close.ewm(span=26).mean()
+        macd_line   = ema12 - ema26
+        signal_line = macd_line.ewm(span=9).mean()
+        macd_cross  = macd_line.iloc[-1] > signal_line.iloc[-1] and macd_line.iloc[-2] <= signal_line.iloc[-2]
+
+        momentum = rsi_rising  # RSI rising strongly (used in 3-factor score)
 
         # ── VOLUME (session-aware floor) ─────────────────────────────────
         _nz_h = datetime.now(pytz.timezone('Pacific/Auckland')).hour
@@ -1901,27 +2402,159 @@ class SmartTrader:
         # ── VOLATILITY EXPANSION ─────────────────────────────────────────
         atr                  = (high - low).rolling(14).mean()
         atr_val              = atr.iloc[-1]
-        if atr_val < price * 0.008:   # require 0.8% ATR for $2-$3.50 net on $60 position
+        if atr_val < price * 0.002:   # require 0.2% ATR for calmer market entries
             return
         volatility_expanding = len(atr) >= 6 and atr_val > atr.iloc[-5]
 
-        # ── REGIME FILTER ────────────────────────────────────────────────
-        trend_strength = abs(ema_fast.iloc[-1] - ema_slow.iloc[-1])
-        is_trending    = trend_strength > price * 0.0015
+        # ── MOMENTUM ALIGNMENT SCORE (3-factor: trend / momentum / volume) ──
+        score = sum([trend, momentum, volume_spike])  # max 3 = A+ conditions
 
-        # ── SCORE ────────────────────────────────────────────────────────
-        score = sum([trend, momentum, volume_spike, breakout,
-                     volatility_expanding, is_trending])
+        _entry_sess, _entry_settings = self.get_market_session()
+        _min_score = _entry_settings.get('min_score', 2)
 
         # ── ENTRY ────────────────────────────────────────────────────────
         top_atr = atr.iloc[-1]
-        if score == 3 and volatility_expanding and breakout:
-            print(f"   ⭐ A+ {symbol} score={score}/6 @ {price:.4f}")
-            self.execute_trade(symbol, price, atr=top_atr, trade_type='A+_BREAKOUT', small_position=False)
+        rsi_val = rsi.iloc[-1]
+
+        # ── STRATEGY B: range mean-reversion (runs BEFORE htf trend gate) ──
+        # B activates when the 15m market regime is RANGING. It deliberately
+        # bypasses htf_trend_bullish — that gate is what blocks every entry
+        # in sideways markets, which is exactly where B is meant to trade.
+        # Shares V2's daily loss cap so the combined daily loss budget stays 3.
+        if STRATEGY_B_RANGE:
+            try:
+                _regime_now = detect_market_regime(df)
+            except Exception:
+                _regime_now = 'UNKNOWN'
+            if _regime_now == 'RANGING':
+                if getattr(self, 'b_daily_losses', 0) >= B_MAX_LOSSES_PER_DAY:
+                    return  # B daily loss cap
+                # HTF breakdown veto: skip B if 1h is below EMA50 and falling.
+                # B is mean-reversion — it loses money buying ranges that have
+                # already broken down on the 1h timeframe (slow grind into stop).
+                if B_HTF_BREAKDOWN_VETO:
+                    df_1h = self.get_candles(symbol, '1h', 60)
+                    if df_1h is not None and len(df_1h) >= 52:
+                        ema50 = df_1h['close'].ewm(span=50, adjust=False).mean()
+                        c_now = df_1h['close'].iloc[-1]
+                        ema_now = ema50.iloc[-1]
+                        ema_prev = ema50.iloc[-3]
+                        if c_now < ema_now and ema_now < ema_prev:
+                            if not hasattr(self, '_b_last_reason'):
+                                self._b_last_reason = {}
+                            _r = f"1h breakdown (price<EMA50 & falling)"
+                            if self._b_last_reason.get(symbol) != _r:
+                                self._b_last_reason[symbol] = _r
+                                print(f"   ⏭️  B {symbol}: {_r}")
+                            return
+                b_ok, b_reason = self.quality_range_signal(df)
+                if not b_ok:
+                    if not hasattr(self, '_b_last_reason'):
+                        self._b_last_reason = {}
+                    if self._b_last_reason.get(symbol) != b_reason:
+                        self._b_last_reason[symbol] = b_reason
+                        print(f"   ⏭️  B {symbol}: {b_reason}")
+                    return
+                print(f"   🎯 B RANGE {symbol} @ {price:.4f} — {b_reason}")
+                self.execute_buy(symbol, {
+                    'price': price,
+                    'trade_type': 'B_RANGE',
+                    'strength': 1.0,
+                    'atr': atr.iloc[-1],
+                    'position_boost': 1.0,
+                    'htf_bullish': True,   # bypass — range trade, no trend gate
+                })
+                return
+            # ── STRATEGY C: volatility wick reversal (runs in VOLATILE regime) ──
+            if STRATEGY_C_FADE and _regime_now == 'VOLATILE':
+                if getattr(self, 'c_daily_losses', 0) >= C_MAX_LOSSES_PER_DAY:
+                    return  # C daily loss cap
+                if getattr(self, 'c_daily_trades', 0) >= C_MAX_TRADES_PER_DAY:
+                    return  # C daily trade cap
+                # Per-symbol cooldown
+                _last_c = self._c_last_entry_ts.get(symbol, 0)
+                if time.time() - _last_c < C_COOLDOWN_MIN * 60:
+                    return  # silent — within cooldown
+                c_ok, c_reason = self.quality_fade_signal(df)
+                if not c_ok:
+                    if not hasattr(self, '_c_last_reason'):
+                        self._c_last_reason = {}
+                    if self._c_last_reason.get(symbol) != c_reason:
+                        self._c_last_reason[symbol] = c_reason
+                        print(f"   ⏭️  C {symbol}: {c_reason}")
+                    return
+                print(f"   🎯 C FADE {symbol} @ {price:.4f} — {c_reason}")
+                self._c_last_entry_ts[symbol] = time.time()
+                self.execute_buy(symbol, {
+                    'price': price,
+                    'trade_type': 'C_FADE',
+                    'strength': 1.0,
+                    'atr': atr.iloc[-1],
+                    'position_boost': 1.0,
+                    'htf_bullish': True,   # bypass — sweep play, no trend gate
+                })
+                return
+            # Not RANGING or VOLATILE — fall through to V2/htf path below
+
+        # 1h trend filter — skip counter-trend entries (V2 only)
+        htf_ok, htf_reason = self.htf_trend_bullish(symbol)
+        if not htf_ok:
+            print(f"   🚫 {symbol} skipped — {htf_reason}")
             return
-        if score >= 2 and volatility_expanding and breakout:
-            print(f"   🔍 SCOUT {symbol} score={score}/6 @ {price:.4f}")
-            self.execute_trade(symbol, price, atr=top_atr, trade_type='SCOUT', small_position=True)
+
+        # ── STRATEGY V2: pullback-into-trend ──────────────────────────────
+        # When V2 is on, *only* the quality pullback setup can enter. The
+        # A+ breakout / SCOUT branches below are skipped entirely.
+        if STRATEGY_V2_PULLBACK:
+            # Daily loss circuit breaker
+            if getattr(self, 'v2_daily_losses', 0) >= V2_MAX_LOSSES_PER_DAY:
+                return  # silent — already logged once at the trigger
+            v2_ok, v2_reason = self.quality_pullback_signal(df)
+            if not v2_ok:
+                # Print only when reason changes per symbol — avoids log spam
+                # while still showing what's blocking V2
+                if not hasattr(self, '_v2_last_reason'):
+                    self._v2_last_reason = {}
+                if self._v2_last_reason.get(symbol) != v2_reason:
+                    self._v2_last_reason[symbol] = v2_reason
+                    print(f"   ⏭️  V2 {symbol}: {v2_reason}")
+                return
+            print(f"   🎯 V2 PULLBACK {symbol} @ {price:.4f} — {v2_reason} [{htf_reason}]")
+            self.execute_buy(symbol, {
+                'price': price,
+                'trade_type': 'V2_PULLBACK',
+                'strength': 1.0,
+                'atr': atr.iloc[-1],
+                'position_boost': 1.0,
+                'htf_bullish': htf_ok,
+            })
+            return
+
+        # Conviction-based sizing: A+ aligned with 1h trend = full, scout = small
+        # (passed to execute_buy via signal dict; execute_buy applies session_boost on top)
+        if score == 3 and volatility_expanding:
+            # A+ confluence + 1h aligned = max conviction
+            conviction_size = 1.20 if macd_cross else 1.00
+            print(f"   ⭐ A+ {symbol} score={score}/3 @ {price:.4f} (RSI:{rsi_val:.0f} MACD:{'✓' if macd_cross else '~'}) [{htf_reason}]")
+            self.execute_buy(symbol, {
+                'price': price,
+                'trade_type': 'A+_BREAKOUT',
+                'strength': 1.0,
+                'atr': top_atr,
+                'position_boost': conviction_size,
+                'htf_bullish': htf_ok,
+            })
+            return
+        if score >= _min_score and volatility_expanding and breakout:
+            print(f"   🔍 SCOUT {symbol} score={score}/3 @ {price:.4f} (RSI:{rsi_val:.0f}) [{htf_reason}]")
+            self.execute_buy(symbol, {
+                'price': price,
+                'trade_type': 'SCOUT',
+                'strength': 0.5,
+                'atr': top_atr,
+                'position_boost': 0.65,
+                'htf_bullish': htf_ok,
+            })
 
     # ════════════════════════════════════════════════════════════════════
     # UNIFIED EXIT
@@ -1974,23 +2607,35 @@ class SmartTrader:
                 self.positions.pop(symbol, None)
                 continue
 
-            pos['candles'] += 1
+            # Track candles by real elapsed time, not scan-cycle count
+            pos['candles'] = int((datetime.now() - pos.get('entry_time', datetime.now())).total_seconds() / (15 * 60))
 
             # Fee-killer guard: skip exit if move too small to cover fees
-            atr_now = (self.get_candles(symbol, '15m', 20) or None)
-            atr_now = ((atr_now['high'] - atr_now['low']).rolling(14).mean().iloc[-1]
-                       if atr_now is not None and len(atr_now) >= 14 else None)
+            atr_df = self.get_candles(symbol, '15m', 20)
+            atr_now = ((atr_df['high'] - atr_df['low']).rolling(14).mean().iloc[-1]
+                       if atr_df is not None and len(atr_df) >= 14 else None)
             if atr_now and abs(current_price - pos['entry']) < atr_now * 0.3:
                 continue
+
+            # Momentum add only after price clears entry by MIN_ADD_ATR × ATR
+            _, _add_sess = self.get_market_session()
+            if _add_sess.get('allow_adds', True) and (not pos.get('added')) and atr_now and current_price > pos['entry'] + (atr_now * MIN_ADD_ATR):
+                open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
+                if open_pos is not None:
+                    self.add_small_position(open_pos, current_price)
+                    if open_pos.get('scaled_in'):
+                        pos['qty'] = open_pos.get('quantity', pos['qty'])
+                        pos['added'] = True
 
             # STOP LOSS
             if current_price <= pos['sl']:
                 self.exit_trade(symbol, 'STOP LOSS', current_price)
                 continue
 
-            # STAGE 1: TP1 at 1R — sell 40%, move SL to breakeven
+            # STAGE 1: TP1 hit — sell partial, move SL to breakeven buffer
             if not pos['tp1_hit'] and current_price >= pos['tp1']:
-                sell_qty = self.format_quantity(symbol, pos['qty'] * 0.40)
+                _tp1_ratio = OPTION_C_TP1_RATIO if OPTION_C_MODE else PARTIAL_TP_RATIO
+                sell_qty = self.format_quantity(symbol, pos['qty'] * _tp1_ratio)
                 open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
                 order = self.execute_sell(open_pos, 'TP1', quantity=sell_qty) if open_pos else None
                 if order:
@@ -2003,45 +2648,39 @@ class SmartTrader:
                     self.stats['best_trade'] = max(self.stats['best_trade'], profit)
                     pos['qty'] -= sell_qty
                     pos['tp1_hit'] = True
-                    pos['sl'] = pos['entry']   # breakeven
-                    msg = f"TP1 (1R) {symbol} | +${profit:.2f} | SL → breakeven"
+                    pos['sl'] = pos['entry'] * (1 + BREAK_EVEN_BUFFER)
+                    msg = f"TP1 HIT {symbol} | +${profit:.2f} | SL → breakeven+buffer"
                     logging.info(msg)
                     self.send_telegram(msg)
                     self.print_stats()
 
-            # STAGE 2: TP2 at 2R — sell 50% of remaining (30% of original)
-            if pos['tp1_hit'] and not pos['tp2_hit'] and current_price >= pos['tp2']:
-                sell_qty = self.format_quantity(symbol, pos['qty'] * 0.50)
-                open_pos = next((p for p in self.open_positions if p['symbol'] == symbol), None)
-                order = self.execute_sell(open_pos, 'TP2', quantity=sell_qty) if open_pos else None
-                if order:
-                    profit = self.calculate_profit(pos['entry'], current_price, sell_qty)
-                    self.daily_pnl += profit
-                    self.stats['total_trades'] += 1
-                    self.stats['total_pnl'] += profit
-                    self.stats['wins'] += 1
-                    self.stats['gross_wins'] += profit
-                    self.stats['best_trade'] = max(self.stats['best_trade'], profit)
-                    pos['qty'] -= sell_qty
-                    pos['tp2_hit'] = True
-                    msg = f"TP2 (2R) {symbol} | +${profit:.2f} | Runner active"
-                    logging.info(msg)
-                    self.send_telegram(msg)
-                    self.print_stats()
+            # Full runner exit after TP1 (US session only)
+            _, _runner_sess = self.get_market_session()
+            if ENABLE_RUNNERS and _runner_sess.get('runner_mode', False) and pos.get('tp1_hit') and current_price >= pos.get('runner_tp', float('inf')):
+                self.exit_trade(symbol, 'RUNNER TP', current_price)
+                continue
 
             # TRACK MAX PRICE
             if current_price > pos['max_price']:
                 pos['max_price'] = current_price
 
-            # RUNNER: trail 3% below max after TP1; 1.5% before
-            trail_pct = RUNNER_TRAIL if pos['tp1_hit'] else TRAILING_STOP
+            # RUNNER: trail 3% below max after TP1; 1.5% before (Option C: 0.5% tight trail post-TP1)
+            if OPTION_C_MODE and pos['tp1_hit']:
+                trail_pct = 1 - OPTION_C_TRAIL_PCT
+            else:
+                trail_pct = RUNNER_TRAIL if pos['tp1_hit'] else TRAILING_STOP
             trailing_sl = pos['max_price'] * trail_pct
             if current_price <= trailing_sl:
                 self.exit_trade(symbol, 'RUNNER EXIT', current_price)
                 continue
 
-            # TIME EXIT: only if trade peaked above entry but stalled
-            if pos['candles'] >= TIME_EXIT_CANDLES and pos['max_price'] > pos['entry']:
+            # Smarter time exit: only exit stagnant or losing positions — never cut a winner
+            if (
+                pos['candles'] >= TIME_EXIT_CANDLES
+                and atr_now is not None
+                and current_price <= pos['entry']  # only if not profitable
+                and abs(current_price - pos['entry']) > atr_now * 0.3
+            ):
                 self.exit_trade(symbol, 'TIME EXIT', current_price)
         # ── END manage_trade loop ─────────────────────────────────────────
 
@@ -2070,15 +2709,48 @@ class SmartTrader:
                 self.execute_sell(position, 'TIME_EXIT')
                 continue
 
-            if candles_open > 3 and pnl_percent < 0:
+            # B 45-MIN TIME STOP: range trades that don't reach TP fast get cut
+            if STRATEGY_B_RANGE and position.get('position_type') == 'B_RANGE':
+                _age_min_b = (datetime.now() - position['entry_time']).total_seconds() / 60.0
+                if _age_min_b >= B_TIME_STOP_MIN:
+                    _pnl_pct_b = (current_price - position['entry_price']) / position['entry_price']
+                    print(f"\n   ⏱️ B TIME STOP {symbol}: {_age_min_b:.0f}min, PnL {_pnl_pct_b*100:+.2f}% — cutting")
+                    self.execute_sell(position, 'B_TIME_STOP')
+                    continue
+
+            # C 30-MIN TIME STOP: volatility fades that don't pay off fast get cut
+            if STRATEGY_C_FADE and position.get('position_type') == 'C_FADE':
+                _age_min_c = (datetime.now() - position['entry_time']).total_seconds() / 60.0
+                if _age_min_c >= C_TIME_STOP_MIN:
+                    _pnl_pct_c = (current_price - position['entry_price']) / position['entry_price']
+                    print(f"\n   ⏱️ C TIME STOP {symbol}: {_age_min_c:.0f}min, PnL {_pnl_pct_c*100:+.2f}% — cutting")
+                    self.execute_sell(position, 'C_TIME_STOP')
+                    continue
+
+            # V2 60-MIN TIME STOP: if V2 trade hasn't moved meaningfully and TP1 not hit, cut it
+            # (skip for B and C — they have their own time stops above)
+            if (STRATEGY_V2_PULLBACK and not position.get('tp1_hit', False)
+                    and position.get('position_type') != 'B_RANGE'
+                    and position.get('position_type') != 'C_FADE'):
+                _age_min = (datetime.now() - position['entry_time']).total_seconds() / 60.0
+                if _age_min >= V2_TIME_STOP_MIN:
+                    _pnl_pct = (current_price - position['entry_price']) / position['entry_price']
+                    if abs(_pnl_pct) < 0.005:   # stuck within ±0.5%
+                        print(f"\n   ⏱️ V2 TIME STOP {symbol}: {_age_min:.0f}min, PnL {_pnl_pct*100:+.2f}% — cutting")
+                        self.execute_sell(position, 'V2_TIME_STOP')
+                        continue
+
+            # Session-specific kill timer: cut EU losers fast, give US runners more room
+            _monitor_session, _ = self.get_market_session()
+            if _monitor_session == 'london':
+                _kill_candles = 6    # ~1.5h — don't let EU losers eat the daily budget before US opens
+            elif _monitor_session == 'us':
+                _kill_candles = 14   # ~3.5h — US trends need room; institutional moves take time
+            else:
+                _kill_candles = KILL_TRADE_CANDLES
+            if candles_open > _kill_candles and pnl_percent < -1.0:
                 print(f"\n   ⚡ KILL BAD TRADE {symbol}: {candles_open} candles open, PNL {pnl_percent:.2f}%")
                 self.execute_sell(position, 'TIMEOUT_LOSS')
-                continue
-
-            # 3. HARD TIMEOUT: close any trade still open after 4 candles (60 min)
-            if candles_open > 4:
-                print(f"\n   ⏱️ TIMEOUT {symbol}: {candles_open} candles open → closing (PNL {pnl_percent:.2f}%)")
-                self.execute_sell(position, 'TIMEOUT')
                 continue
 
             # 4. SCOUT ADD-ON: scale to full position when breakout confirms
@@ -2130,83 +2802,89 @@ class SmartTrader:
                     if len(rsi_series) >= 2:
                         current_rsi = rsi_series.iloc[-1]
                         prev_rsi    = rsi_series.iloc[-2]
-                        if prev_rsi >= 70 and current_rsi < prev_rsi and pnl_percent > 0:
+                        if prev_rsi >= 70 and current_rsi < prev_rsi and pnl_percent > 0 and position.get('tp1_hit'):
                             print(f"\n   📉 RSI OVERBOUGHT EXIT {symbol}: RSI {prev_rsi:.1f}→{current_rsi:.1f}, PNL +{pnl_percent:.2f}%")
                             self.execute_sell(position, 'RSI_OVERBOUGHT')
                             continue
             except Exception:
                 pass
 
-            # 6. TRAILING STOP: activates at 1.5% profit; looser after partial TP
-            if pnl_percent >= self.trailing_stop_activation:
-                # track max price
-                if current_price > position.get('highest_price', 0):
-                    position['highest_price'] = current_price
+            # 6. TRAILING STOP: only activates after TP1 is secured; ATR-based width
+            # Tracks highest price throughout the trade regardless of when trail activates
+            if current_price > position.get('highest_price', 0):
+                position['highest_price'] = current_price
 
-                # tighter trail AFTER profit locked; looser before TP1
-                trail_mult = 0.995 if position.get('tp1_hit') else 0.990
+            if position.get('tp1_hit'):
+                # Use ATR for trail width so normal crypto pullbacks don't shake us out
+                atr = position.get('atr')
+                if atr:
+                    new_trail = position['highest_price'] - atr * 1.5
+                else:
+                    new_trail = position['highest_price'] * 0.980  # 2% fallback
 
                 if not position.get('trailing_stop_active'):
                     position['trailing_stop_active'] = True
-                    position['trailing_stop_price'] = position['highest_price'] * trail_mult
-                    print(f"   🔒 TRAILING STOP ACTIVATED {symbol} @ ${position['trailing_stop_price']:.4f}")
+                    position['trailing_stop_price'] = new_trail
+                    print(f"   🔒 TRAILING STOP ACTIVATED {symbol} @ ${new_trail:.4f}")
                     self.send_telegram(
                         f"🔒 Trailing Stop Active\n{symbol}\n"
                         f"Profit: +{pnl_percent:.2f}%\n"
-                        f"Trail: ${position['trailing_stop_price']:.4f}"
+                        f"Trail: ${new_trail:.4f}"
                     )
-
-                # Update trailing stop if price moves higher
-                strong_trend = position.get('signal', {}).get('strength', 0) >= self.strong_setup_threshold
-                atr = position.get('atr')
-                if strong_trend and atr:
-                    new_trail = position['highest_price'] - atr * 0.8
-                else:
-                    new_trail = position['highest_price'] * trail_mult
-                locked = self.trailing_stop(current_price, position['entry_price'])
-                if locked:
-                    new_trail = max(new_trail, locked)
-                if new_trail > position.get('trailing_stop_price', 0):
+                elif new_trail > position.get('trailing_stop_price', 0):
                     position['trailing_stop_price'] = new_trail
                     print(f"   📈 TRAILING STOP RAISED {symbol} @ ${new_trail:.4f}")
 
-                # Check if trailing stop hit
                 if position.get('trailing_stop_price') and current_price <= position['trailing_stop_price']:
                     print(f"\n   🔒 TRAILING STOP HIT {symbol} @ ${current_price:.4f}")
                     self.execute_sell(position, 'TRAILING_STOP')
                     continue
 
             # 4. MOMENTUM ADD-ON: scale in only after 0.5x ATR confirmed move
-            add_threshold = position['entry_price'] + (position.get('atr', 0) * 0.5)
+            add_threshold = position['entry_price'] + (position.get('atr', 0) * MIN_ADD_ATR)
             trade_in_profit = current_price > add_threshold
             breakout_continues = current_price > position.get('entry_resistance', current_price)
-            if trade_in_profit and breakout_continues and not position.get('scaled_in'):
+            _, _add_sess2 = self.get_market_session()
+            if _add_sess2.get('allow_adds', True) and trade_in_profit and breakout_continues and not position.get('scaled_in'):
                 self.add_small_position(position, current_price)
 
-            # 8. TP1: sell PARTIAL_TP_RATIO, move SL to entry + BREAKEVEN_BUFFER
+            # 8. TP1: sell partial, move SL to entry + BREAKEVEN_BUFFER
             if not position.get('tp1_hit') and current_price >= position['tp1']:
-                qty = position['original_quantity'] * PARTIAL_TP_RATIO
+                _tp1_ratio = OPTION_C_TP1_RATIO if OPTION_C_MODE else PARTIAL_TP_RATIO
+                qty = position['original_quantity'] * _tp1_ratio
                 result = self.execute_sell(position, 'TP1', quantity=qty)
                 if result:
                     position['tp1_hit'] = True
-                    position['remaining_size'] = position.get('remaining_size', position['original_quantity']) * (1 - PARTIAL_TP_RATIO)
+                    position['remaining_size'] = position.get('remaining_size', position['original_quantity']) * (1 - _tp1_ratio)
                     position['stop_loss'] = position['entry_price'] * (1 + BREAKEVEN_BUFFER)
-                    print(f"   🎯 TP1 {symbol} → sold {PARTIAL_TP_RATIO:.0%}, SL → breakeven+{BREAKEVEN_BUFFER:.1%}")
+                    print(f"   🎯 TP1 {symbol} → sold {_tp1_ratio:.0%}, SL → breakeven+{BREAKEVEN_BUFFER:.1%}")
                 continue
 
-            # 9. TP2 (+2%): sell another 30% (80% total closed)
+            # 9. TP2: sell another tier (Option C: 50% / legacy: 30%)
             if position.get('tp1_hit') and not position.get('tp2_hit') and current_price >= position['tp2']:
-                qty = position['original_quantity'] * 0.3
+                _tp2_ratio = OPTION_C_TP2_RATIO if OPTION_C_MODE else 0.3
+                qty = position['original_quantity'] * _tp2_ratio
                 result = self.execute_sell(position, 'TP2', quantity=qty)
                 if result:
                     position['tp2_hit'] = True
-                    position['runner_trailing'] = current_price * self.trailing_stop_multiplier
-                    print(f"   🎯 TP2 {symbol} +2% → sold 30%, runner trailing @ ${position['runner_trailing']:.4f}")
+                    if OPTION_C_MODE:
+                        position['runner_trailing'] = current_price * (1 - OPTION_C_TRAIL_PCT)
+                    else:
+                        position['runner_trailing'] = current_price * self.trailing_stop_multiplier
+                    print(f"   🎯 TP2 {symbol} → sold {_tp2_ratio:.0%}, runner trailing @ ${position['runner_trailing']:.4f}")
                 continue
 
-            # 10. RUNNER (last 20%): looser trail after partial TP, sell all when hit
+            # 10. RUNNER: trail the remainder (Option C: 0.5% tight / legacy: 1.5*ATR)
             if position.get('tp2_hit'):
-                position['runner_trailing'] = max(position['runner_trailing'], current_price * 0.990)
+                if OPTION_C_MODE:
+                    runner_trail = position['highest_price'] * (1 - OPTION_C_TRAIL_PCT)
+                else:
+                    atr = position.get('atr')
+                    if atr:
+                        runner_trail = position['highest_price'] - atr * 1.5
+                    else:
+                        runner_trail = current_price * 0.980
+                position['runner_trailing'] = max(position.get('runner_trailing', 0), runner_trail)
                 if current_price <= position['runner_trailing']:
                     print(f"\n   🏁 RUNNER EXIT {symbol} @ ${current_price:.4f}")
                     self.execute_sell(position, 'RUNNER_TRAIL')
@@ -2217,14 +2895,25 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     def check_circuit_breaker(self):
         total = self.get_total_balance()
+        # Ignore reads when the underlying balance API call failed (clock drift,
+        # network blip, etc.) — a transient error should not trip the breaker.
+        if self._last_balance_error is not None:
+            print(f"   ⚠️  Skipping circuit breaker check — balance read failed: {self._last_balance_error}")
+            return True
         if total <= self.circuit_breaker_limit:
+            self._breaker_strikes += 1
+            print(f"   ⚠️  Sub-limit balance read {self._breaker_strikes}/{self._breaker_strikes_required} (${total:.2f} <= ${self.circuit_breaker_limit:.2f})")
+            if self._breaker_strikes < self._breaker_strikes_required:
+                return True
             msg = (f"🚨 CIRCUIT BREAKER TRIGGERED\n"
                    f"Balance: ${total:.2f}\n"
                    f"Limit: ${self.circuit_breaker_limit:.2f}\n"
+                   f"Strikes: {self._breaker_strikes} consecutive sub-limit reads\n"
                    f"Bot stopped to protect capital.")
             print(f"\n   {msg}")
             self.send_telegram(msg)
             return False
+        self._breaker_strikes = 0
         return True
 
     # ════════════════════════════════════════════════════════════════════
@@ -2246,9 +2935,17 @@ class SmartTrader:
         if today != self.last_reset_date:
             print(f"\n   🔄 New day - resetting daily counters")
             self.daily_trades = 0
+            self.eu_trades_today = 0
+            self.us_trades_today = 0
+            self.last_session = None
             self.daily_profit = 0.0
             self.daily_loss = 0.0
             self.daily_pnl = 0.0
+            self.v2_daily_losses = 0
+            self.b_daily_losses  = 0
+            self.b_daily_trades  = 0
+            self.c_daily_losses  = 0
+            self.c_daily_trades  = 0
             self.daily_loss_ratio = 0.0
             self.consecutive_losses = 0
             self.last_trade_time = {}
@@ -2367,6 +3064,11 @@ class SmartTrader:
     def update_streak(self, result):
         if result == 'LOSS':
             self.consecutive_losses += 1
+            self.v2_daily_losses    += 1
+            if STRATEGY_V2_PULLBACK and self.v2_daily_losses >= V2_MAX_LOSSES_PER_DAY:
+                self.send_telegram(
+                    f"🛑 V2 daily loss cap hit ({self.v2_daily_losses}/{V2_MAX_LOSSES_PER_DAY}) — no new entries until tomorrow"
+                )
         else:
             self.consecutive_losses = 0
         if self.consecutive_losses >= self.max_consecutive_losses:
@@ -2387,10 +3089,8 @@ class SmartTrader:
         return True, daily_loss
 
     def can_trade(self):
-        # UTC trading window: EU session (07-16) and US session (18-23) only
-        hour = datetime.utcnow().hour
-        if not (7 <= hour <= 16 or 18 <= hour <= 23):
-            return False, f"🕐 OUTSIDE TRADING HOURS (UTC {hour:02d}:00)"
+        # Trading window: 24/7 (crypto markets never close)
+        # Session-slot caps below already prevent overtrading per session.
 
         # Weekly loss guard
         if self.weekly_pnl <= -self.max_weekly_loss:
@@ -2434,10 +3134,20 @@ class SmartTrader:
             remaining = 300 - (time.time() - last_any)
             return False, f"⏳ COOLDOWN: {remaining:.0f}s remaining"
 
-        # Session trade limit
+        # Per-session slot management — EU capped at 1 to guarantee 2 slots for US
         session, settings = self.get_market_session()
-        if self.daily_trades >= settings['max_trades']:
-            return False, f"Session limit ({self.daily_trades}/{settings['max_trades']} {session.upper()})"
+        if session == 'london':
+            if self.eu_trades_today >= 1:
+                return False, f"🕐 EU slot taken ({self.eu_trades_today}/1) — saving 2 slots for US"
+            if self.daily_profit >= 3.50:
+                return False, f"🕐 EU profit lock (${self.daily_profit:.2f} ≥ $3.50) — preserving daily budget for US"
+        elif session == 'us':
+            eu_unused = max(0, 1 - self.eu_trades_today)   # slot EU didn't use
+            us_cap = 2 + eu_unused                          # US gets 2 + any EU leftover
+            if self.us_trades_today >= us_cap:
+                return False, f"🕐 US slots full ({self.us_trades_today}/{us_cap})"
+        elif session == 'asia' and self.daily_trades >= settings['max_trades']:
+            return False, f"Session limit ({self.daily_trades}/{settings['max_trades']} ASIA)"
 
         return True, "OK"
 
@@ -2469,6 +3179,9 @@ class SmartTrader:
                 entry_price = known_entries.get(symbol, current_price)
                 stop_loss = entry_price * (1 - self.stop_loss_percent / 100)
                 take_profit = entry_price * (1 + self.take_profit_percent / 100)
+                _sl_distance = entry_price - stop_loss
+                tp1_price = entry_price + (_sl_distance * TP1_MULTIPLIER)
+                runner_tp_price = entry_price + (_sl_distance * RUNNER_MULTIPLIER)
                 position = {
                     'trade_id': f"{symbol}-synced",
                     'symbol': symbol,
@@ -2477,6 +3190,9 @@ class SmartTrader:
                     'entry_price': entry_price,
                     'stop_loss': stop_loss,
                     'take_profit': take_profit,
+                    'tp1': tp1_price,
+                    'runner_tp': runner_tp_price,
+                    'tp1_hit': False,
                     'risk_percent': self.stop_loss_percent / 100,
                     'rr_target': 2.0,
                     'entry_type': 'synced',
@@ -2497,6 +3213,18 @@ class SmartTrader:
                 }
                 self.open_positions.append(position)
                 self.position_open[symbol] = True
+                self.positions[symbol] = {
+                    'entry':     entry_price,
+                    'qty':       amount,
+                    'initial_qty': amount,
+                    'sl':        stop_loss,
+                    'tp1':       tp1_price,
+                    'runner_tp': runner_tp_price,
+                    'max_price': current_price,
+                    'candles':   0,
+                    'added':     False,
+                    'tp1_hit':   False,
+                }
                 pnl = (current_price - entry_price) * amount
                 print(f"   ✅ Synced: {amount:.8f} {asset} @ ${entry_price:.2f} | P&L: ${pnl:.2f}")
         except Exception as e:
@@ -2526,9 +3254,19 @@ class SmartTrader:
         print(f"\n   💰 Balance: ${balance:.2f} USDT")
 
         last_heartbeat = datetime.now()
+        last_clock_sync = datetime.now()
 
         while True:
             try:
+                # ── Periodic clock resync (hourly) to avoid -1021 drift ──
+                if (datetime.now() - last_clock_sync).seconds > 3600:
+                    try:
+                        st = self.client.get_server_time()['serverTime']
+                        self.client.timestamp_offset = st - int(time.time() * 1000)
+                    except Exception:
+                        pass
+                    last_clock_sync = datetime.now()
+
                 # ── Circuit breaker ───────────────────────────────────
                 if not self.check_circuit_breaker():
                     break
@@ -2588,6 +3326,10 @@ class SmartTrader:
                       f"Trades: {self.daily_trades}/{settings['max_trades']}]")
 
                 for symbol in self.trading_pairs:
+                    regime = 'RANGING'
+                    atr_tp = 2.2
+                    position_boost = 1.0
+
                     # Skip if already in this symbol
                     if self.position_open.get(symbol, False):
                         continue
@@ -2601,35 +3343,33 @@ class SmartTrader:
                         print(f"   ⚠️ {symbol} skipped - BTC filter")
                         continue
 
-                    # Session filter: EU (19-23 NZST) or US (1-5 NZST) only
-                    nz = pytz.timezone('Pacific/Auckland')
-                    now_hour = datetime.now(nz).hour
-                    if not ((19 <= now_hour <= 23) or (1 <= now_hour <= 5)):
-                        continue
-
                     # Unified entry check (score-based)
                     df_entry = self.get_candles(symbol, '15m', 60)
                     if df_entry is not None and len(df_entry) >= 32:
+                        regime = detect_market_regime(df_entry)
+                        if regime == 'TRENDING':
+                            atr_tp = 4.0
+                            position_boost = 1.3
+                        elif regime == 'VOLATILE':
+                            atr_tp = 1.8
+                            position_boost = 0.7
+
+                        recent_move = abs(df_entry['close'].iloc[-1] - df_entry['close'].iloc[-5])
                         atr = (df_entry['high'] - df_entry['low']).rolling(14).mean().iloc[-1]
-                        if atr < df_entry['close'].iloc[-1] * 0.008:
-                            print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f} < 0.8% of price)")
+                        if atr > 0 and recent_move > atr * 2.0:
+                            print(f"   ⚠️ {symbol} skipped — late entry (move {recent_move:.4f} > 2.0×ATR {atr * 2.0:.4f})")
                         else:
-                            recent_move = abs(df_entry['close'].iloc[-1] - df_entry['close'].iloc[-5])
-                            if recent_move > atr * 0.5:
-                                print(f"   ⚠️ {symbol} skipped — late entry (move {recent_move:.4f} > 0.5×ATR {atr * 0.5:.4f})")
-                            else:
-                                self.check_entry(symbol, df_entry)
+                            self.check_entry(symbol, df_entry)
 
                     signal = self.analyze(symbol)
+                    signal['regime'] = regime
+                    signal['atr_tp'] = atr_tp
+                    signal['position_boost'] = position_boost
 
-                    # Log anything interesting
-                    if signal['action'] != 'HOLD' or any(
-                        x in signal.get('reason', '')
-                        for x in ['HARD BLOCK', 'WAITING', 'Breakout', 'Daily target']
-                    ):
-                        print(f"   {symbol}: {signal['action']} "
-                              f"({signal.get('market_type','N/A')}|{signal.get('zone','?')}) "
-                              f"- {signal['reason']}")
+                    # Log every signal reason so you can see exactly what's blocking
+                    print(f"   {symbol}: {signal['action']} "
+                          f"({signal.get('market_type','N/A')}|{signal.get('zone','?')}) "
+                          f"- {signal['reason']}")
 
                     if signal['action'] == 'BUY' and signal['strength'] >= min_strength:
                         if len(self.open_positions) >= self.max_positions:
@@ -2646,7 +3386,9 @@ class SmartTrader:
                 print("\n\n   🛑 Bot stopped by user")
                 break
             except Exception as e:
+                import traceback
                 print(f"\n   ❌ Loop error: {e}")
+                traceback.print_exc()
                 time.sleep(10)
 
         net_pnl = self.daily_profit - self.daily_loss
@@ -2658,27 +3400,4 @@ class SmartTrader:
 
 if __name__ == '__main__':
     trader = SmartTrader()
-    balance = trader.get_balance()
-    trader.send_telegram(
-        f"🚀 Smart Trader V2 Started\n"
-        f"Balance: ${balance:.2f}\n"
-        f"Target: ${trader.daily_profit_target}/day\n"
-        f"Pairs: {', '.join(trader.trading_pairs)}"
-    )
-
-    engine = trader.entry_engine
-
-    while True:
-        try:
-            market_data = trader.get_market_data()
-            signals = engine.scan_market(market_data)
-            bought = any(s.get('action') == 'BUY' for s in signals)
-            if not bought:
-                trader.forced_b_plus_attempt(market_data)
-            time.sleep(5)
-        except KeyboardInterrupt:
-            print("\n\n   🛑 Bot stopped by user")
-            break
-        except Exception as e:
-            print(f"\n   ❌ Loop error: {e}")
-            time.sleep(10)
+    trader.run()
