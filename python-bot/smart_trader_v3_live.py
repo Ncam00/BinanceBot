@@ -565,6 +565,8 @@ class SmartTrader:
         self.trailing_stop_multiplier = TRAILING_STOP
         self.last_exit_price = {}
         self.partial_tp_percent = 0.70        # Sell 70% at first TP, let 30% run
+        self.break_even_profit_pct = 1.0      # Move SL to entry after +1% gain
+        self.trailing_tp_distance = 1.5       # Trail SL 1.5% below price after TP hit
 
         # ════════════════════════════════════════════════════════════════════
         # LOCATION-BASED TRADING SETTINGS
@@ -1667,6 +1669,41 @@ class SmartTrader:
         if balance is None:
             return 0
         return float(balance['free'])
+
+    def manage_active_trades(self):
+        """Phase 2: Active defense and profit trailing"""
+        for pos in self.open_positions:
+            symbol = pos['symbol']
+            current_price = self.get_price(symbol)
+            if not current_price: continue
+
+            entry = pos['entry_price']
+            current_sl = pos['stop_loss']
+            tp_target = pos['take_profit']
+
+            # A. BREAK-EVEN (Lock the vault at +1%)
+            # If price hits 1% profit, move SL to entry so you can't lose money.
+            if current_price >= entry * (1 + self.break_even_profit_pct / 100):
+                if current_sl < entry:
+                    pos['stop_loss'] = entry
+                    print(f"🛡️ {symbol} RISK REMOVED: Stop Loss moved to Break-Even.")
+
+            # B. TRAILING TAKE PROFIT (The "9/10" move)
+            # If price is ABOVE our initial TP, start trailing it.
+            if current_price >= tp_target:
+                new_trail_sl = current_price * (1 - self.trailing_tp_distance / 100)
+                # Only move the stop UP, never down.
+                if new_trail_sl > current_sl:
+                    pos['stop_loss'] = new_trail_sl
+                    print(f"📈 {symbol} TRAILING: Target hit, following price to {new_trail_sl:.2f}")
+
+            # C. DYNAMIC EXIT
+            # Check if current price has hit our (now moving) Stop Loss
+            if current_price <= pos['stop_loss']:
+                pnl = (current_price - entry) * pos['quantity']
+                print(f"🚀 EXITING {symbol}: Price {current_price} hit SL {pos['stop_loss']}")
+                print(f"💰 Realized PnL: ${pnl:.2f}")
+                self.execute_sell(pos)
 
     def execute_sell(self, position, reason='SIGNAL', quantity=None):
         try:
