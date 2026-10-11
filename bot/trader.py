@@ -3,6 +3,7 @@ Trading Execution Module
 Orchestrates the trading loop
 """
 import logging
+import sys
 import time
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -40,6 +41,7 @@ class Trader:
         
         # Trading pairs to monitor
         self.trading_pairs = config.TRADING_PAIRS
+        self.approval_deferred_until = {}
         
         logger.info(f"Starting capital: ${self.starting_capital:.2f}")
         logger.info(f"Trading pairs: {self.trading_pairs}")
@@ -71,6 +73,9 @@ class Trader:
     def execute_buy(self, symbol: str, amount_usdt: float, analysis: Dict) -> bool:
         """Execute a buy order"""
         try:
+            if not self.request_trade_decision(symbol, amount_usdt, analysis):
+                return False
+
             order = self.exchange.place_market_buy(symbol, amount_usdt)
             if not order:
                 return False
@@ -109,6 +114,55 @@ class Trader:
         except Exception as e:
             logger.error(f"Buy execution failed for {symbol}: {e}")
             return False
+
+    def request_trade_decision(self, symbol: str, amount_usdt: float, analysis: Dict) -> bool:
+        """Require an explicit BUY decision before placing a new position."""
+        price = self.exchange.get_current_price(symbol)
+        if price <= 0:
+            logger.warning("Skipping %s: unable to verify current price before review", symbol)
+            return False
+
+        stop = price * (1 - config.STOP_LOSS_PERCENT / 100)
+        target = price * (1 + config.TAKE_PROFIT_PERCENT / 100)
+        reward_risk = (target - price) / (price - stop)
+        estimated_risk = amount_usdt * config.STOP_LOSS_PERCENT / 100
+
+        print("\n" + "=" * 60)
+        print(f"TRADE REVIEW — {symbol}")
+        print(f"Bull case: {', '.join(analysis.get('reasons', [])) or analysis['signal'].name}")
+        print(f"Signal: {analysis['signal'].name} | Confidence: {analysis['confidence']}%")
+        print(f"Entry: ~${price:.4f} | Size: ~${amount_usdt:.2f} USDT")
+        print(f"Stop: ${stop:.4f} | Target: ${target:.4f}")
+        print(f"Estimated risk: ${estimated_risk:.2f} | Reward/risk: {reward_risk:.2f}:1")
+        if reward_risk < 2:
+            print("Skeptic: projected reward/risk is below 2:1; WAIT or SKIP is the cautious choice.")
+        else:
+            print("Skeptic: estimates are not confirmation; fees, slippage, and failed setups can still cause losses.")
+
+        decision = "SKIP"
+        if sys.stdin.isatty():
+            while True:
+                try:
+                    choice = input("Choose [B]UY / [W]AIT / [S]KIP: ").strip().lower()
+                except EOFError:
+                    break
+                if choice in ("b", "buy"):
+                    decision = "BUY"
+                    break
+                if choice in ("w", "wait"):
+                    decision = "WAIT"
+                    break
+                if choice in ("s", "skip"):
+                    break
+                print("Enter BUY, WAIT, or SKIP.")
+        else:
+            print("No interactive terminal available; defaulting to SKIP.")
+
+        if decision != "BUY":
+            self.approval_deferred_until[symbol] = time.time() + 15 * 60
+            logger.info("%s %s by operator; deferred until next 15-minute review", symbol, decision)
+            return False
+        return True
     
     def execute_sell(self, symbol: str, reason: str) -> bool:
         """Execute a sell order"""
@@ -174,6 +228,8 @@ class Trader:
         for symbol in self.trading_pairs:
             # Skip if already have position
             if self.risk_manager.has_position(symbol):
+                continue
+            if time.time() < self.approval_deferred_until.get(symbol, 0):
                 continue
             
             analysis = self.analyze_pair(symbol)

@@ -1,6 +1,6 @@
 # BinanceBot — Smart Trader V3
 
-Automated spot trading bot for BTC/ETH on Binance. Targets high-probability setups during EU and US sessions with a 3-stage exit system designed to lock partial profit early and let winners run.
+Spot trading bot for BTC/ETH on Binance. It filters for setups during EU and US sessions, then requires an interactive BUY / WAIT / SKIP decision before every new position.
 
 ---
 
@@ -9,6 +9,7 @@ Automated spot trading bot for BTC/ETH on Binance. Targets high-probability setu
 - **Session filtering** — only trades EU (7–11pm NZST) and US (1–5am NZST) sessions
 - **ATR volatility gate** — skips setups where ATR < 0.8% of price (no chop)
 - **6-point entry scoring** — trend, momentum, volume, breakout, volatility expansion, trend strength
+- **Manual trade review** — shows the thesis, estimated entry/stop/target, reward-to-risk, and a rule-based skeptical check before asking for BUY / WAIT / SKIP
 - **Fixed $60 USDT position sizing** — consistent risk every trade
 - **True net 1:2 R:R** — take-profit is fee-adjusted so the net reward is actually 2R
 - **3-stage exit** — TP1 at 1R (40%), TP2 at 2R (30%), runner trails at 3% below max
@@ -37,21 +38,23 @@ Automated spot trading bot for BTC/ETH on Binance. Targets high-probability setu
 
 2. **Install dependencies**
    ```bash
-   pip install -r requirements.txt
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install -r python-bot/requirements.txt
    ```
 
 3. **Create a `.env` file** in the repo root:
    ```
    BINANCE_API_KEY=your_api_key
-   BINANCE_API_SECRET=your_api_secret
-   TELEGRAM_TOKEN=your_telegram_bot_token
+   BINANCE_SECRET_KEY=your_api_secret
+   TELEGRAM_BOT_TOKEN=your_telegram_bot_token
    TELEGRAM_CHAT_ID=your_chat_id
    ```
 
-4. **Confirm paper mode is on** (it is by default)
-   In `python-bot/smart_trader_v3_live.py`, line 66:
+4. **Keep paper mode on while testing** (it is on by default; do not turn it off yet)
+   In `python-bot/smart_trader_v3_live.py`:
    ```python
-   DRY_RUN = True   # change to False when ready to go live
+   DRY_RUN = True
    ```
 
 ---
@@ -63,7 +66,13 @@ cd python-bot
 python smart_trader_v3_live.py
 ```
 
-The bot prints a startup banner and sends a Telegram message confirming paper or live mode.
+Run from an interactive terminal; without one, trade reviews safely default to SKIP.
+
+For each qualified signal, the bot prints its strategy thesis, market context, indicative position size, stop, target, and reward-to-risk. Its skeptical check flags a projected reward-to-risk below 2:1 and reminds you that estimates do not ensure a valid setup. Enter `BUY`, `WAIT`, or `SKIP`; `WAIT` and `SKIP` both defer that pair until the next 15-minute review. All position exits remain automatic.
+
+The skeptical check is a local rule-based summary, not a panel of independent AI agents. Exit monitoring runs in this process; the bot does not place exchange-side protective stop orders. A disconnect or process failure can therefore leave a live position unmanaged.
+
+The separate root `main.py` bot and the `python-bot/test_strategy.py` prototype also request an explicit decision before opening or adding to a position. Run only one bot at a time.
 
 ---
 
@@ -73,8 +82,8 @@ All constants are at the top of `python-bot/smart_trader_v3_live.py`:
 
 | Constant | Default | Description |
 |---|---|---|
-| `DRY_RUN` | `True` | Paper mode — no real orders placed |
-| `TRADING_PAIRS` | `['BTCUSDT', 'ETHUSDT']` | Symbols to trade |
+| `DRY_RUN` | `True` | Paper mode — no real orders placed; BUY approval only simulates the entry |
+| `TRADING_PAIRS` | `['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT']` | USDT pairs to scan; the bot still allows only one open position |
 | `POSITION_USDT_TARGET` | `60.0` | Position size in USDT |
 | `MAX_TRADES_PER_DAY` | `3` | Hard cap on daily entries |
 | `ATR_SL_MULTIPLIER` | `1.5` | Stop loss = ATR × 1.5 below entry |
@@ -110,4 +119,4 @@ Before TP1 is hit, the trailing stop is tight (1.5%) to cut losers fast. After T
 
 ## Risk Warning
 
-This bot trades real money. Always run in paper mode (`DRY_RUN = True`) for at least 2–3 sessions before going live. Past performance in testing does not guarantee future results. This is not financial advice.
+This bot can trade real money when `DRY_RUN = False`. Keep it in paper mode for at least 2–3 sessions and verify entries, exits, sizing, and recovery behavior. Do not consider live trading until exchange-side protective stops and position recovery are implemented and tested; exit monitoring currently runs only inside this process. Manual BUY approval does not make a strategy profitable or protect against outages. Past performance in testing does not guarantee future results. This is not financial advice.

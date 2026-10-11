@@ -1,15 +1,20 @@
 import pandas as pd
 import numpy as np
 import time
+import os
+import sys
 from binance.client import Client
-from binance.enums import *
+from binance.enums import ORDER_TYPE_MARKET, SIDE_BUY, SIDE_SELL
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==============================
 # CONFIG
 # ==============================
 
-API_KEY = "cb93KyQgjtwOrWFoZQCnk3P0ZWNnekaz0kmjwLs6R51yH48rwjGtASg6rrJtBV0c"
-API_SECRET = "et7smj2P4wwOZwfAEz4D2VLOZMAElgRaxUVX2Uj6ugj9tGKR8cc6LqsnbpBBTeud"
+API_KEY = os.getenv("BINANCE_API_KEY", "")
+API_SECRET = os.getenv("BINANCE_SECRET_KEY", "")
 
 TRADING_PAIRS = ["BTCUSDT", "ETHUSDT"]
 
@@ -87,6 +92,45 @@ class SmartTrader:
 
     def __init__(self):
         self.positions = {}
+        self.approval_deferred_until = {}
+
+    def request_trade_decision(self, symbol, thesis, price, size, stop, target):
+        risk = max(price - stop, 0)
+        reward_risk = (target - price) / risk if risk else 0
+        print("\n" + "=" * 60)
+        print(f"TRADE REVIEW — {symbol}")
+        print(f"Bull case: {thesis}")
+        print(f"Entry: ~${price:.4f} | Size: ~${size:.2f} USDT")
+        print(f"Stop: ${stop:.4f} | Target: ${target:.4f}")
+        print(f"Estimated risk: ${risk * size / price:.2f} | Reward/risk: {reward_risk:.2f}:1")
+        if reward_risk < 2:
+            print("Skeptic: projected reward/risk is below 2:1; WAIT or SKIP is the cautious choice.")
+        else:
+            print("Skeptic: estimates are not confirmation; fees, slippage, and failed setups can still cause losses.")
+
+        decision = "SKIP"
+        if sys.stdin.isatty():
+            while True:
+                try:
+                    choice = input("Choose [B]UY / [W]AIT / [S]KIP: ").strip().lower()
+                except EOFError:
+                    break
+                if choice in ("b", "buy"):
+                    decision = "BUY"
+                    break
+                if choice in ("w", "wait"):
+                    decision = "WAIT"
+                    break
+                if choice in ("s", "skip"):
+                    break
+                print("Enter BUY, WAIT, or SKIP.")
+        else:
+            print("No interactive terminal available; defaulting to SKIP.")
+
+        if decision != "BUY":
+            self.approval_deferred_until[symbol] = time.time() + 15 * 60
+            return False
+        return True
 
     def analyze_market(self, df):
         close = df['close']
@@ -106,6 +150,12 @@ class SmartTrader:
         trade_value = usdt_balance * POSITION_SIZE_PCT * size
 
         price = df['close'].iloc[-1]
+        atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
+        stop = price - atr * ATR_SL_MULTIPLIER
+        target = price + atr * ATR_TP_MULTIPLIER
+        if not self.request_trade_decision(symbol, tag, price, trade_value, stop, target):
+            return
+
         qty = trade_value / price
         qty = round_qty(symbol, qty)
 
@@ -119,8 +169,6 @@ class SmartTrader:
                 type=ORDER_TYPE_MARKET,
                 quantity=qty
             )
-
-            atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
 
             self.positions[symbol] = {
                 "entry": price,
@@ -141,7 +189,7 @@ class SmartTrader:
 
         pos = self.positions[symbol]
 
-        if pos["added"]:
+        if pos["added"] or time.time() < self.approval_deferred_until.get(symbol, 0):
             return
 
         price = df['close'].iloc[-1]
@@ -154,6 +202,13 @@ class SmartTrader:
 
         qty = trade_value / price
         qty = round_qty(symbol, qty)
+        atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
+        stop = price - atr * ATR_SL_MULTIPLIER
+        target = price + atr * ATR_TP_MULTIPLIER
+        if qty <= 0 or not self.request_trade_decision(
+            symbol, "Add to an existing position", price, qty * price, stop, target
+        ):
+            return
 
         try:
             client.create_order(
@@ -247,6 +302,8 @@ class SmartTrader:
             # ENTRY
             # ======================
             if symbol not in self.positions:
+                if time.time() < self.approval_deferred_until.get(symbol, 0):
+                    continue
 
                 # SCOUT inside range (optional early entry)
                 if is_range and score >= 2:

@@ -23,12 +23,12 @@ Pairs: BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, BNBUSDT
 
 import logging
 import os
+import sys
 import time
 import json
 from datetime import datetime
 from binance.client import Client
-from binance.enums import *
-from binance.helpers import round_step_size
+from binance.enums import ORDER_TYPE_MARKET, SIDE_BUY
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
@@ -44,7 +44,10 @@ logging.basicConfig(
     format="%(asctime)s - %(message)s"
 )
 
-TRADING_PAIRS         = ['BTCUSDT', 'ETHUSDT']
+TRADING_PAIRS         = [
+    'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT',
+    'XRPUSDT', 'ADAUSDT', 'DOGEUSDT',
+]
 TRAILING_STOP         = 0.985
 RUNNER_TRAIL          = 0.970   # 3% below max_price — wide enough to let winners run
 MAX_TRADES_PER_DAY    = 3
@@ -64,6 +67,7 @@ POSITION_USDT_MIN     = 55.0   # minimum position value in USDT
 POSITION_USDT_MAX     = 65.0   # maximum position value in USDT
 POSITION_USDT_TARGET  = 60.0   # target position value in USDT per trade
 DRY_RUN               = True   # Paper mode: signals fire, NO real orders placed. Set False to go live.
+APPROVAL_DEFER_SECONDS = 15 * 60  # Recheck a declined setup after the next 15m candle.
 
 
 class EntryEngine:
@@ -554,6 +558,7 @@ class SmartTrader:
         # 5% drawdown from starting balance kills the bot
         # ════════════════════════════════════════════════════════════════════
         self.starting_balance = 468.35
+        self.paper_balance = self.starting_balance  # Simulated USDT balance used in DRY_RUN
         self.circuit_breaker_percent = 0.05
         self.circuit_breaker_limit = self.starting_balance * (1 - self.circuit_breaker_percent)
 
@@ -627,6 +632,7 @@ class SmartTrader:
         self.last_reset_date = datetime.now().date()
         self.last_week_reset_key = self._get_week_key()
         self.daily_start_balance = None       # Set on first balance fetch of the day
+        self.approval_deferred_until = {}
 
         # Telegram
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -705,6 +711,8 @@ class SmartTrader:
             return None
 
     def get_balance(self):
+        if DRY_RUN:
+            return self.paper_balance
         try:
             account = self.client.get_account()
             for asset in account['balances']:
@@ -1443,24 +1451,6 @@ class SmartTrader:
         return position_size
 
     # ════════════════════════════════════════════════════════════════════
-    # EXECUTE TRADE (limit order primitive)
-    # ════════════════════════════════════════════════════════════════════
-    def execute_trade(self, symbol, side, quantity, price):
-        try:
-            order = self.client.create_order(
-                symbol=symbol,
-                side=side,
-                type='LIMIT',
-                timeInForce='GTC',
-                quantity=quantity,
-                price=str(price),
-            )
-            return order
-        except Exception as e:
-            print(f"   ❌ Execution error ({symbol} {side}): {e}")
-            return None
-
-    # ════════════════════════════════════════════════════════════════════
     # EXECUTE BUY
     # ════════════════════════════════════════════════════════════════════
     def execute_buy(self, symbol, signal):
@@ -1476,6 +1466,10 @@ class SmartTrader:
         # Daily trade cap
         if self.daily_trades >= MAX_TRADES_PER_DAY:
             print(f"   🛑 Max trades reached ({self.daily_trades}/{MAX_TRADES_PER_DAY})")
+            return None
+
+        if signal.get('forced'):
+            print(f"   ⛔ Forced setups are disabled; only qualified strategy signals can be reviewed.")
             return None
 
         # Global 15-minute cooldown (any symbol)
@@ -1502,7 +1496,29 @@ class SmartTrader:
                 return None
 
             balance = self.get_balance()
-            price = signal['price']
+            signal_price = float(signal['price'])
+            if signal_price <= 0:
+                print(f"   ⚠️ {symbol} skipped — signal price is invalid.")
+                return None
+            price = self.get_price(symbol)
+            if not price:
+                print(f"   ⚠️ {symbol} skipped — could not verify the current market price.")
+                return None
+
+            pre_slippage = abs(price - signal_price) / signal_price
+            if pre_slippage > MAX_SLIPPAGE:
+                print(f"   ⚠️ {symbol} skipped — price moved {pre_slippage:.3%} since the signal.")
+                return None
+
+            review = self.preview_trade(symbol, signal, price, balance, strong_setup)
+            if review is None:
+                return None
+            decision = self.request_trade_decision(symbol, signal, review)
+            if decision != 'BUY':
+                self.approval_deferred_until[symbol] = time.time() + APPROVAL_DEFER_SECONDS
+                print(f"   ⏸️ {symbol} {decision}; setup deferred until the next 15m review.")
+                return None
+
             entry_time = datetime.now()
 
             # Stop loss: structure-based, never more than 3%
@@ -1519,19 +1535,13 @@ class SmartTrader:
                 quantity = POSITION_USDT_TARGET / price  # re-derive cleanly
             print(f"   📐 {trade_type} | Size: ${position_value:.2f} USDT | Qty: {quantity:.5f}")
 
-            # Pre-order slippage check: current price vs signal price
-            signal_price = signal.get('price', price)
-            pre_slippage = abs(price - signal_price) / signal_price
-            if pre_slippage > MAX_SLIPPAGE:
-                print(f"   ⚠️ {symbol} SKIP — slippage too high ({pre_slippage:.3%} > {MAX_SLIPPAGE:.3%})")
-                return None
-
             step_size, precision = self.get_symbol_precision(symbol)
             quantity = round(quantity, precision)
 
             if DRY_RUN:
                 fill_price = price
                 entry_fee  = fill_price * quantity * FEE_RATE
+                self.paper_balance -= fill_price * quantity + entry_fee
                 print(f"   🧪 [DRY RUN] Simulated BUY {symbol} @ ${fill_price:.4f} | Qty: {quantity} | Fee: ${entry_fee:.4f}")
                 msg = f"🧪 [DRY RUN] WOULD BUY {symbol} @ ${fill_price:.4f} | Qty: {quantity:.5f}"
                 self.send_telegram(msg)
@@ -1545,8 +1555,12 @@ class SmartTrader:
                 fill_price = float(order['fills'][0]['price'])
                 slippage = abs(fill_price - price) / price
                 if slippage > MAX_SLIPPAGE:
-                    print(f"   ⚠️ {symbol} fill rejected — slippage {slippage:.3%} > MAX {MAX_SLIPPAGE:.3%}")
-                    return None
+                    warning = (
+                        f"⚠️ {symbol} fill slippage {slippage:.3%} exceeded "
+                        f"the {MAX_SLIPPAGE:.3%} limit; position will still be tracked."
+                    )
+                    print(f"   {warning}")
+                    self.send_telegram(warning)
                 entry_fee = self.calculate_order_fee_usdt(order, symbol, fallback_price=fill_price)
 
             if 'tp_percent_override' in signal:
@@ -1555,9 +1569,6 @@ class SmartTrader:
             elif signal.get('atr'):
                 atr_val     = signal['atr']
                 sl_distance = atr_val * ATR_SL_MULTIPLIER
-                if sl_distance < fill_price * 0.003:
-                    print(f"   ⚠️ {symbol} SL too tight ({sl_distance/fill_price:.3%}) — skipping")
-                    return None
                 stop_loss   = fill_price - sl_distance
                 take_profit = fill_price + (sl_distance * 2) + (fill_price * TP_FEE_BUFFER)  # net 1:2 R:R
             else:
@@ -1569,6 +1580,10 @@ class SmartTrader:
                 )
             actual_risk = fill_price - stop_loss
             rr_target = round((take_profit - fill_price) / max(actual_risk, 1e-9), 2)
+            risk_percent = (
+                (actual_risk * quantity / balance)
+                if balance > 0 else 0.0
+            )
 
             position = {
                 'trade_id': f"{symbol}-{int(entry_time.timestamp())}",
@@ -1650,6 +1665,80 @@ class SmartTrader:
         finally:
             self.trade_lock = False
 
+    def preview_trade(self, symbol, signal, entry_price, balance, strong_setup):
+        """Calculate the indicative order plan shown before manual approval."""
+        trade_type = signal.get('trade_type', 'A+')
+        if 'tp_percent_override' in signal:
+            take_profit = entry_price * (1 + signal['tp_percent_override'] / 100)
+            stop_loss = entry_price * (1 - signal['sl_percent_override'] / 100)
+        elif signal.get('atr'):
+            stop_distance = signal['atr'] * ATR_SL_MULTIPLIER
+            if stop_distance < entry_price * 0.003:
+                print(f"   ⚠️ {symbol} skipped — stop distance is below 0.3% of price.")
+                return None
+            stop_loss = entry_price - stop_distance
+            take_profit = entry_price + (stop_distance * 2) + (entry_price * TP_FEE_BUFFER)
+        else:
+            take_profit, stop_loss = self.set_tp_sl(
+                entry_price,
+                score=signal.get('confidence'),
+                strong_trend=strong_setup,
+                trade_type=trade_type,
+            )
+
+        risk_distance = entry_price - stop_loss
+        reward_distance = take_profit - entry_price
+        if risk_distance <= 0 or reward_distance <= 0:
+            print("   ⚠️ Trade plan has an invalid stop or target; not eligible for approval.")
+            return None
+
+        quantity = POSITION_USDT_TARGET / entry_price
+        return {
+            'entry': entry_price,
+            'stop': stop_loss,
+            'target': take_profit,
+            'rr': reward_distance / risk_distance,
+            'size': quantity * entry_price,
+            'risk_usdt': quantity * risk_distance,
+            'risk_percent': quantity * risk_distance / balance * 100 if balance > 0 else 0,
+        }
+
+    def request_trade_decision(self, symbol, signal, review):
+        """Require an explicit operator decision; any non-BUY response is safe."""
+        print("\n" + "=" * 60)
+        print(f"   TRADE REVIEW — {symbol}")
+        print(f"   Bull case: {signal.get('reason', 'Strategy signal passed entry filters.')}")
+        print(f"   Market: {signal.get('market_type', 'N/A')} | Zone: {signal.get('zone', 'N/A')} "
+              f"| Strength: {signal.get('strength', 0):.2f}")
+        print(f"   Entry: ~${review['entry']:.4f} | Size: ~${review['size']:.2f} USDT")
+        print(f"   Stop: ${review['stop']:.4f} | Target: ${review['target']:.4f}")
+        print(f"   Estimated risk: ${review['risk_usdt']:.2f} ({review['risk_percent']:.2f}% of balance)")
+        print(f"   Reward/risk: {review['rr']:.2f}:1")
+        if review['rr'] < 2:
+            print(f"   Skeptic: reward/risk is below 2:1; WAIT or SKIP is the cautious choice.")
+        else:
+            print("   Skeptic: this is a strategy estimate, not confirmation; fees, slippage, and a failed setup can still cause losses.")
+        print("   These are estimates; the fill and realized risk may differ.")
+
+        if not sys.stdin.isatty():
+            print("   No interactive terminal available; defaulting to SKIP.")
+            return 'SKIP'
+
+        while True:
+            try:
+                choice = input("   Choose [B]UY / [W]AIT / [S]KIP: ").strip().lower()
+            except EOFError:
+                print("\n   No interactive approval available; defaulting to SKIP.")
+                return 'SKIP'
+
+            if choice in ('b', 'buy'):
+                return 'BUY'
+            if choice in ('w', 'wait'):
+                return 'WAIT'
+            if choice in ('s', 'skip'):
+                return 'SKIP'
+            print("   Enter BUY, WAIT, or SKIP.")
+
     # ════════════════════════════════════════════════════════════════════
     # EXECUTE SELL
     # ════════════════════════════════════════════════════════════════════
@@ -1671,7 +1760,9 @@ class SmartTrader:
     def execute_sell(self, position, reason='SIGNAL', quantity=None):
         try:
             symbol = position['symbol']
-            if quantity is None:
+            if quantity is None and DRY_RUN:
+                sell_quantity = position['quantity']  # paper position, not the real account
+            elif quantity is None:
                 free_balance = self.get_available_quantity(symbol)
                 sell_quantity = free_balance * 0.999
             else:
@@ -1686,6 +1777,7 @@ class SmartTrader:
             if DRY_RUN:
                 fill_price = self.get_price(symbol) or position['entry_price']
                 exit_fee   = fill_price * sell_quantity * FEE_RATE
+                self.paper_balance += fill_price * sell_quantity - exit_fee
                 print(f"   🧪 [DRY RUN] Simulated SELL {symbol} @ ${fill_price:.4f} | Qty: {sell_quantity} | Reason: {reason}")
             else:
                 order = self.client.order_market_sell(
@@ -1851,6 +1943,55 @@ class SmartTrader:
         with open(log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(trade_data, ensure_ascii=True) + "\n")
 
+    def write_status(self):
+        """Snapshot for dashboard.py. Must never interrupt the trading loop."""
+        try:
+            positions = []
+            for pos in self.open_positions:
+                symbol = pos['symbol']
+                price = self.get_price(symbol) or pos['entry_price']
+                managed = self.positions.get(symbol, {})
+                positions.append({
+                    'symbol': symbol,
+                    'entry': pos['entry_price'],
+                    'qty': pos['quantity'],
+                    'price': price,
+                    'stop_loss': managed.get('sl', pos['stop_loss']),
+                    'take_profit': managed.get('tp2', pos['take_profit']),
+                    'pnl': (price - pos['entry_price']) * pos['quantity'],
+                    'pnl_pct': (price / pos['entry_price'] - 1) * 100,
+                    'entry_time': pos['entry_time'].isoformat() if pos.get('entry_time') else None,
+                })
+            balance = self.get_balance()
+            session, _ = self.get_market_session()
+            status = {
+                'mode': 'PAPER' if DRY_RUN else 'LIVE',
+                'pid': os.getpid(),
+                'last_update': datetime.now().isoformat(timespec='seconds'),
+                'balance': balance,
+                'equity': balance + sum(p['price'] * p['qty'] for p in positions),
+                'starting_balance': self.starting_balance,
+                'daily_trades': self.daily_trades,
+                'max_trades': self.max_trades_per_day,
+                'daily_profit': self.daily_profit,
+                'daily_loss': self.daily_loss,
+                'session': session,
+                'trade_status': getattr(self, 'trade_status', ''),
+                'wins': self.stats['wins'],
+                'losses': self.stats['losses'],
+                'total_pnl': self.stats['total_pnl'],
+                'open_positions': len(positions),
+                'positions': positions,
+            }
+            status_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+            os.makedirs(status_dir, exist_ok=True)
+            status_path = os.path.join(status_dir, 'bot_status.json')
+            with open(status_path + '.tmp', 'w', encoding='utf-8') as f:
+                json.dump(status, f)
+            os.replace(status_path + '.tmp', status_path)
+        except Exception:
+            pass
+
     # ════════════════════════════════════════════════════════════════════
     # UNIFIED ENTRY CHECK
     # ════════════════════════════════════════════════════════════════════
@@ -1917,11 +2058,21 @@ class SmartTrader:
         top_atr = atr.iloc[-1]
         if score == 3 and volatility_expanding and breakout:
             print(f"   ⭐ A+ {symbol} score={score}/6 @ {price:.4f}")
-            self.execute_trade(symbol, price, atr=top_atr, trade_type='A+_BREAKOUT', small_position=False)
+            self.execute_buy(symbol, {
+                'action': 'BUY', 'price': price, 'atr': top_atr,
+                'strength': score / 6, 'confidence': score,
+                'trade_type': 'A+_BREAKOUT', 'entry_type': 'BREAKOUT',
+                'reason': f'Breakout with expanding volatility; score {score}/6',
+            })
             return
         if score >= 2 and volatility_expanding and breakout:
             print(f"   🔍 SCOUT {symbol} score={score}/6 @ {price:.4f}")
-            self.execute_trade(symbol, price, atr=top_atr, trade_type='SCOUT', small_position=True)
+            self.execute_buy(symbol, {
+                'action': 'BUY', 'price': price, 'atr': top_atr,
+                'strength': score / 6, 'confidence': score,
+                'trade_type': 'SCOUT', 'entry_type': 'BREAKOUT',
+                'reason': f'Scout breakout with expanding volatility; score {score}/6',
+            })
 
     # ════════════════════════════════════════════════════════════════════
     # UNIFIED EXIT
@@ -2081,35 +2232,6 @@ class SmartTrader:
                 self.execute_sell(position, 'TIMEOUT')
                 continue
 
-            # 4. SCOUT ADD-ON: scale to full position when breakout confirms
-            if position.get('position_type') == 'SCOUT':
-                print(f"   [SCOUT] {symbol} | position_open: True | already_added: {position.get('added', False)}")
-            if position.get('position_type') == 'SCOUT' and not position.get('added'):
-                try:
-                    candle = self.get_candles(symbol, '15m', 3)
-                    if candle is not None and len(candle) >= 2:
-                        vol     = candle['volume'].iloc[-1]
-                        avg_vol = candle['volume'].iloc[:-1].mean()
-                        resistance = position.get('entry_resistance', position['entry_price'] * 1.005)
-                        breakout_confirmed = (
-                            current_price > resistance and
-                            vol > avg_vol * MIN_VOLUME_MULTIPLIER and
-                            candle['close'].iloc[-1] > resistance
-                        )
-                        not_too_extended = current_price <= position['entry_price'] * 1.01
-                        close_above_entry = candle['close'].iloc[-1] > position['entry_price']
-                        if breakout_confirmed and not_too_extended and close_above_entry:
-                            balance  = self.get_balance()
-                            add_qty  = round((balance * 0.10) / current_price, 6)
-                            if add_qty * current_price >= 10:
-                                self.execute_trade(symbol, SIDE_BUY, add_qty, current_price)
-                                position['quantity'] += add_qty
-                                position['position_type'] = 'A+'
-                                position['added'] = True
-                                print(f"   ➕ SCOUT ADD-ON {symbol}: +{add_qty} @ ${current_price:.4f} → upgraded to A+")
-                except Exception as e:
-                    print(f"   ⚠️ Scout add-on error: {e}")
-
             # 5. BREAK-EVEN SHIELD: move SL to entry at 1% profit
             if pnl_percent >= self.break_even_trigger and not position.get('be_active'):
                 position['stop_loss'] = position['entry_price']
@@ -2175,13 +2297,6 @@ class SmartTrader:
                     print(f"\n   🔒 TRAILING STOP HIT {symbol} @ ${current_price:.4f}")
                     self.execute_sell(position, 'TRAILING_STOP')
                     continue
-
-            # 4. MOMENTUM ADD-ON: scale in only after 0.5x ATR confirmed move
-            add_threshold = position['entry_price'] + (position.get('atr', 0) * 0.5)
-            trade_in_profit = current_price > add_threshold
-            breakout_continues = current_price > position.get('entry_resistance', current_price)
-            if trade_in_profit and breakout_continues and not position.get('scaled_in'):
-                self.add_small_position(position, current_price)
 
             # 8. TP1: sell PARTIAL_TP_RATIO, move SL to entry + BREAKEVEN_BUFFER
             if not position.get('tp1_hit') and current_price >= position['tp1']:
@@ -2264,28 +2379,6 @@ class SmartTrader:
     # ════════════════════════════════════════════════════════════════════
     # CAN TRADE (single unified gate)
     # ════════════════════════════════════════════════════════════════════
-    def add_small_position(self, position, current_price, add_pct=0.05):
-        if position.get('scaled_in'):
-            return
-        balance = self.get_balance()
-        add_qty = (balance * add_pct) / current_price
-        step_size, precision = self.get_symbol_precision(position['symbol'])
-        add_qty = round(add_qty, precision)
-        if add_qty * current_price < 10:
-            return
-        try:
-            self.client.create_order(
-                symbol=position['symbol'],
-                side='BUY',
-                type='MARKET',
-                quantity=add_qty,
-            )
-            position['quantity'] += add_qty
-            position['scaled_in'] = True
-            print(f"   ➕ SCALE-IN {position['symbol']} +{add_qty} @ ${current_price:.4f}")
-        except Exception as e:
-            print(f"   ❌ Scale-in error: {e}")
-
     def trailing_stop(self, current_price, entry_price):
         if current_price > entry_price * 1.01:   # price up > 1%
             return current_price * 0.995         # lock profit at 0.5% below current
@@ -2445,6 +2538,9 @@ class SmartTrader:
     # SYNC EXISTING POSITIONS ON STARTUP
     # ════════════════════════════════════════════════════════════════════
     def sync_existing_positions(self):
+        if DRY_RUN:
+            print("\n   🧪 Paper mode — skipping account position sync")
+            return
         print("\n   🔄 Syncing existing positions...")
         known_entries = {
             'BTCUSDT': 72753.0
@@ -2553,6 +2649,7 @@ class SmartTrader:
 
                 # ── Manage open positions first ───────────────────────
                 self.check_positions()
+                self.write_status()
 
                 # ── Position cap ──────────────────────────────────────
                 if len(self.open_positions) >= self.max_positions:
@@ -2562,6 +2659,7 @@ class SmartTrader:
 
                 # ── Check if trading is allowed ───────────────────────
                 can_trade_result, reason = self.can_trade()
+                self.trade_status = reason
 
                 if not can_trade_result:
                     # Hard stops - sleep until new day
@@ -2592,6 +2690,10 @@ class SmartTrader:
                     if self.position_open.get(symbol, False):
                         continue
 
+                    deferred_until = self.approval_deferred_until.get(symbol, 0)
+                    if time.time() < deferred_until:
+                        continue
+
                     # Position cap re-check
                     if len(self.open_positions) >= self.max_positions:
                         break
@@ -2606,19 +2708,6 @@ class SmartTrader:
                     now_hour = datetime.now(nz).hour
                     if not ((19 <= now_hour <= 23) or (1 <= now_hour <= 5)):
                         continue
-
-                    # Unified entry check (score-based)
-                    df_entry = self.get_candles(symbol, '15m', 60)
-                    if df_entry is not None and len(df_entry) >= 32:
-                        atr = (df_entry['high'] - df_entry['low']).rolling(14).mean().iloc[-1]
-                        if atr < df_entry['close'].iloc[-1] * 0.008:
-                            print(f"   ⚠️ {symbol} skipped — low volatility (ATR {atr:.4f} < 0.8% of price)")
-                        else:
-                            recent_move = abs(df_entry['close'].iloc[-1] - df_entry['close'].iloc[-5])
-                            if recent_move > atr * 0.5:
-                                print(f"   ⚠️ {symbol} skipped — late entry (move {recent_move:.4f} > 0.5×ATR {atr * 0.5:.4f})")
-                            else:
-                                self.check_entry(symbol, df_entry)
 
                     signal = self.analyze(symbol)
 
@@ -2658,27 +2747,4 @@ class SmartTrader:
 
 if __name__ == '__main__':
     trader = SmartTrader()
-    balance = trader.get_balance()
-    trader.send_telegram(
-        f"🚀 Smart Trader V2 Started\n"
-        f"Balance: ${balance:.2f}\n"
-        f"Target: ${trader.daily_profit_target}/day\n"
-        f"Pairs: {', '.join(trader.trading_pairs)}"
-    )
-
-    engine = trader.entry_engine
-
-    while True:
-        try:
-            market_data = trader.get_market_data()
-            signals = engine.scan_market(market_data)
-            bought = any(s.get('action') == 'BUY' for s in signals)
-            if not bought:
-                trader.forced_b_plus_attempt(market_data)
-            time.sleep(5)
-        except KeyboardInterrupt:
-            print("\n\n   🛑 Bot stopped by user")
-            break
-        except Exception as e:
-            print(f"\n   ❌ Loop error: {e}")
-            time.sleep(10)
+    trader.run()
